@@ -8,6 +8,7 @@ from app.core.schemas import CamelModel
 class JobOut(CamelModel):
     id: UUID
     project_id: UUID | None = None
+    canvas_id: UUID | None = None
     job_type: str
     target_id: str | None = None
     status: str

@@ -23,6 +23,8 @@ def test_all_v1_tables_registered_in_metadata():
         "episodes",
         "project_assets",
         "storyboard_clips",
+        "canvases",
+        "user_assets",
         "jobs",
     }
     assert expected.issubset(set(Base.metadata.tables.keys()))
@@ -43,4 +45,4 @@ def test_alembic_has_single_head():
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
     assert len(heads) == 1
-    assert heads[0] == "0003_model_cat_sync"
+    assert heads[0] == "0004_canvas_and_assets"

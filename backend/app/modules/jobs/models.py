@@ -28,6 +28,9 @@ JOB_TYPES = (
     "storyboard_generate",
     "clip_video",
     "episode_compose",
+    "canvas_text",
+    "canvas_image",
+    "canvas_video",
 )
 
 JOB_STATUSES = ("queued", "running", "polling", "succeeded", "failed", "review")
@@ -39,7 +42,7 @@ class Job(TimestampMixin, Base):
         CheckConstraint(
             "job_type IN ('script_generate', 'script_regenerate', 'episode_rewrite', "
             "'episode_append', 'assets_extract', 'asset_image', 'storyboard_generate', "
-            "'clip_video', 'episode_compose')",
+            "'clip_video', 'episode_compose', 'canvas_text', 'canvas_image', 'canvas_video')",
             name="job_type_allowed",
         ),
         CheckConstraint(
@@ -47,8 +50,13 @@ class Job(TimestampMixin, Base):
             name="status_allowed",
         ),
         CheckConstraint("progress >= 0 AND progress <= 100", name="progress_range"),
+        CheckConstraint(
+            "NOT (project_id IS NOT NULL AND canvas_id IS NOT NULL)",
+            name="job_owner_exclusive",
+        ),
         Index("ix_jobs_user_created", "user_id", "created_at", "id"),
         Index("ix_jobs_project_status", "project_id", "status"),
+        Index("ix_jobs_canvas_status", "canvas_id", "status"),
         Index(
             "ix_jobs_dispatch_due",
             "dispatch_after",
@@ -61,6 +69,9 @@ class Job(TimestampMixin, Base):
     user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), nullable=False)
     project_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("projects.id", ondelete="SET NULL"), index=True
+    )
+    canvas_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("canvases.id", ondelete="SET NULL"), index=True
     )
     job_type: Mapped[str] = mapped_column(String(32), nullable=False)
     target_id: Mapped[str | None] = mapped_column(String(64))

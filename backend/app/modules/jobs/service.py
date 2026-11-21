@@ -48,6 +48,7 @@ async def create_job(
     step_label: str = "任务已排队，等待执行",
     target_id: str | None = None,
     idempotency_key: str | None = None,
+    canvas_id: UUID | None = None,
 ) -> Job:
     if idempotency_key:
         existing = await session.scalar(select(Job).where(Job.idempotency_key == idempotency_key))
@@ -58,6 +59,7 @@ async def create_job(
     job = Job(
         user_id=user_id,
         project_id=project_id,
+        canvas_id=canvas_id,
         job_type=job_type,
         target_id=target_id,
         status="queued",

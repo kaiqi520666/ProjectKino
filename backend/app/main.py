@@ -9,6 +9,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.api.v1.admin import router as admin_router
 from app.api.v1.auth import router as auth_router
+from app.api.v1.canvases import assets_router
+from app.api.v1.canvases import router as canvases_router
 from app.api.v1.credits import router as credits_router
 from app.api.v1.health import router as health_router
 from app.api.v1.jobs import router as jobs_router
@@ -90,6 +92,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(credits_router, prefix="/api/v1")
     app.include_router(models_router, prefix="/api/v1")
     app.include_router(projects_router, prefix="/api/v1")
+    app.include_router(canvases_router, prefix="/api/v1")
+    app.include_router(assets_router, prefix="/api/v1")
     app.include_router(jobs_router, prefix="/api/v1")
     app.include_router(uploads_router, prefix="/api/v1")
     app.include_router(admin_router, prefix="/api/v1")
