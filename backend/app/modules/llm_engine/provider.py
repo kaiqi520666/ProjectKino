@@ -15,7 +15,7 @@ DEFAULT_UPSTREAM_PRESET = "@preset/ds-baidu"
 
 MODEL_SETTINGS = OpenRouterModelSettings(
     timeout=300,
-    max_tokens=8192,
+    max_tokens=16384,
     openrouter_reasoning={"enabled": False},
     openrouter_usage={"include": True},
 )
