@@ -383,7 +383,7 @@ function selectModel(m: ModelCatalogItemOut) {
 .vmp-overlay {
   position: fixed;
   inset: 0;
-  z-index: 84;
+  z-index: 110;
   background: rgb(5 6 9 / 76%);
   backdrop-filter: blur(8px);
   animation: ui-fade-in 0.15s ease-out;
@@ -393,7 +393,7 @@ function selectModel(m: ModelCatalogItemOut) {
   position: fixed;
   top: 50%;
   left: 50%;
-  z-index: 85;
+  z-index: 111;
   transform: translate(-50%, -50%);
   display: flex;
   flex-direction: column;

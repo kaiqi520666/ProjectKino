@@ -10,9 +10,11 @@ import {
 import UiButton from '@/components/ui/UiButton.vue'
 import UiDialog from '@/components/ui/UiDialog.vue'
 import type { ModelCatalogItemOut } from '@/features/studio/api-types'
+import ImageModelPicker from '@/features/studio/components/ImageModelPicker.vue'
+import VideoModelPicker from '@/features/studio/components/VideoModelPicker.vue'
 import { useModelCatalog } from '@/features/studio/composables/useModelCatalog'
 import { useAuthStore } from '@/stores/auth'
-import type { CanvasGenerationSettings, CanvasImageTier, CanvasNode, CanvasNodeKind } from '../canvas-model'
+import { outputKind, type CanvasGenerationSettings, type CanvasImageTier, type CanvasNode, type CanvasNodeKind } from '../canvas-model'
 import { useCanvasPopup } from '../useCanvasPopup'
 import CanvasPromptInput from './CanvasPromptInput.vue'
 import CanvasNodeReferences from './CanvasNodeReferences.vue'
@@ -38,6 +40,7 @@ const expandedReferences = computed(() => {
   return expandedOrder.value.flatMap(id => nodes.get(id) ?? [])
 })
 const hasInput = computed(() => Boolean(prompt.value.trim()) || props.references.some(node => Boolean(node.data.text?.trim())))
+const imageReferenceCount = computed(() => props.references.filter(node => outputKind(node.type) === 'image').length)
 
 const RATIO_SHAPES: Record<string, string> = {
   '16:9': '16 / 9',
@@ -321,7 +324,30 @@ function applyPrompt() {
     <CanvasNodeReferences v-if="references.length" :nodes="references" @remove="emit('removeReference', $event)" @reorder="emit('reorderReferences', $event)" />
     <CanvasPromptInput v-if="!expanded" v-model="prompt" :references="references" />
     <div class="canvas-generation-controls">
-      <SelectRoot v-model:open="modelOpen" :model-value="selectedModelId" :disabled="!models.length" @update:model-value="onModelChange">
+      <ImageModelPicker
+        v-if="kind === 'image-generation'"
+        v-model:open="modelOpen"
+        :model-value="selectedModelId"
+        :models="models"
+        :tier="tier"
+        :disabled="!models.length"
+        :trigger-data-popup="modelTriggerKey"
+        :placeholder="catalog.loading.value ? '加载模型…' : '选择图片模型'"
+        @update:model-value="onModelChange"
+      />
+      <VideoModelPicker
+        v-else-if="kind === 'video-generation'"
+        :model-value="selectedModelId"
+        :models="models"
+        :clip-duration="durationSeconds"
+        :project-ratio="ratio"
+        :reference-count="imageReferenceCount"
+        :prompt-length="prompt.length"
+        :disabled="!models.length"
+        :placeholder="catalog.loading.value ? '加载模型…' : '选择视频模型'"
+        @update:model-value="onModelChange"
+      />
+      <SelectRoot v-else v-model:open="modelOpen" :model-value="selectedModelId" :disabled="!models.length" @update:model-value="onModelChange">
         <SelectTrigger :data-canvas-popup="modelTriggerKey" class="canvas-generation-trigger canvas-model-select" aria-label="模型">
           <Sparkles :size="16" aria-hidden="true" />
           <SelectValue class="canvas-model-value" :placeholder="catalog.loading.value ? '加载模型…' : '暂无可用模型'" />
@@ -408,7 +434,9 @@ function applyPrompt() {
 .canvas-generation-panel { width: 100%; padding: 12px 14px 10px; border: 1px solid var(--border-control); border-radius: 8px; background: var(--color-surface); box-shadow: 0 8px 22px rgb(0 0 0 / 28%); cursor: default; }
 .canvas-generation-panel:focus-within { border-color: var(--color-gold); }
 .canvas-generation-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; padding-top: 8px; border-top: 1px solid var(--border-subtle); }
-.canvas-generation-controls button { color: var(--color-muted); font-size: var(--font-size-body); cursor: pointer; }
+.canvas-generation-controls > :is(.canvas-generation-trigger, .canvas-expand, .canvas-submit) { color: var(--color-muted); font-size: var(--font-size-body); cursor: pointer; }
+.canvas-generation-controls :deep(.imp-trigger),
+.canvas-generation-controls :deep(.vmp-trigger) { height: 36px; max-width: 210px; border-radius: 6px; background: var(--color-elevated); }
 .canvas-generation-trigger { display: inline-flex; align-items: center; gap: 7px; min-height: 36px; padding: 0 9px; border: 1px solid transparent; border-radius: 6px; white-space: nowrap; }
 .canvas-generation-trigger svg { flex: none; }
 .canvas-model-select { width: 154px; border-color: var(--border-control); background: var(--color-elevated); }

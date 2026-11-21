@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 import { Check, ChevronDown, ImageIcon } from 'lucide-vue-next'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import type { ModelCatalogItemOut } from '../api-types'
@@ -10,16 +10,18 @@ const props = withDefaults(
     tier?: 'web' | '1k' | '2k' | '4k'
     disabled?: boolean
     placeholder?: string
+    triggerDataPopup?: string
   }>(),
   {
     tier: '1k',
     disabled: false,
     placeholder: '选择图片模型',
+    triggerDataPopup: undefined,
   },
 )
 
 const modelValue = defineModel<string>({ default: '' })
-const open = ref(false)
+const open = defineModel<boolean>('open', { default: false })
 
 const selectedModel = computed(
   () => props.models.find((m) => m.id === modelValue.value) ?? props.models[0] ?? null,
@@ -70,7 +72,7 @@ function selectModel(m: ModelCatalogItemOut) {
 <template>
   <PopoverRoot v-model:open="open">
     <PopoverTrigger as-child :disabled="disabled">
-      <button type="button" class="imp-trigger" :disabled="disabled" :aria-label="placeholder">
+      <button type="button" :data-canvas-popup="triggerDataPopup" class="imp-trigger" :disabled="disabled" :aria-label="placeholder">
         <ImageIcon :size="14" class="imp-trigger-icon" aria-hidden="true" />
         <span class="imp-trigger-name">{{ selectedModel?.displayName || placeholder }}</span>
         <ChevronDown :size="13" class="imp-trigger-chevron" aria-hidden="true" />
@@ -185,7 +187,7 @@ function selectModel(m: ModelCatalogItemOut) {
 
 <style>
 .imp-popover {
-  z-index: 85;
+  z-index: 110;
   width: min(470px, calc(100vw - 24px));
   max-height: min(520px, calc(100dvh - 80px));
   display: flex;
