@@ -1,7 +1,25 @@
 <script setup lang="ts">
-import { computed, inject, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { type Component, computed, inject, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Activity, AlertTriangle, Check, Copy, Eye, Image as ImageIcon, Play, RefreshCw, RotateCcw, Search, Wrench, X } from 'lucide-vue-next'
+import {
+  Activity,
+  AlertTriangle,
+  Check,
+  Clapperboard,
+  Copy,
+  Eye,
+  FileText,
+  Film,
+  Image as ImageIcon,
+  Layers,
+  Play,
+  RefreshCw,
+  RotateCcw,
+  Search,
+  Video,
+  Wrench,
+  X,
+} from 'lucide-vue-next'
 import ImagePreview from '@/components/ui/ImagePreview.vue'
 import UiDataTable, { type DataTableColumn } from '@/components/ui/UiDataTable.vue'
 import UiDateRangePicker from '@/components/ui/UiDateRangePicker.vue'
@@ -65,7 +83,7 @@ const filters = reactive<{
 
 const jobColumns: DataTableColumn[] = [
   { key: 'createdAt', label: '创建时间', width: '164px' },
-  { key: 'jobType', label: '任务类型', width: '140px' },
+  { key: 'jobType', label: '任务类型', width: '172px' },
   { key: 'status', label: '状态', width: '190px' },
   { key: 'owner', label: '用户 / 项目' },
   { key: 'reservation', label: '积分', width: '120px' },
@@ -355,6 +373,24 @@ async function submitRescue() {
   }
 }
 
+type JobTypeTone = 'script' | 'asset' | 'storyboard' | 'video' | 'default'
+
+const JOB_TYPE_META: Record<string, { icon: Component; tone: JobTypeTone }> = {
+  script_generate: { icon: FileText, tone: 'script' },
+  script_regenerate: { icon: FileText, tone: 'script' },
+  episode_rewrite: { icon: FileText, tone: 'script' },
+  episode_append: { icon: FileText, tone: 'script' },
+  assets_extract: { icon: Layers, tone: 'asset' },
+  asset_image: { icon: ImageIcon, tone: 'asset' },
+  storyboard_generate: { icon: Clapperboard, tone: 'storyboard' },
+  clip_video: { icon: Film, tone: 'video' },
+  episode_compose: { icon: Video, tone: 'video' },
+}
+
+function getJobTypeMeta(jobType: string): { icon: Component; tone: JobTypeTone } {
+  return JOB_TYPE_META[jobType] ?? { icon: Activity, tone: 'default' }
+}
+
 function statusBadgeClass(status: string) {
   if (status === 'succeeded') return 'admin-badge--success'
   if (status === 'failed' || status === 'review') return 'admin-badge--danger'
@@ -555,7 +591,16 @@ onMounted(() => loadJobs(true))
       </template>
 
       <template #cell-jobType="{ row }">
-        <span class="admin-cell-primary">{{ JOB_TYPE_LABELS[row.jobType] || row.jobType }}</span>
+        <div class="admin-job-type">
+          <span
+            class="admin-job-type-icon"
+            :class="`admin-job-type-icon--${getJobTypeMeta(row.jobType).tone}`"
+            aria-hidden="true"
+          >
+            <component :is="getJobTypeMeta(row.jobType).icon" :size="14" :stroke-width="1.8" />
+          </span>
+          <span class="admin-cell-primary">{{ JOB_TYPE_LABELS[row.jobType] || row.jobType }}</span>
+        </div>
       </template>
 
       <template #cell-status="{ row }">
@@ -886,6 +931,49 @@ onMounted(() => loadJobs(true))
 
 .admin-jobs-time {
   white-space: nowrap;
+}
+
+.admin-job-type {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.admin-job-type-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: rgb(255 255 255 / 4%);
+  color: var(--color-muted);
+}
+
+.admin-job-type-icon--script {
+  border-color: rgb(143 185 233 / 28%);
+  background: rgb(143 185 233 / 11%);
+  color: #8fb9e9;
+}
+
+.admin-job-type-icon--asset {
+  border-color: rgb(184 161 232 / 28%);
+  background: rgb(184 161 232 / 11%);
+  color: #b8a1e8;
+}
+
+.admin-job-type-icon--storyboard {
+  border-color: rgb(110 200 190 / 28%);
+  background: rgb(110 200 190 / 11%);
+  color: #6ec8be;
+}
+
+.admin-job-type-icon--video {
+  border-color: rgb(240 184 75 / 32%);
+  background: rgb(240 184 75 / 12%);
+  color: var(--color-gold);
 }
 
 .admin-jobs-step {
