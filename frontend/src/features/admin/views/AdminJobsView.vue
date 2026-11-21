@@ -613,16 +613,7 @@ onMounted(() => loadJobs(true))
       </template>
 
       <template #cell-owner="{ row }">
-        <div class="admin-jobs-owner">
-          <span class="admin-cell-primary">{{ row.userNickname || row.userEmail }}</span>
-          <span
-            v-if="row.userNickname && row.userNickname !== row.userEmail"
-            class="admin-jobs-email"
-            :title="row.userEmail"
-          >
-            {{ row.userEmail }}
-          </span>
-        </div>
+        <div class="admin-cell-primary">{{ row.userEmail }}</div>
         <div v-if="row.projectName" class="admin-cell-sub">{{ row.projectName }}</div>
       </template>
 
@@ -981,18 +972,6 @@ onMounted(() => loadJobs(true))
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.admin-jobs-owner {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.admin-jobs-email {
-  font-size: 12px;
-  color: var(--color-muted);
 }
 
 .admin-jobs-credit {
