@@ -84,10 +84,10 @@ const filters = reactive<{
 const jobColumns: DataTableColumn[] = [
   { key: 'createdAt', label: '创建时间', width: '164px' },
   { key: 'jobType', label: '任务类型', width: '172px' },
-  { key: 'status', label: '状态', width: '190px' },
+  { key: 'status', label: '状态', width: '120px' },
   { key: 'owner', label: '用户 / 项目' },
   { key: 'reservation', label: '积分', width: '120px' },
-  { key: 'upstream', label: '上游 ID / 异常' },
+  { key: 'upstream', label: '上游 ID' },
   { key: 'actions', label: '操作', width: '180px' },
 ]
 
@@ -405,14 +405,6 @@ function reservationBadgeClass(status?: string | null) {
   return ''
 }
 
-function statusSubText(job: AdminJobItem): string {
-  if (job.status === 'succeeded') return ''
-  const parts: string[] = []
-  if (job.progress > 0 && job.progress < 100) parts.push(`${job.progress}%`)
-  if (job.stepLabel) parts.push(job.stepLabel)
-  return parts.join(' · ')
-}
-
 function prettyJson(obj: unknown): string {
   if (obj === null || obj === undefined) return 'null'
   try {
@@ -606,10 +598,10 @@ onMounted(() => loadJobs(true))
       <template #cell-status="{ row }">
         <span class="admin-badge" :class="statusBadgeClass(row.status)">
           {{ JOB_STATUS_LABELS[row.status] || row.status }}
+          <template v-if="(row.status === 'running' || row.status === 'polling') && row.progress > 0 && row.progress < 100">
+            · {{ row.progress }}%
+          </template>
         </span>
-        <div v-if="statusSubText(row)" class="admin-cell-sub admin-jobs-step" :title="statusSubText(row)">
-          {{ statusSubText(row) }}
-        </div>
       </template>
 
       <template #cell-owner="{ row }">
@@ -630,13 +622,10 @@ onMounted(() => loadJobs(true))
       </template>
 
       <template #cell-upstream="{ row }">
-        <div v-if="row.providerTaskId" class="admin-mono" :title="row.providerTaskId">
+        <span v-if="row.providerTaskId" class="admin-mono" :title="row.providerTaskId">
           {{ row.providerTaskId.slice(0, 22) }}{{ row.providerTaskId.length > 22 ? '…' : '' }}
-        </div>
-        <div v-if="row.errorMessage" class="admin-error-snippet" :title="row.errorMessage">
-          {{ row.errorCode ? `[${row.errorCode}] ` : '' }}{{ row.errorMessage }}
-        </div>
-        <span v-if="!row.providerTaskId && !row.errorMessage" class="admin-cell-sub">-</span>
+        </span>
+        <span v-else class="admin-cell-sub">-</span>
       </template>
 
       <template #cell-actions="{ row }">
@@ -965,13 +954,6 @@ onMounted(() => loadJobs(true))
   border-color: rgb(240 184 75 / 32%);
   background: rgb(240 184 75 / 12%);
   color: var(--color-gold);
-}
-
-.admin-jobs-step {
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .admin-jobs-credit {
