@@ -73,6 +73,8 @@ class AdminJobItemOut(CamelModel):
     user_nickname: str = ""
     project_id: UUID | None = None
     project_name: str | None = None
+    canvas_id: UUID | None = None
+    canvas_name: str | None = None
     job_type: str
     target_id: str | None = None
     status: str

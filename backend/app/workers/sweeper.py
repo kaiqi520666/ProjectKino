@@ -8,13 +8,14 @@ import structlog
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.modules.canvas.service import patch_canvas_node_error
 from app.modules.jobs.models import Job
 from app.modules.jobs.service import publish_job_event
 from app.modules.studio.models import ProjectAsset, StoryboardClip
 
 logger = structlog.get_logger(__name__)
 
-_MEDIA_JOB_TYPES = {"asset_image", "clip_video"}
+_MEDIA_JOB_TYPES = {"asset_image", "clip_video", "canvas_image", "canvas_video"}
 _LLM_JOB_TYPES = {
     "script_generate",
     "script_regenerate",
@@ -22,6 +23,7 @@ _LLM_JOB_TYPES = {
     "episode_append",
     "assets_extract",
     "storyboard_generate",
+    "canvas_text",
 }
 
 
@@ -33,9 +35,9 @@ async def _default_dispatch(job_type: str, job_id: str) -> None:
     )
     from app.workers.media_tasks import execute_episode_compose_job
 
-    if job_type == "asset_image":
+    if job_type in ("asset_image", "canvas_image"):
         await execute_asset_image_job.kiq(job_id)
-    elif job_type == "clip_video":
+    elif job_type in ("clip_video", "canvas_video"):
         await execute_clip_video_job.kiq(job_id)
     elif job_type == "episode_compose":
         await execute_episode_compose_job.kiq(job_id)
@@ -113,6 +115,14 @@ async def sweep_stale_jobs_once(
                     )
                     if clip is not None:
                         clip.video_status = "ready" if clip.video_url else "failed"
+                elif job.job_type in ("canvas_image", "canvas_video") and job.canvas_id and job.target_id:
+                    await patch_canvas_node_error(
+                        session,
+                        canvas_id=job.canvas_id,
+                        node_id=job.target_id,
+                        error_message=job.error_message,
+                        job_id=job.id,
+                    )
                 to_publish.append(job)
                 counts["reviewed"] += 1
             else:
@@ -120,6 +130,14 @@ async def sweep_stale_jobs_once(
                 job.error_code = "worker_lease_expired"
                 job.error_message = "后台执行超时或进程意外中断，请重新发起"
                 job.finished_at = current
+                if job.job_type == "canvas_text" and job.canvas_id and job.target_id:
+                    await patch_canvas_node_error(
+                        session,
+                        canvas_id=job.canvas_id,
+                        node_id=job.target_id,
+                        error_message=job.error_message,
+                        job_id=job.id,
+                    )
                 to_publish.append(job)
                 counts["failed"] += 1
 

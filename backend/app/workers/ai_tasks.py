@@ -16,6 +16,12 @@ from sqlalchemy.orm import undefer
 from taskiq import Context, TaskiqDepends
 
 from app.core.errors import AppError
+from app.modules.canvas.generation import generate_canvas_text
+from app.modules.canvas.service import (
+    patch_canvas_node_error,
+    patch_canvas_node_media,
+    patch_canvas_node_text,
+)
 from app.modules.catalog.models import AiModel, AiProvider
 from app.modules.credits.models import CreditReservation
 from app.modules.credits.service import (
@@ -141,120 +147,162 @@ async def run_llm_job_core(
 
     try:
         async with sessions() as session:
+            payload = dict(job.input_payload or {})
+            requested_model_id = (
+                str(payload.get("modelId")).strip() if payload.get("modelId") else None
+            )
             if model_override is not None:
                 model, model_id = model_override
             else:
-                model, model_id = await resolve_text_model(session)
-            project = (
-                await session.scalar(select(Project).where(Project.id == job.project_id))
-                if job.project_id
-                else None
-            )
-            if project is None:
-                raise AppError(404, "project_not_found", "关联项目不存在")
+                model, model_id = await resolve_text_model(session, model_id=requested_model_id)
 
-            payload = dict(job.input_payload or {})
-            result_payload: dict[str, Any] = {"projectId": str(project.id)}
-
-            if job.job_type in ("script_generate", "script_regenerate"):
-                proj_settings = ProjectSettings.model_validate(project.settings)
-                source = Source.from_text(project.mode, project.source_text)  # type: ignore[arg-type]
-                generated = await generate_script(
+            if job.job_type == "canvas_text":
+                if job.canvas_id is None or not job.target_id:
+                    raise AppError(400, "canvas_target_missing", "画布文本任务缺少关联画布或节点 ID")
+                generated_text = await generate_canvas_text(
                     model,
-                    proj_settings,
-                    source,
-                    feedback=str(payload.get("feedback", "")),
+                    prompt=str(payload.get("prompt") or ""),
+                    current_text=(
+                        str(payload["currentText"])
+                        if isinstance(payload.get("currentText"), str)
+                        else None
+                    ),
+                    reference_texts=(
+                        payload.get("referenceTexts")
+                        if isinstance(payload.get("referenceTexts"), list)
+                        else None
+                    ),
                     usage=run_usage,
                     on_progress=on_progress,
                 )
-                await persist_script_result(
+                await patch_canvas_node_text(
                     session,
-                    project,
-                    generated,
-                    reset_downstream=(job.job_type == "script_regenerate"),
+                    canvas_id=job.canvas_id,
+                    node_id=job.target_id,
+                    text=generated_text,
+                    base_text=(
+                        str(payload["currentText"])
+                        if isinstance(payload.get("currentText"), str)
+                        else None
+                    ),
+                    job_id=job_id,
                 )
-                result_payload["episodeCount"] = len(generated.episodes)
-
-            elif job.job_type == "episode_rewrite":
-                ep_num = int(payload["episodeNumber"])
-                script_result = await build_script_result_from_db(session, project)
-                source = (
-                    Source.from_text(project.mode, project.source_text)  # type: ignore[arg-type]
-                    if project.source_text.strip()
-                    else None
-                )
-                rewritten = await regenerate_episode(
-                    model,
-                    script_result,
-                    ep_num,
-                    source=source,
-                    feedback=str(payload.get("feedback", "")),
-                    usage=run_usage,
-                    on_progress=on_progress,
-                )
-                await persist_rewritten_episode(session, project, rewritten)
-                result_payload["episodeNumber"] = rewritten.number
-
-            elif job.job_type == "episode_append":
-                script_result = await build_script_result_from_db(session, project)
-                source = (
-                    Source.from_text(project.mode, project.source_text)  # type: ignore[arg-type]
-                    if project.source_text.strip()
-                    else None
-                )
-                updated = await append_episode(
-                    model,
-                    script_result,
-                    source=source,
-                    feedback=str(payload.get("feedback", "")),
-                    usage=run_usage,
-                    on_progress=on_progress,
-                )
-                appended = await persist_appended_episode(session, project, updated)
-                result_payload["episodeNumber"] = appended.number
-
-            elif job.job_type == "assets_extract":
-                mode = str(payload.get("mode", "incremental"))
-                script_result = await build_script_result_from_db(session, project)
-                existing_assets = (
-                    (await build_asset_result_from_db(session, project)).assets
-                    if mode == "incremental"
-                    else []
-                )
-                extracted = await analyze_assets(
-                    model,
-                    script_result,
-                    existing=existing_assets,
-                    usage=run_usage,
-                    on_progress=on_progress,
-                )
-                saved = await persist_extracted_assets(
-                    session,
-                    project,
-                    extracted,
-                    preserve_edits=(mode == "incremental"),
-                )
-                result_payload["assetCount"] = len(saved)
-
-            elif job.job_type == "storyboard_generate":
-                ep_num = payload.get("episodeNumber")
-                script_result = await build_script_result_from_db(session, project)
-                asset_result = await build_asset_result_from_db(session, project)
-                if not asset_result.assets:
-                    raise AppError(400, "assets_required", "请先识别并生成项目资产后再生成分镜")
-                board = await storyboard(
-                    model,
-                    script_result,
-                    asset_result,
-                    only_episode=int(ep_num) if ep_num is not None else None,
-                    usage=run_usage,
-                    on_progress=on_progress,
-                )
-                await persist_storyboard_result(session, project, board)
-                result_payload["episodes"] = [item.number for item in board.episodes]
-
+                result_payload: dict[str, Any] = {
+                    "canvasId": str(job.canvas_id),
+                    "nodeId": job.target_id,
+                    "modelId": model_id,
+                    "text": generated_text,
+                }
             else:
-                raise AppError(400, "unsupported_job_type", f"不支持的 LLM 任务类型：{job.job_type}")
+                project = (
+                    await session.scalar(select(Project).where(Project.id == job.project_id))
+                    if job.project_id
+                    else None
+                )
+                if project is None:
+                    raise AppError(404, "project_not_found", "关联项目不存在")
+
+                result_payload = {"projectId": str(project.id)}
+
+                if job.job_type in ("script_generate", "script_regenerate"):
+                    proj_settings = ProjectSettings.model_validate(project.settings)
+                    source = Source.from_text(project.mode, project.source_text)  # type: ignore[arg-type]
+                    generated = await generate_script(
+                        model,
+                        proj_settings,
+                        source,
+                        feedback=str(payload.get("feedback", "")),
+                        usage=run_usage,
+                        on_progress=on_progress,
+                    )
+                    await persist_script_result(
+                        session,
+                        project,
+                        generated,
+                        reset_downstream=(job.job_type == "script_regenerate"),
+                    )
+                    result_payload["episodeCount"] = len(generated.episodes)
+
+                elif job.job_type == "episode_rewrite":
+                    ep_num = int(payload["episodeNumber"])
+                    script_result = await build_script_result_from_db(session, project)
+                    source = (
+                        Source.from_text(project.mode, project.source_text)  # type: ignore[arg-type]
+                        if project.source_text.strip()
+                        else None
+                    )
+                    rewritten = await regenerate_episode(
+                        model,
+                        script_result,
+                        ep_num,
+                        source=source,
+                        feedback=str(payload.get("feedback", "")),
+                        usage=run_usage,
+                        on_progress=on_progress,
+                    )
+                    await persist_rewritten_episode(session, project, rewritten)
+                    result_payload["episodeNumber"] = rewritten.number
+
+                elif job.job_type == "episode_append":
+                    script_result = await build_script_result_from_db(session, project)
+                    source = (
+                        Source.from_text(project.mode, project.source_text)  # type: ignore[arg-type]
+                        if project.source_text.strip()
+                        else None
+                    )
+                    updated = await append_episode(
+                        model,
+                        script_result,
+                        source=source,
+                        feedback=str(payload.get("feedback", "")),
+                        usage=run_usage,
+                        on_progress=on_progress,
+                    )
+                    appended = await persist_appended_episode(session, project, updated)
+                    result_payload["episodeNumber"] = appended.number
+
+                elif job.job_type == "assets_extract":
+                    mode = str(payload.get("mode", "incremental"))
+                    script_result = await build_script_result_from_db(session, project)
+                    existing_assets = (
+                        (await build_asset_result_from_db(session, project)).assets
+                        if mode == "incremental"
+                        else []
+                    )
+                    extracted = await analyze_assets(
+                        model,
+                        script_result,
+                        existing=existing_assets,
+                        usage=run_usage,
+                        on_progress=on_progress,
+                    )
+                    saved = await persist_extracted_assets(
+                        session,
+                        project,
+                        extracted,
+                        preserve_edits=(mode == "incremental"),
+                    )
+                    result_payload["assetCount"] = len(saved)
+
+                elif job.job_type == "storyboard_generate":
+                    ep_num = payload.get("episodeNumber")
+                    script_result = await build_script_result_from_db(session, project)
+                    asset_result = await build_asset_result_from_db(session, project)
+                    if not asset_result.assets:
+                        raise AppError(400, "assets_required", "请先识别并生成项目资产后再生成分镜")
+                    board = await storyboard(
+                        model,
+                        script_result,
+                        asset_result,
+                        only_episode=int(ep_num) if ep_num is not None else None,
+                        usage=run_usage,
+                        on_progress=on_progress,
+                    )
+                    await persist_storyboard_result(session, project, board)
+                    result_payload["episodes"] = [item.number for item in board.episodes]
+
+                else:
+                    raise AppError(400, "unsupported_job_type", f"不支持的 LLM 任务类型：{job.job_type}")
 
             db_job = await session.scalar(select(Job).where(Job.id == job_id))
             if db_job is not None:
@@ -274,6 +322,14 @@ async def run_llm_job_core(
         code, message = _format_error(exc)
         logger.warning("llm_job_failed", job_id=str(job_id), code=code, error=message)
         async with sessions() as session:
+            if job.job_type == "canvas_text" and job.canvas_id and job.target_id:
+                await patch_canvas_node_error(
+                    session,
+                    canvas_id=job.canvas_id,
+                    node_id=job.target_id,
+                    error_message=message,
+                    job_id=job_id,
+                )
             db_job = await session.scalar(select(Job).where(Job.id == job_id))
             if db_job is not None:
                 db_job.status = "failed"
@@ -385,7 +441,9 @@ async def _execute_asset_image_under_slot(
     heartbeat = asyncio.create_task(heartbeat_job_lease(sessions, job_id, lease_token))
     client_adapter = adapter or CangyuanImageAdapter()
     payload_in = dict(job.input_payload or {})
-    asset_id = UUID(str(job.target_id or payload_in["assetId"]))
+    is_canvas = job.job_type == "canvas_image"
+    asset_id = None if is_canvas else UUID(str(job.target_id or payload_in["assetId"]))
+    canvas_node_id = str(job.target_id or payload_in.get("nodeId") or "") if is_canvas else ""
 
     async def set_progress(step_index: int, label: str, progress: int) -> None:
         await update_job_progress(
@@ -401,15 +459,25 @@ async def _execute_asset_image_under_slot(
 
     try:
         async with sessions() as session:
-            asset = await session.scalar(select(ProjectAsset).where(ProjectAsset.id == asset_id))
-            if asset is None:
-                raise MediaProviderError("asset_not_found", "关联资产不存在", rejected=True)
-            model_id = str(payload_in.get("modelId") or "gpt-image-2")
-            tier = str(payload_in.get("tier") or "1k")
-            ratio = str(payload_in.get("ratio") or asset_aspect_ratio(asset.kind))
-            prompt = str(payload_in.get("prompt") or asset.prompt or "").strip()
+            if is_canvas:
+                if job.canvas_id is None or not canvas_node_id:
+                    raise MediaProviderError(
+                        "canvas_target_missing", "画布生图缺少关联画布或节点 ID", rejected=True
+                    )
+                model_id = str(payload_in.get("modelId") or "gpt-image-2")
+                tier = str(payload_in.get("tier") or "1k")
+                ratio = str(payload_in.get("ratio") or "16:9")
+                prompt = str(payload_in.get("prompt") or "").strip()
+            else:
+                asset = await session.scalar(select(ProjectAsset).where(ProjectAsset.id == asset_id))
+                if asset is None:
+                    raise MediaProviderError("asset_not_found", "关联资产不存在", rejected=True)
+                model_id = str(payload_in.get("modelId") or "gpt-image-2")
+                tier = str(payload_in.get("tier") or "1k")
+                ratio = str(payload_in.get("ratio") or asset_aspect_ratio(asset.kind))
+                prompt = str(payload_in.get("prompt") or asset.prompt or "").strip()
             if not prompt:
-                raise MediaProviderError("prompt_missing", "资产提示词为空，无法生图", rejected=True)
+                raise MediaProviderError("prompt_missing", "提示词为空，无法生图", rejected=True)
 
             model = await session.scalar(select(AiModel).where(AiModel.id == model_id))
             if model is None:
@@ -553,32 +621,62 @@ async def _execute_asset_image_under_slot(
                 await settle_media_credits(
                     session,
                     reservation_id=reservation.id,
-                    reason=f"资产生图完成结算 ({model_id}/{tier})",
+                    reason=(
+                        f"画布生图完成结算 ({model_id}/{tier})"
+                        if is_canvas
+                        else f"资产生图完成结算 ({model_id}/{tier})"
+                    ),
                 )
-            db_asset = await session.scalar(select(ProjectAsset).where(ProjectAsset.id == asset_id))
-            if db_asset is not None:
-                db_asset.image_key = key
-                db_asset.image_url = public_url
-                db_asset.image_model_id = model_id
-                db_asset.image_tier = tier
-                db_asset.image_status = "ready"
-                db_asset.last_job_id = job_id
+            if is_canvas and job.canvas_id is not None:
+                await patch_canvas_node_media(
+                    session,
+                    canvas_id=job.canvas_id,
+                    node_id=canvas_node_id,
+                    media={
+                        "url": public_url,
+                        "key": key,
+                        "name": f"{model_id}.{ext}",
+                        "modelId": model_id,
+                    },
+                    job_id=job_id,
+                )
+            elif asset_id is not None:
+                db_asset = await session.scalar(select(ProjectAsset).where(ProjectAsset.id == asset_id))
+                if db_asset is not None:
+                    db_asset.image_key = key
+                    db_asset.image_url = public_url
+                    db_asset.image_model_id = model_id
+                    db_asset.image_tier = tier
+                    db_asset.image_status = "ready"
+                    db_asset.last_job_id = job_id
             db_job = await session.scalar(select(Job).where(Job.id == job_id))
             if db_job is not None:
                 db_job.status = "succeeded"
                 db_job.progress = 100
                 db_job.step_index = 4
                 db_job.step_total = 4
-                db_job.step_label = "资产形象生成完成"
-                db_job.result_payload = {
-                    "projectId": str(job.project_id) if job.project_id else None,
-                    "assetId": str(asset_id),
-                    "imageUrl": public_url,
-                    "imageKey": key,
-                    "modelId": model_id,
-                    "tier": tier,
-                    "ratio": ratio,
-                }
+                db_job.step_label = "画布图片生成完成" if is_canvas else "资产形象生成完成"
+                db_job.result_payload = (
+                    {
+                        "canvasId": str(job.canvas_id) if job.canvas_id else None,
+                        "nodeId": canvas_node_id,
+                        "imageUrl": public_url,
+                        "imageKey": key,
+                        "modelId": model_id,
+                        "tier": tier,
+                        "ratio": ratio,
+                    }
+                    if is_canvas
+                    else {
+                        "projectId": str(job.project_id) if job.project_id else None,
+                        "assetId": str(asset_id),
+                        "imageUrl": public_url,
+                        "imageKey": key,
+                        "modelId": model_id,
+                        "tier": tier,
+                        "ratio": ratio,
+                    }
+                )
                 db_job.finished_at = datetime.now(UTC)
                 db_job.lease_token = None
             await session.commit()
@@ -592,7 +690,7 @@ async def _execute_asset_image_under_slot(
         message = (
             exc.message
             if isinstance(exc, (AppError, MediaProviderError))
-            else (str(exc)[:1000] or "资产生图失败")
+            else (str(exc)[:1000] or ("画布生图失败" if is_canvas else "资产生图失败"))
         )
         logger.warning(
             "asset_image_job_failed",
@@ -612,11 +710,24 @@ async def _execute_asset_image_under_slot(
                 await release_media_credits(
                     session,
                     reservation_id=reservation.id,
-                    reason=f"资产生图失败退还冻结积分 ({code})",
+                    reason=(
+                        f"画布生图失败退还冻结积分 ({code})"
+                        if is_canvas
+                        else f"资产生图失败退还冻结积分 ({code})"
+                    ),
                 )
-            db_asset = await session.scalar(select(ProjectAsset).where(ProjectAsset.id == asset_id))
-            if db_asset is not None:
-                db_asset.image_status = "ready" if db_asset.image_url else "failed"
+            if is_canvas and job.canvas_id is not None and canvas_node_id:
+                await patch_canvas_node_error(
+                    session,
+                    canvas_id=job.canvas_id,
+                    node_id=canvas_node_id,
+                    error_message=message,
+                    job_id=job_id,
+                )
+            elif asset_id is not None:
+                db_asset = await session.scalar(select(ProjectAsset).where(ProjectAsset.id == asset_id))
+                if db_asset is not None:
+                    db_asset.image_status = "ready" if db_asset.image_url else "failed"
             db_job = await session.scalar(select(Job).where(Job.id == job_id))
             if db_job is not None:
                 db_job.status = "review" if is_uncertain else "failed"
@@ -718,7 +829,9 @@ async def _execute_clip_video_under_slot(
         else max(0.0, poll_interval_seconds)
     )
     payload_in = dict(job.input_payload or {})
-    clip_id = UUID(str(job.target_id or payload_in["clipId"]))
+    is_canvas = job.job_type == "canvas_video"
+    clip_id = None if is_canvas else UUID(str(job.target_id or payload_in["clipId"]))
+    canvas_node_id = str(job.target_id or payload_in.get("nodeId") or "") if is_canvas else ""
 
     async def set_progress(step_index: int, label: str, progress: int) -> None:
         await update_job_progress(
@@ -734,17 +847,28 @@ async def _execute_clip_video_under_slot(
 
     try:
         async with sessions() as session:
-            clip = await session.scalar(select(StoryboardClip).where(StoryboardClip.id == clip_id))
-            if clip is None:
-                raise MediaProviderError("clip_not_found", "关联分镜片段不存在", rejected=True)
-            model_id = str(payload_in.get("modelId") or "seedance-2.0")
-            resolution = str(payload_in.get("resolution") or "720p")
-            ratio = str(payload_in.get("ratio") or "16:9")
-            duration_seconds = int(payload_in.get("durationSeconds") or clip.duration_seconds)
-            prompt = str(payload_in.get("prompt") or clip.prompt or "").strip()
+            if is_canvas:
+                if job.canvas_id is None or not canvas_node_id:
+                    raise MediaProviderError(
+                        "canvas_target_missing", "画布生视频缺少关联画布或节点 ID", rejected=True
+                    )
+                model_id = str(payload_in.get("modelId") or "seedance-2.0")
+                resolution = str(payload_in.get("resolution") or "720p")
+                ratio = str(payload_in.get("ratio") or "16:9")
+                duration_seconds = int(payload_in.get("durationSeconds") or 5)
+                prompt = str(payload_in.get("prompt") or "").strip()
+            else:
+                clip = await session.scalar(select(StoryboardClip).where(StoryboardClip.id == clip_id))
+                if clip is None:
+                    raise MediaProviderError("clip_not_found", "关联分镜片段不存在", rejected=True)
+                model_id = str(payload_in.get("modelId") or "seedance-2.0")
+                resolution = str(payload_in.get("resolution") or "720p")
+                ratio = str(payload_in.get("ratio") or "16:9")
+                duration_seconds = int(payload_in.get("durationSeconds") or clip.duration_seconds)
+                prompt = str(payload_in.get("prompt") or clip.prompt or "").strip()
             reference_urls = [str(u) for u in (payload_in.get("referenceUrls") or []) if str(u).strip()]
             if not prompt:
-                raise MediaProviderError("prompt_missing", "片段提示词为空，无法生成视频", rejected=True)
+                raise MediaProviderError("prompt_missing", "提示词为空，无法生成视频", rejected=True)
 
             model = await session.scalar(select(AiModel).where(AiModel.id == model_id))
             if model is None:
@@ -906,31 +1030,62 @@ async def _execute_clip_video_under_slot(
                 await settle_media_credits(
                     session,
                     reservation_id=reservation.id,
-                    reason=f"片段视频完成结算 ({model_id}/{duration_seconds}s)",
+                    reason=(
+                        f"画布视频完成结算 ({model_id}/{duration_seconds}s)"
+                        if is_canvas
+                        else f"片段视频完成结算 ({model_id}/{duration_seconds}s)"
+                    ),
                 )
-            db_clip = await session.scalar(select(StoryboardClip).where(StoryboardClip.id == clip_id))
-            if db_clip is not None:
-                db_clip.video_key = key
-                db_clip.video_url = public_url
-                db_clip.video_model_id = model_id
-                db_clip.video_status = "ready"
-                db_clip.last_job_id = job_id
+            if is_canvas and job.canvas_id is not None:
+                await patch_canvas_node_media(
+                    session,
+                    canvas_id=job.canvas_id,
+                    node_id=canvas_node_id,
+                    media={
+                        "url": public_url,
+                        "key": key,
+                        "name": f"{model_id}.mp4",
+                        "modelId": model_id,
+                    },
+                    job_id=job_id,
+                )
+            elif clip_id is not None:
+                db_clip = await session.scalar(select(StoryboardClip).where(StoryboardClip.id == clip_id))
+                if db_clip is not None:
+                    db_clip.video_key = key
+                    db_clip.video_url = public_url
+                    db_clip.video_model_id = model_id
+                    db_clip.video_status = "ready"
+                    db_clip.last_job_id = job_id
             db_job = await session.scalar(select(Job).where(Job.id == job_id))
             if db_job is not None:
                 db_job.status = "succeeded"
                 db_job.progress = 100
                 db_job.step_index = 4
                 db_job.step_total = 4
-                db_job.step_label = "片段视频生成完成"
-                db_job.result_payload = {
-                    "projectId": str(job.project_id) if job.project_id else None,
-                    "clipId": str(clip_id),
-                    "videoUrl": public_url,
-                    "videoKey": key,
-                    "duration": actual_duration,
-                    "modelId": model_id,
-                    "resolution": resolution,
-                }
+                db_job.step_label = "画布视频生成完成" if is_canvas else "片段视频生成完成"
+                db_job.result_payload = (
+                    {
+                        "canvasId": str(job.canvas_id) if job.canvas_id else None,
+                        "nodeId": canvas_node_id,
+                        "videoUrl": public_url,
+                        "videoKey": key,
+                        "duration": actual_duration,
+                        "modelId": model_id,
+                        "resolution": resolution,
+                        "ratio": ratio,
+                    }
+                    if is_canvas
+                    else {
+                        "projectId": str(job.project_id) if job.project_id else None,
+                        "clipId": str(clip_id),
+                        "videoUrl": public_url,
+                        "videoKey": key,
+                        "duration": actual_duration,
+                        "modelId": model_id,
+                        "resolution": resolution,
+                    }
+                )
                 db_job.finished_at = datetime.now(UTC)
                 db_job.lease_token = None
             await session.commit()
@@ -944,7 +1099,7 @@ async def _execute_clip_video_under_slot(
         message = (
             exc.message
             if isinstance(exc, (AppError, MediaProviderError))
-            else (str(exc)[:1000] or "片段视频生成失败")
+            else (str(exc)[:1000] or ("画布视频生成失败" if is_canvas else "片段视频生成失败"))
         )
         logger.warning(
             "clip_video_job_failed",
@@ -964,11 +1119,24 @@ async def _execute_clip_video_under_slot(
                 await release_media_credits(
                     session,
                     reservation_id=reservation.id,
-                    reason=f"片段视频失败退还冻结积分 ({code})",
+                    reason=(
+                        f"画布视频失败退还冻结积分 ({code})"
+                        if is_canvas
+                        else f"片段视频失败退还冻结积分 ({code})"
+                    ),
                 )
-            db_clip = await session.scalar(select(StoryboardClip).where(StoryboardClip.id == clip_id))
-            if db_clip is not None:
-                db_clip.video_status = "ready" if db_clip.video_url else "failed"
+            if is_canvas and job.canvas_id is not None and canvas_node_id:
+                await patch_canvas_node_error(
+                    session,
+                    canvas_id=job.canvas_id,
+                    node_id=canvas_node_id,
+                    error_message=message,
+                    job_id=job_id,
+                )
+            elif clip_id is not None:
+                db_clip = await session.scalar(select(StoryboardClip).where(StoryboardClip.id == clip_id))
+                if db_clip is not None:
+                    db_clip.video_status = "ready" if db_clip.video_url else "failed"
             db_job = await session.scalar(select(Job).where(Job.id == job_id))
             if db_job is not None:
                 db_job.status = "review" if is_uncertain else "failed"

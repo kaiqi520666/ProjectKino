@@ -92,3 +92,78 @@ def test_canvas_graph_enforces_history_cap_and_user_asset_url_validation():
         }
     )
     assert valid_asset.media_url is not None
+
+
+def test_resolve_canvas_generation_inputs_handles_refs_and_rejects_unsupported_media():
+    from app.core.errors import AppError
+    from app.modules.canvas.generation import resolve_canvas_generation_inputs
+    from app.modules.canvas.schemas import CanvasGenerateRequest
+
+    video_req = CanvasGenerateRequest.model_validate(
+        {
+            "kind": "video",
+            "prompt": "镜头推进 {{ref:img-1}}，结合 {{ref:txt-1}}",
+            "references": [
+                {
+                    "nodeId": "img-1",
+                    "kind": "image",
+                    "title": "主角图",
+                    "mediaUrl": "https://image.nodepass.net/framedrama/1/images/hero.png",
+                },
+                {
+                    "nodeId": "txt-1",
+                    "kind": "text",
+                    "title": "氛围",
+                    "text": "冷调雨夜",
+                },
+                {
+                    "nodeId": "txt-2",
+                    "kind": "text",
+                    "title": "补充",
+                    "text": "电影质感",
+                },
+            ],
+        }
+    )
+    resolved = resolve_canvas_generation_inputs(video_req)
+    assert resolved.reference_urls == ["https://image.nodepass.net/framedrama/1/images/hero.png"]
+    assert "@[图片1]" in resolved.resolved_prompt
+    assert "冷调雨夜" in resolved.resolved_prompt
+    assert "电影质感" in resolved.resolved_prompt
+
+    bad_video_req = CanvasGenerateRequest.model_validate(
+        {
+            "kind": "video",
+            "prompt": "参考视频",
+            "references": [
+                {
+                    "nodeId": "vid-1",
+                    "kind": "video",
+                    "title": "旧视频",
+                    "mediaUrl": "https://image.nodepass.net/framedrama/1/videos/old.mp4",
+                }
+            ],
+        }
+    )
+    with pytest.raises(AppError) as err:
+        resolve_canvas_generation_inputs(bad_video_req)
+    assert err.value.code == "unsupported_video_reference"
+
+    bad_img_req = CanvasGenerateRequest.model_validate(
+        {
+            "kind": "image",
+            "prompt": "参考图",
+            "references": [
+                {
+                    "nodeId": "img-1",
+                    "kind": "image",
+                    "title": "参考",
+                    "mediaUrl": "https://image.nodepass.net/framedrama/1/images/ref.png",
+                }
+            ],
+        }
+    )
+    with pytest.raises(AppError) as img_err:
+        resolve_canvas_generation_inputs(bad_img_req)
+    assert img_err.value.code == "image_reference_not_supported"
+

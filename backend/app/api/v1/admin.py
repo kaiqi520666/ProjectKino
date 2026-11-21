@@ -46,6 +46,8 @@ from app.modules.admin.schemas import (
 )
 from app.modules.auth.deps import require_admin
 from app.modules.auth.models import User
+from app.modules.canvas.models import Canvas
+from app.modules.canvas.service import patch_canvas_node_media
 from app.modules.catalog.models import (
     AiModel,
     AiModelSyncLog,
@@ -427,6 +429,7 @@ async def admin_list_jobs(
 
     user_ids = {j.user_id for j in jobs}
     project_ids = {j.project_id for j in jobs if j.project_id is not None}
+    canvas_ids = {j.canvas_id for j in jobs if j.canvas_id is not None}
     job_ids = [j.id for j in jobs]
 
     users_map: dict[int, tuple[str, str]] = {}
@@ -445,6 +448,14 @@ async def admin_list_jobs(
             pid: name
             for pid, name in (
                 await session.execute(select(Project.id, Project.name).where(Project.id.in_(project_ids)))
+            ).all()
+        }
+    canvases_map: dict[UUID, str] = {}
+    if canvas_ids:
+        canvases_map = {
+            cid: name
+            for cid, name in (
+                await session.execute(select(Canvas.id, Canvas.name).where(Canvas.id.in_(canvas_ids)))
             ).all()
         }
     res_map: dict[UUID, CreditReservation] = {}
@@ -466,6 +477,8 @@ async def admin_list_jobs(
                 user_nickname=nickname,
                 project_id=job.project_id,
                 project_name=projects_map.get(job.project_id) if job.project_id else None,
+                canvas_id=job.canvas_id,
+                canvas_name=canvases_map.get(job.canvas_id) if job.canvas_id else None,
                 job_type=job.job_type,
                 target_id=job.target_id,
                 status=job.status,
@@ -501,10 +514,10 @@ async def admin_refund_review_job(
     job = await session.scalar(select(Job).where(Job.id == job_id))
     if job is None:
         raise AppError(404, "job_not_found", "任务不存在")
-    if job.job_type not in ("asset_image", "clip_video"):
+    if job.job_type not in ("asset_image", "clip_video", "canvas_image", "canvas_video"):
         raise AppError(400, "not_media_job", "仅图片/视频预冻结任务支持退还冻结积分")
 
-    btype = "image" if job.job_type == "asset_image" else "video"
+    btype = "image" if job.job_type in ("asset_image", "canvas_image") else "video"
     res = await session.scalar(
         select(CreditReservation).where(
             CreditReservation.business_type == btype,
@@ -549,18 +562,18 @@ async def admin_rescue_job_media(
     job = await session.scalar(select(Job).where(Job.id == job_id))
     if job is None:
         raise AppError(404, "job_not_found", "任务不存在")
-    if job.job_type not in ("asset_image", "clip_video"):
+    if job.job_type not in ("asset_image", "clip_video", "canvas_image", "canvas_video"):
         raise AppError(400, "not_media_job", "仅支持对图片或视频任务补录成片")
     if not job.target_id:
-        raise AppError(400, "target_missing", "任务缺少关联资产或片段 ID")
+        raise AppError(400, "target_missing", "任务缺少关联资产、片段或画布节点 ID")
 
     storage = await load_storage(session)
-    target_uuid = UUID(job.target_id)
     public_url = ""
     key = ""
     extra: dict[str, Any] = {}
 
     if job.job_type == "asset_image":
+        target_uuid = UUID(job.target_id)
         asset = await session.scalar(select(ProjectAsset).where(ProjectAsset.id == target_uuid))
         if asset is None:
             raise AppError(404, "asset_not_found", "关联资产不存在")
@@ -579,7 +592,8 @@ async def admin_rescue_job_media(
         asset.last_job_id = job.id
         extra = {"assetId": str(asset.id), "imageUrl": public_url, "imageKey": key}
         btype = "image"
-    else:
+    elif job.job_type == "clip_video":
+        target_uuid = UUID(job.target_id)
         clip = await session.scalar(select(StoryboardClip).where(StoryboardClip.id == target_uuid))
         if clip is None:
             raise AppError(404, "clip_not_found", "关联分镜片段不存在")
@@ -599,6 +613,65 @@ async def admin_rescue_job_media(
         clip.video_status = "ready"
         clip.last_job_id = job.id
         extra = {"clipId": str(clip.id), "videoUrl": public_url, "videoKey": key, "duration": duration}
+        btype = "video"
+    elif job.job_type == "canvas_image":
+        if job.canvas_id is None:
+            raise AppError(400, "canvas_missing", "任务缺少关联画布 ID")
+        try:
+            image_bytes = await download_public_media(media_url)
+            ext, mime_type = detect_image_format(image_bytes)
+            key = storage.make_key(job.user_id, "images", f"{job.id}.{ext}")
+            await asyncio.to_thread(storage.put_bytes, key, image_bytes, mime_type)
+            public_url = storage.public_url(key)
+        except Exception as exc:
+            raise AppError(400, "rescue_download_failed", f"下载或转存图片失败：{exc}") from None
+
+        model_id = str((job.input_payload or {}).get("modelId") or "canvas-image")
+        await patch_canvas_node_media(
+            session,
+            canvas_id=job.canvas_id,
+            node_id=job.target_id,
+            media={"url": public_url, "key": key, "name": f"{model_id}.{ext}", "modelId": model_id},
+            job_id=job.id,
+        )
+        extra = {
+            "canvasId": str(job.canvas_id),
+            "nodeId": job.target_id,
+            "imageUrl": public_url,
+            "imageKey": key,
+            "modelId": model_id,
+        }
+        btype = "image"
+    else:
+        if job.canvas_id is None:
+            raise AppError(400, "canvas_missing", "任务缺少关联画布 ID")
+        try:
+            with tempfile.TemporaryDirectory(prefix="framedrama_admin_rescue_") as tmp:
+                local_path = Path(tmp) / f"{job.id}.mp4"
+                await download_to_file(media_url, local_path)
+                duration = await probe_video_duration(local_path)
+                key = storage.make_key(job.user_id, "videos", f"{job.id}.mp4")
+                await asyncio.to_thread(storage.put_file, key, str(local_path), "video/mp4")
+                public_url = storage.public_url(key)
+        except Exception as exc:
+            raise AppError(400, "rescue_download_failed", f"下载校验或转存视频失败：{exc}") from None
+
+        model_id = str((job.input_payload or {}).get("modelId") or "canvas-video")
+        await patch_canvas_node_media(
+            session,
+            canvas_id=job.canvas_id,
+            node_id=job.target_id,
+            media={"url": public_url, "key": key, "name": f"{model_id}.mp4", "modelId": model_id},
+            job_id=job.id,
+        )
+        extra = {
+            "canvasId": str(job.canvas_id),
+            "nodeId": job.target_id,
+            "videoUrl": public_url,
+            "videoKey": key,
+            "duration": duration,
+            "modelId": model_id,
+        }
         btype = "video"
 
     res = await session.scalar(
