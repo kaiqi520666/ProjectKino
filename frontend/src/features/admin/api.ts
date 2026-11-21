@@ -68,6 +68,7 @@ export interface AdminJobItem {
   id: string
   userId: number
   userEmail: string
+  userNickname: string
   projectId?: string | null
   projectName?: string | null
   jobType: string
@@ -135,10 +136,26 @@ export function listAdminJobs(params: {
   status?: string
   jobType?: string
   userId?: number
+  q?: string
+  createdFrom?: string
+  createdTo?: string
   limit?: number
   offset?: number
 } = {}) {
-  return unwrap<AdminJobList>(http.get('/admin/jobs', { params }))
+  return unwrap<AdminJobList>(
+    http.get('/admin/jobs', {
+      params: {
+        status: params.status,
+        job_type: params.jobType,
+        user_id: params.userId,
+        q: params.q,
+        created_from: params.createdFrom,
+        created_to: params.createdTo,
+        limit: params.limit,
+        offset: params.offset,
+      },
+    }),
+  )
 }
 
 export function refundAdminJob(jobId: string, reason: string) {

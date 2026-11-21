@@ -362,27 +362,58 @@ async def admin_user_ledgers(
     )
 
 
+def _apply_admin_job_filters(
+    stmt: Any,
+    *,
+    status: str | None = None,
+    job_type: str | None = None,
+    user_id: int | None = None,
+    q: str | None = None,
+    created_from: datetime | None = None,
+    created_to: datetime | None = None,
+) -> Any:
+    if status in ("queued", "running", "polling", "succeeded", "failed", "review"):
+        stmt = stmt.where(Job.status == status)
+    if job_type and job_type.strip():
+        stmt = stmt.where(Job.job_type == job_type.strip())
+    if user_id is not None:
+        stmt = stmt.where(Job.user_id == user_id)
+    if q and q.strip():
+        pattern = f"%{q.strip()}%"
+        matched_user_ids = select(User.id).where(
+            or_(User.nickname.ilike(pattern), User.email.ilike(pattern))
+        )
+        stmt = stmt.where(Job.user_id.in_(matched_user_ids))
+    if created_from is not None:
+        stmt = stmt.where(Job.created_at >= created_from)
+    if created_to is not None:
+        stmt = stmt.where(Job.created_at < created_to)
+    return stmt
+
+
 @router.get("/jobs", response_model=ApiResponse[AdminJobListOut])
 async def admin_list_jobs(
     status: str | None = Query(default=None),
     job_type: str | None = Query(default=None),
     user_id: int | None = Query(default=None),
+    q: str | None = Query(default=None),
+    created_from: datetime | None = Query(default=None),
+    created_to: datetime | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     _admin: User = Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse[AdminJobListOut]:
-    stmt = select(Job)
-    count_stmt = select(func.count()).select_from(Job)
-    if status in ("queued", "running", "polling", "succeeded", "failed", "review"):
-        stmt = stmt.where(Job.status == status)
-        count_stmt = count_stmt.where(Job.status == status)
-    if job_type and job_type.strip():
-        stmt = stmt.where(Job.job_type == job_type.strip())
-        count_stmt = count_stmt.where(Job.job_type == job_type.strip())
-    if user_id is not None:
-        stmt = stmt.where(Job.user_id == user_id)
-        count_stmt = count_stmt.where(Job.user_id == user_id)
+    filter_kwargs = {
+        "status": status,
+        "job_type": job_type,
+        "user_id": user_id,
+        "q": q,
+        "created_from": created_from,
+        "created_to": created_to,
+    }
+    stmt = _apply_admin_job_filters(select(Job), **filter_kwargs)
+    count_stmt = _apply_admin_job_filters(select(func.count()).select_from(Job), **filter_kwargs)
 
     total = int(await session.scalar(count_stmt) or 0)
     review_count = int(
@@ -398,12 +429,14 @@ async def admin_list_jobs(
     project_ids = {j.project_id for j in jobs if j.project_id is not None}
     job_ids = [j.id for j in jobs]
 
-    users_map: dict[int, str] = {}
+    users_map: dict[int, tuple[str, str]] = {}
     if user_ids:
         users_map = {
-            uid: email
-            for uid, email in (
-                await session.execute(select(User.id, User.email).where(User.id.in_(user_ids)))
+            uid: (email, nickname)
+            for uid, email, nickname in (
+                await session.execute(
+                    select(User.id, User.email, User.nickname).where(User.id.in_(user_ids))
+                )
             ).all()
         }
     projects_map: dict[UUID, str] = {}
@@ -424,11 +457,13 @@ async def admin_list_jobs(
     items = []
     for job in jobs:
         res = res_map.get(job.id)
+        email, nickname = users_map.get(job.user_id, (f"#{job.user_id}", ""))
         items.append(
             AdminJobItemOut(
                 id=job.id,
                 user_id=job.user_id,
-                user_email=users_map.get(job.user_id, f"#{job.user_id}"),
+                user_email=email,
+                user_nickname=nickname,
                 project_id=job.project_id,
                 project_name=projects_map.get(job.project_id) if job.project_id else None,
                 job_type=job.job_type,

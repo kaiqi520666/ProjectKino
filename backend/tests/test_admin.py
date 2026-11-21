@@ -82,3 +82,55 @@ def test_admin_batch2_schemas_serialize_camel_case_and_validate_bounds():
             {"initialCredits": "-1", "defaultUsageMultiplier": "1.0"}
         )
 
+
+def test_admin_job_filters_compile_user_search_and_date_bounds():
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from sqlalchemy import select
+    from sqlalchemy.dialects import postgresql
+
+    from app.api.v1.admin import _apply_admin_job_filters
+    from app.modules.admin.schemas import AdminJobItemOut
+    from app.modules.jobs.models import Job
+
+    dt_from = datetime(2026, 11, 21, 0, 0, tzinfo=UTC)
+    dt_to = datetime(2026, 11, 22, 0, 0, tzinfo=UTC)
+    stmt = _apply_admin_job_filters(
+        select(Job),
+        status="failed",
+        job_type="script_generate",
+        q="  alice  ",
+        created_from=dt_from,
+        created_to=dt_to,
+    )
+    compiled = stmt.compile(dialect=postgresql.dialect())
+    sql = str(compiled)
+
+    assert "jobs.status =" in sql
+    assert "jobs.job_type =" in sql
+    assert "users.nickname ILIKE" in sql
+    assert "users.email ILIKE" in sql
+    assert "jobs.created_at >=" in sql
+    assert "jobs.created_at <" in sql
+    assert "%alice%" in compiled.params.values()
+
+    item = AdminJobItemOut(
+        id=uuid4(),
+        user_id=7,
+        user_email="alice@framedrama.local",
+        user_nickname="Alice",
+        job_type="script_generate",
+        status="succeeded",
+        step_index=1,
+        step_total=1,
+        step_label="已完成",
+        progress=100,
+        input_payload={},
+        created_at=dt_from,
+    )
+    dumped = item.model_dump(by_alias=True)
+    assert dumped["userNickname"] == "Alice"
+    assert dumped["userEmail"] == "alice@framedrama.local"
+
+

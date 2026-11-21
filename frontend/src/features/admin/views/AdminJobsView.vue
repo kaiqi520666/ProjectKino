@@ -1,10 +1,17 @@
 <script setup lang="ts">
-import { inject, onMounted, reactive, ref, watch } from 'vue'
+import { computed, inject, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Activity, Eye, RefreshCw, RotateCcw, Wrench } from 'lucide-vue-next'
+import { Activity, AlertTriangle, Eye, RefreshCw, RotateCcw, Search, Wrench, X } from 'lucide-vue-next'
 import UiDataTable, { type DataTableColumn } from '@/components/ui/UiDataTable.vue'
+import UiDateRangePicker from '@/components/ui/UiDateRangePicker.vue'
 import UiDialog from '@/components/ui/UiDialog.vue'
 import UiSelect from '@/components/ui/UiSelect.vue'
+import {
+  createDateRangePreset,
+  isDateRangeEqual,
+  toUtcIsoBounds,
+  type DateRangeValue,
+} from '@/components/ui/date-range'
 import WorkspacePageHeader from '@/components/workspace/WorkspacePageHeader.vue'
 import {
   listAdminJobs,
@@ -27,6 +34,14 @@ const router = useRouter()
 const ui = useUiStore()
 const refreshReviewBadge = inject<() => Promise<void>>('refreshAdminReviewBadge')
 
+const VALID_STATUSES = new Set(['queued', 'running', 'polling', 'succeeded', 'failed', 'review'])
+
+function resolveRouteStatus(raw: unknown): string {
+  return typeof raw === 'string' && VALID_STATUSES.has(raw) ? raw : 'all'
+}
+
+const initialStatus = resolveRouteStatus(route.query.status)
+
 const loading = ref(false)
 const jobs = ref<AdminJobItem[]>([])
 const total = ref(0)
@@ -34,55 +49,61 @@ const reviewCount = ref(0)
 const page = ref(1)
 const pageSize = ref(30)
 
-const filters = reactive({
-  status: typeof route.query.status === 'string' && route.query.status ? route.query.status : 'all',
+const filters = reactive<{
+  q: string
+  status: string
+  jobType: string
+  dateRange: DateRangeValue
+}>({
+  q: '',
+  status: initialStatus,
   jobType: 'all',
+  dateRange: initialStatus === 'review' ? { start: null, end: null } : createDateRangePreset('today'),
 })
 
 const jobColumns: DataTableColumn[] = [
-  { key: 'createdAt', label: '创建时间' },
-  { key: 'jobType', label: '任务类型' },
-  { key: 'status', label: '状态 / 进度' },
+  { key: 'createdAt', label: '创建时间', width: '164px' },
+  { key: 'jobType', label: '任务类型', width: '140px' },
+  { key: 'status', label: '状态', width: '190px' },
   { key: 'owner', label: '用户 / 项目' },
-  { key: 'reservation', label: '预扣款项' },
-  { key: 'upstream', label: '上游 ID / 错误摘要' },
-  { key: 'actions', label: '操作' },
+  { key: 'reservation', label: '积分', width: '120px' },
+  { key: 'upstream', label: '上游 ID / 异常' },
+  { key: 'actions', label: '操作', width: '180px' },
 ]
 
-const statusPills = [
-  { value: 'all', label: '全部任务' },
-  { value: 'review', label: '待核对', danger: true },
+const statusOptions = computed(() => [
+  { value: 'all', label: '全部状态' },
+  { value: 'review', label: reviewCount.value > 0 ? `待核对 (${reviewCount.value})` : '待核对' },
   { value: 'running', label: '执行中' },
   { value: 'polling', label: '轮询中' },
   { value: 'queued', label: '排队中' },
   { value: 'succeeded', label: '成功' },
   { value: 'failed', label: '失败' },
-]
+])
 
 const jobTypeOptions = [
   { value: 'all', label: '全部任务类型' },
-  { value: 'asset_image', label: '生成资产图' },
-  { value: 'clip_video', label: '生成分镜视频' },
-  { value: 'compose_episode', label: '合成本集视频' },
-  { value: 'compose_project', label: '合成全片' },
-  { value: 'parse_novel', label: '解析小说' },
-  { value: 'extract_assets', label: '提取资产' },
-  { value: 'generate_episodes', label: '生成分集' },
-  { value: 'generate_storyboard', label: '生成分镜' },
-  { value: 'regenerate_episode_storyboard', label: '重写单集分镜' },
+  ...Object.entries(JOB_TYPE_LABELS).map(([value, label]) => ({ value, label })),
 ]
 
-// Detail dialog
+const hasNonDefaultFilters = computed(() => {
+  const today = createDateRangePreset('today')
+  return (
+    filters.q.trim() !== ''
+    || filters.status !== 'all'
+    || filters.jobType !== 'all'
+    || !isDateRangeEqual(filters.dateRange, today)
+  )
+})
+
 const detailDialogOpen = ref(false)
 const detailJob = ref<AdminJobItem | null>(null)
 
-// Refund dialog
 const refundDialogOpen = ref(false)
 const refundSubmitting = ref(false)
 const refundJob = ref<AdminJobItem | null>(null)
 const refundReason = ref('')
 
-// Rescue media dialog
 const rescueDialogOpen = ref(false)
 const rescueSubmitting = ref(false)
 const rescueJob = ref<AdminJobItem | null>(null)
@@ -91,58 +112,121 @@ const rescueForm = reactive({
   note: '',
 })
 
+let searchTimer: ReturnType<typeof setTimeout> | null = null
+let activeRequestId = 0
+
+function clearSearchTimer() {
+  if (searchTimer !== null) {
+    clearTimeout(searchTimer)
+    searchTimer = null
+  }
+}
+
 async function loadJobs(resetPage = false) {
   if (resetPage) page.value = 1
+  const requestId = ++activeRequestId
   loading.value = true
   try {
+    const bounds = toUtcIsoBounds(filters.dateRange)
     const res = await listAdminJobs({
       status: filters.status === 'all' ? undefined : filters.status,
       jobType: filters.jobType === 'all' ? undefined : filters.jobType,
+      q: filters.q.trim() || undefined,
+      createdFrom: bounds.createdFrom,
+      createdTo: bounds.createdTo,
       limit: pageSize.value,
       offset: (page.value - 1) * pageSize.value,
     })
+    if (requestId !== activeRequestId) return
     jobs.value = res.items
     total.value = res.total
     reviewCount.value = res.reviewCount
     await refreshReviewBadge?.()
   } catch (err) {
+    if (requestId !== activeRequestId) return
     ui.notify(extractErrorMessage(err, '加载任务列表失败'), 'error')
   } finally {
-    loading.value = false
+    if (requestId === activeRequestId) {
+      loading.value = false
+    }
   }
 }
 
-function selectStatus(status: string) {
-  filters.status = status
-  router.replace({
+function handleStatusChange(status: string | undefined) {
+  const next = status || 'all'
+  filters.status = next
+  void router.replace({
     path: '/admin/jobs',
-    query: status === 'all' ? {} : { status },
+    query: next === 'all' ? {} : { status: next },
   })
-  loadJobs(true)
+  void loadJobs(true)
 }
+
+function jumpToReview() {
+  filters.dateRange = { start: null, end: null }
+  handleStatusChange('review')
+}
+
+function submitSearch() {
+  clearSearchTimer()
+  void loadJobs(true)
+}
+
+function clearSearch() {
+  filters.q = ''
+  submitSearch()
+}
+
+function resetFilters() {
+  clearSearchTimer()
+  filters.q = ''
+  filters.status = 'all'
+  filters.jobType = 'all'
+  filters.dateRange = createDateRangePreset('today')
+  void router.replace({ path: '/admin/jobs', query: {} })
+  void loadJobs(true)
+}
+
+watch(
+  () => filters.q,
+  () => {
+    clearSearchTimer()
+    searchTimer = setTimeout(() => {
+      searchTimer = null
+      void loadJobs(true)
+    }, 300)
+  },
+)
 
 watch(
   () => route.query.status,
   (val) => {
-    const next = typeof val === 'string' && val ? val : 'all'
+    const next = resolveRouteStatus(val)
     if (next !== filters.status) {
       filters.status = next
-      loadJobs(true)
+      if (next === 'review') {
+        filters.dateRange = { start: null, end: null }
+      }
+      void loadJobs(true)
     }
   },
 )
 
+onBeforeUnmount(() => {
+  clearSearchTimer()
+})
+
 function canRefund(job: AdminJobItem): boolean {
   return (
-    (job.jobType === 'asset_image' || job.jobType === 'clip_video') &&
-    job.reservationStatus === 'frozen'
+    (job.jobType === 'asset_image' || job.jobType === 'clip_video')
+    && job.reservationStatus === 'frozen'
   )
 }
 
 function canRescue(job: AdminJobItem): boolean {
   return (
-    (job.jobType === 'asset_image' || job.jobType === 'clip_video') &&
-    (job.status === 'review' || job.status === 'failed')
+    (job.jobType === 'asset_image' || job.jobType === 'clip_video')
+    && (job.status === 'review' || job.status === 'failed')
   )
 }
 
@@ -221,8 +305,16 @@ function statusBadgeClass(status: string) {
 function reservationBadgeClass(status?: string | null) {
   if (status === 'frozen') return 'admin-badge--gold'
   if (status === 'settled') return 'admin-badge--success'
-  if (status === 'refunded') return 'admin-badge--info'
+  if (status === 'released' || status === 'refunded') return 'admin-badge--info'
   return ''
+}
+
+function statusSubText(job: AdminJobItem): string {
+  if (job.status === 'succeeded') return ''
+  const parts: string[] = []
+  if (job.progress > 0 && job.progress < 100) parts.push(`${job.progress}%`)
+  if (job.stepLabel) parts.push(job.stepLabel)
+  return parts.join(' · ')
 }
 
 function prettyJson(obj: unknown): string {
@@ -249,28 +341,73 @@ onMounted(() => loadJobs(true))
       </template>
     </WorkspacePageHeader>
 
-    <div class="admin-toolbar">
-      <div class="admin-pill-bar">
+    <div v-if="reviewCount > 0 && filters.status !== 'review'" class="admin-review-banner">
+      <div class="admin-review-banner-left">
+        <AlertTriangle :size="18" aria-hidden="true" />
+        <div>
+          <strong>当前有 {{ reviewCount }} 条待核对任务</strong>
+          <p>上游状态超时或存在异常，建议尽快人工核对补录成片或退还冻结积分。</p>
+        </div>
+      </div>
+      <button type="button" class="ui-button ui-button--danger ui-button--sm" @click="jumpToReview">
+        查看待核对
+      </button>
+    </div>
+
+    <form class="admin-jobs-toolbar" @submit.prevent="submitSearch">
+      <div class="admin-jobs-search-wrap">
+        <Search :size="15" class="admin-jobs-search-icon" aria-hidden="true" />
+        <input
+          v-model="filters.q"
+          class="ui-input admin-jobs-search-input"
+          type="text"
+          placeholder="搜索用户名或邮箱"
+          aria-label="搜索用户名或邮箱"
+        />
         <button
-          v-for="pill in statusPills"
-          :key="pill.value"
+          v-if="filters.q"
           type="button"
-          class="admin-pill"
-          :class="{
-            'is-active': filters.status === pill.value,
-            'admin-pill--danger': pill.danger,
-            'has-count': pill.value === 'review' && reviewCount > 0,
-          }"
-          @click="selectStatus(pill.value)"
+          class="admin-jobs-search-clear"
+          aria-label="清空搜索"
+          @click="clearSearch"
         >
-          <span>{{ pill.label }}</span>
-          <span v-if="pill.value === 'review' && reviewCount > 0" class="admin-mono">({{ reviewCount }})</span>
+          <X :size="13" aria-hidden="true" />
         </button>
       </div>
-      <div style="width: 190px;">
-        <UiSelect v-model="filters.jobType" :options="jobTypeOptions" placeholder="任务类型" @update:model-value="loadJobs(true)" />
+
+      <div class="admin-jobs-select">
+        <UiSelect
+          :model-value="filters.status"
+          :options="statusOptions"
+          placeholder="任务状态"
+          @update:model-value="handleStatusChange"
+        />
       </div>
-    </div>
+
+      <div class="admin-jobs-select admin-jobs-select--type">
+        <UiSelect
+          v-model="filters.jobType"
+          :options="jobTypeOptions"
+          placeholder="任务类型"
+          @update:model-value="loadJobs(true)"
+        />
+      </div>
+
+      <UiDateRangePicker
+        v-model="filters.dateRange"
+        inline-presets
+        @change="loadJobs(true)"
+      />
+
+      <button
+        v-if="hasNonDefaultFilters"
+        type="button"
+        class="ui-button ui-button--ghost ui-button--sm admin-jobs-reset"
+        @click="resetFilters"
+      >
+        重置
+      </button>
+    </form>
 
     <UiDataTable
       v-model:page="page"
@@ -286,31 +423,48 @@ onMounted(() => loadJobs(true))
       @change="loadJobs()"
     >
       <template #cell-createdAt="{ row }">
-        <span class="admin-mono">{{ formatDateTime(row.createdAt) }}</span>
+        <span class="admin-mono admin-jobs-time">{{ formatDateTime(row.createdAt) }}</span>
       </template>
+
       <template #cell-jobType="{ row }">
-        <div class="admin-cell-primary">{{ JOB_TYPE_LABELS[row.jobType] || row.jobType }}</div>
-        <div class="admin-cell-sub admin-mono">{{ row.jobType }}</div>
+        <span class="admin-cell-primary">{{ JOB_TYPE_LABELS[row.jobType] || row.jobType }}</span>
       </template>
+
       <template #cell-status="{ row }">
         <span class="admin-badge" :class="statusBadgeClass(row.status)">
           {{ JOB_STATUS_LABELS[row.status] || row.status }}
         </span>
-        <div class="admin-cell-sub">{{ row.progress }}% · {{ row.stepLabel || '-' }}</div>
+        <div v-if="statusSubText(row)" class="admin-cell-sub admin-jobs-step" :title="statusSubText(row)">
+          {{ statusSubText(row) }}
+        </div>
       </template>
+
       <template #cell-owner="{ row }">
-        <div class="admin-cell-primary">{{ row.userEmail }}</div>
-        <div class="admin-cell-sub">{{ row.projectName || '无项目关联' }}</div>
+        <div class="admin-jobs-owner">
+          <span class="admin-cell-primary">{{ row.userNickname || row.userEmail }}</span>
+          <span
+            v-if="row.userNickname && row.userNickname !== row.userEmail"
+            class="admin-jobs-email"
+            :title="row.userEmail"
+          >
+            {{ row.userEmail }}
+          </span>
+        </div>
+        <div v-if="row.projectName" class="admin-cell-sub">{{ row.projectName }}</div>
       </template>
+
       <template #cell-reservation="{ row }">
         <template v-if="row.reservationAmount">
-          <div class="admin-num">{{ formatCredits(row.reservationAmount) }} 积分</div>
-          <span class="admin-badge" :class="reservationBadgeClass(row.reservationStatus)" style="margin-top: 3px;">
-            {{ RESERVATION_STATUS_LABELS[row.reservationStatus || ''] || row.reservationStatus }}
-          </span>
+          <div class="admin-jobs-credit">
+            <span class="admin-num">{{ formatCredits(row.reservationAmount) }} 积分</span>
+            <span class="admin-badge" :class="reservationBadgeClass(row.reservationStatus)">
+              {{ RESERVATION_STATUS_LABELS[row.reservationStatus || ''] || row.reservationStatus }}
+            </span>
+          </div>
         </template>
         <span v-else class="admin-cell-sub">-</span>
       </template>
+
       <template #cell-upstream="{ row }">
         <div v-if="row.providerTaskId" class="admin-mono" :title="row.providerTaskId">
           {{ row.providerTaskId.slice(0, 22) }}{{ row.providerTaskId.length > 22 ? '…' : '' }}
@@ -320,6 +474,7 @@ onMounted(() => loadJobs(true))
         </div>
         <span v-if="!row.providerTaskId && !row.errorMessage" class="admin-cell-sub">-</span>
       </template>
+
       <template #cell-actions="{ row }">
         <div class="admin-actions">
           <button type="button" class="ui-button ui-button--ghost ui-button--sm" @click="openDetail(row)">
@@ -348,7 +503,6 @@ onMounted(() => loadJobs(true))
       </template>
     </UiDataTable>
 
-    <!-- 任务详情弹窗 -->
     <UiDialog
       v-model:open="detailDialogOpen"
       size="landscape"
@@ -359,11 +513,23 @@ onMounted(() => loadJobs(true))
         <dl class="admin-detail-grid">
           <div class="admin-detail-item">
             <dt>所属用户 / 项目</dt>
-            <dd>{{ detailJob.userEmail }} · #{{ detailJob.userId }} · {{ detailJob.projectName || '-' }}</dd>
+            <dd>
+              {{ detailJob.userNickname || detailJob.userEmail }}
+              <template v-if="detailJob.userNickname && detailJob.userNickname !== detailJob.userEmail">
+                ({{ detailJob.userEmail }})
+              </template>
+              · #{{ detailJob.userId }}
+              <template v-if="detailJob.projectName"> · {{ detailJob.projectName }}</template>
+            </dd>
           </div>
           <div class="admin-detail-item">
-            <dt>状态与步骤</dt>
-            <dd>{{ JOB_STATUS_LABELS[detailJob.status] || detailJob.status }} · {{ detailJob.progress }}% · {{ detailJob.stepLabel || '-' }}</dd>
+            <dt>任务类型 / 状态</dt>
+            <dd>
+              {{ JOB_TYPE_LABELS[detailJob.jobType] || detailJob.jobType }}
+              (<span class="admin-mono">{{ detailJob.jobType }}</span>)
+              · {{ JOB_STATUS_LABELS[detailJob.status] || detailJob.status }} · {{ detailJob.progress }}%
+              <template v-if="detailJob.stepLabel"> · {{ detailJob.stepLabel }}</template>
+            </dd>
           </div>
           <div class="admin-detail-item">
             <dt>上游任务 ID</dt>
@@ -372,7 +538,7 @@ onMounted(() => loadJobs(true))
           <div class="admin-detail-item">
             <dt>预扣单</dt>
             <dd class="admin-mono">
-              {{ detailJob.reservationAmount ? `${formatCredits(detailJob.reservationAmount)} · ${RESERVATION_STATUS_LABELS[detailJob.reservationStatus || ''] || detailJob.reservationStatus}` : '-' }}
+              {{ detailJob.reservationAmount ? `${formatCredits(detailJob.reservationAmount)} 积分 · ${RESERVATION_STATUS_LABELS[detailJob.reservationStatus || ''] || detailJob.reservationStatus}` : '-' }}
             </dd>
           </div>
           <div class="admin-detail-item">
@@ -406,11 +572,10 @@ onMounted(() => loadJobs(true))
       </template>
     </UiDialog>
 
-    <!-- 退还冻结积分弹窗 -->
     <UiDialog
       v-model:open="refundDialogOpen"
       title="退还冻结积分"
-      :description="refundJob ? `退还 ${formatCredits(refundJob.reservationAmount)} 积分给 ${refundJob.userEmail}` : ''"
+      :description="refundJob ? `退还 ${formatCredits(refundJob.reservationAmount)} 积分给 ${refundJob.userNickname || refundJob.userEmail}` : ''"
     >
       <div class="admin-form-stack">
         <div class="ui-field">
@@ -426,12 +591,11 @@ onMounted(() => loadJobs(true))
       </template>
     </UiDialog>
 
-    <!-- 补录上游成片弹窗 -->
     <UiDialog
       v-model:open="rescueDialogOpen"
       size="wide"
       title="补录成片"
-      :description="rescueJob ? `${JOB_TYPE_LABELS[rescueJob.jobType] || rescueJob.jobType} · ${rescueJob.userEmail}` : ''"
+      :description="rescueJob ? `${JOB_TYPE_LABELS[rescueJob.jobType] || rescueJob.jobType} · ${rescueJob.userNickname || rescueJob.userEmail}` : ''"
     >
       <div class="admin-form-stack">
         <div class="ui-field">
@@ -462,3 +626,102 @@ onMounted(() => loadJobs(true))
     </UiDialog>
   </section>
 </template>
+
+<style scoped>
+.admin-jobs-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-panel);
+  background: var(--color-surface);
+}
+
+.admin-jobs-search-wrap {
+  position: relative;
+  width: min(240px, 100%);
+  flex: 1 1 200px;
+  max-width: 280px;
+}
+
+.admin-jobs-search-icon {
+  position: absolute;
+  top: 50%;
+  left: 12px;
+  transform: translateY(-50%);
+  color: var(--color-muted);
+  pointer-events: none;
+}
+
+.admin-jobs-search-input {
+  width: 100%;
+  padding-left: 34px;
+  padding-right: 30px;
+}
+
+.admin-jobs-search-clear {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--color-muted);
+  cursor: pointer;
+}
+
+.admin-jobs-search-clear:hover {
+  background: rgb(255 255 255 / 10%);
+  color: var(--color-text);
+}
+
+.admin-jobs-select {
+  width: 146px;
+}
+
+.admin-jobs-select--type {
+  width: 168px;
+}
+
+.admin-jobs-reset {
+  height: 42px;
+}
+
+.admin-jobs-time {
+  white-space: nowrap;
+}
+
+.admin-jobs-step {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-jobs-owner {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.admin-jobs-email {
+  font-size: 12px;
+  color: var(--color-muted);
+}
+
+.admin-jobs-credit {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+</style>

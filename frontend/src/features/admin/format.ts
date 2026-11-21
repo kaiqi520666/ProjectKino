@@ -13,15 +13,15 @@ export const ROLE_LABELS: Record<string, string> = {
 }
 
 export const JOB_TYPE_LABELS: Record<string, string> = {
-  parse_novel: '解析小说',
-  extract_assets: '提取资产',
-  generate_episodes: '生成分集',
-  generate_storyboard: '生成分镜',
-  regenerate_episode_storyboard: '重写单集分镜',
+  script_generate: '生成全剧剧本',
+  script_regenerate: '重生成全剧剧本',
+  episode_rewrite: '重写单集剧本',
+  episode_append: '续写新分集',
+  assets_extract: '提取项目资产',
   asset_image: '生成资产图',
+  storyboard_generate: '生成单集分镜',
   clip_video: '生成分镜视频',
-  compose_episode: '合成本集视频',
-  compose_project: '合成全片',
+  episode_compose: '合成本集视频',
 }
 
 export const JOB_STATUS_LABELS: Record<string, string> = {
@@ -36,6 +36,7 @@ export const JOB_STATUS_LABELS: Record<string, string> = {
 export const RESERVATION_STATUS_LABELS: Record<string, string> = {
   frozen: '已冻结',
   settled: '已结算',
+  released: '已退还',
   refunded: '已退还',
 }
 

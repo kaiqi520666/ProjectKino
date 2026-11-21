@@ -70,6 +70,7 @@ class AdminJobItemOut(CamelModel):
     id: UUID
     user_id: int
     user_email: str
+    user_nickname: str = ""
     project_id: UUID | None = None
     project_name: str | None = None
     job_type: str
