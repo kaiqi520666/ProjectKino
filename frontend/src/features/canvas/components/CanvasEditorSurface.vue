@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, nextTick, onBeforeUnmount, reactive, ref, type FunctionalComponent } from 'vue'
+import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, type FunctionalComponent } from 'vue'
 import { ArrowLeft, Check, CloudAlert, Copy, FolderOpen, Grid2X2, Loader2, Magnet, Map as MapIcon, Maximize, Minus, Plus, Trash2, Unlink, Waypoints, X } from 'lucide-vue-next'
 import { Background, ConnectionLineType, MiniMap, setupVueFlow, SimpleBezierEdge, VueFlow, type Connection, type Edge, type FinalConnectionState, type NodeProps, type Viewport, type XYPosition } from '@xyflow/vue'
 import '@xyflow/vue/dist/style.css'
@@ -7,16 +7,20 @@ import UiDialog from '@/components/ui/UiDialog.vue'
 import UiIconButton from '@/components/ui/UiIconButton.vue'
 import ImagePreview from '@/components/ui/ImagePreview.vue'
 import VideoPreview from '@/components/ui/VideoPreview.vue'
+import { useModelCatalog } from '@/features/studio/composables/useModelCatalog'
+import { useAuthStore } from '@/stores/auth'
 import { useUiStore } from '@/stores/ui'
 import { apiErrorMessage } from '../api'
-import { canvasNodeKinds, canvasNodeLabels, canConnectCanvasKinds, canConnectCanvasNodes, outputKind, type CanvasAsset, type CanvasDocument, type CanvasMedia, type CanvasNode, type CanvasNodeKind } from '../canvas-model'
+import { canvasNodeKinds, canvasNodeLabels, canConnectCanvasKinds, canConnectCanvasNodes, outputKind, type CanvasAsset, type CanvasDocument, type CanvasGenerationSettings, type CanvasMedia, type CanvasNode, type CanvasNodeKind } from '../canvas-model'
 import { canvasNodeIcons } from '../canvas-node-icons'
-import { useCanvasStore } from '../canvas-store'
+import { useCanvasStore, type CanvasJobWatchHooks } from '../canvas-store'
 import CanvasWorkNode from './CanvasWorkNode.vue'
 
 const props = defineProps<{ canvas: CanvasDocument }>()
 const store = useCanvasStore()
+const auth = useAuthStore()
 const ui = useUiStore()
+const modelCatalog = useModelCatalog()
 const flow = setupVueFlow<CanvasNode>()
 const stage = ref<HTMLElement>()
 const menuElement = ref<HTMLElement>()
@@ -311,6 +315,36 @@ function showPreview(kind: 'image' | 'video', media: CanvasMedia) {
   previewOpen.value = true
 }
 
+function createJobHooks(): CanvasJobWatchHooks {
+  return {
+    onSuccess(job) {
+      if (job.jobType === 'canvas_text') ui.notify('画布文本已生成', 'success')
+      else if (job.jobType === 'canvas_image') ui.notify('画布图片已生成', 'success')
+      else if (job.jobType === 'canvas_video') ui.notify('画布视频已生成', 'success')
+    },
+    onError(message) {
+      ui.notify(message, 'error')
+    },
+    onSettled() {
+      void auth.refreshBalance()
+    },
+  }
+}
+
+async function handleGenerate(nodeId: string, effectiveSettings: CanvasGenerationSettings) {
+  const node = props.canvas.nodes.find(item => item.id === nodeId)
+  if (!node) return
+  store.updateNode(props.canvas, nodeId, {
+    settings: { ...node.data.settings, ...effectiveSettings },
+  })
+  try {
+    await store.generateNode(props.canvas, nodeId, references.value.get(nodeId) ?? [], createJobHooks())
+  } catch (error) {
+    ui.notify(apiErrorMessage(error), 'error')
+    void auth.refreshBalance()
+  }
+}
+
 // A registered component keeps the media element mounted when drag or selection state changes.
 const CanvasGraphNode: FunctionalComponent<NodeProps<CanvasNode>> = ({ id, type, data, selected }) => {
   const findNode = () => props.canvas.nodes.find(item => item.id === id)
@@ -320,13 +354,14 @@ const CanvasGraphNode: FunctionalComponent<NodeProps<CanvasNode>> = ({ id, type,
     data: reactive(data),
     selected,
     panelsVisible: selected && selectedIds.value.size === 1 && !draggedNode.value && !selecting.value && !connecting.value,
-    generatingText: store.generatingText[id] ?? false,
+    generationState: store.generatingNodes[id],
+    uploading: store.uploadingNodes[id] ?? false,
     connecting: connecting.value,
     outputConnected: connectedOutputs.value.has(id),
     references: references.value.get(id) ?? [],
     onEdit: value => store.updateNode(props.canvas, id, value),
     onReplace: file => void uploadNodeMedia(id, file),
-    onGenerate: () => ui.notify('画布真实 AI 生成任务将在下一步接入', 'info'),
+    onGenerate: settings => void handleGenerate(id, settings),
     onCover: media => void setCover(media),
     onPreview: showPreview,
     onCollect: title => {
@@ -342,6 +377,11 @@ const CanvasGraphNode: FunctionalComponent<NodeProps<CanvasNode>> = ({ id, type,
 CanvasGraphNode.props = ['id', 'type', 'data', 'selected']
 CanvasGraphNode.inheritAttrs = false
 const nodeTypes = Object.fromEntries(canvasNodeKinds.map(kind => [kind, CanvasGraphNode]))
+
+onMounted(() => {
+  void modelCatalog.ensureLoaded()
+  store.resumeActiveJobs(props.canvas, createJobHooks())
+})
 
 onBeforeUnmount(() => {
   cancelTouchMenu()

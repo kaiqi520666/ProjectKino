@@ -79,3 +79,53 @@ test('formatJobSpec formats episode compose and LLM token specs cleanly', () => 
   assert.equal(readLlmCreditCost({ cost: '0.0045' }), '0.0045')
   assert.equal(readLlmCreditCost({ cost: '0' }), null)
 })
+
+test('formatJobSpec supports canvas_image, canvas_video, and canvas_text jobs', () => {
+  const img = formatJobSpec(
+    {
+      jobType: 'canvas_image',
+      inputPayload: { modelId: 'cangyuan-pro', tier: '1k', ratio: '9:16' },
+      resultPayload: null,
+      usageSummary: null,
+    },
+    { 'cangyuan-pro': '苍渊 Pro' },
+  )
+  assert.deepEqual(img, {
+    title: '苍渊 Pro',
+    meta: ['1K', '9:16'],
+  })
+
+  const vid = formatJobSpec(
+    {
+      jobType: 'canvas_video',
+      inputPayload: {
+        modelId: 'seedance-2.0',
+        resolution: '1080p',
+        ratio: '16:9',
+        durationSeconds: 8,
+        referenceUrls: ['https://a.jpg', 'https://b.jpg'],
+      },
+      resultPayload: { duration: 8.0 },
+      usageSummary: null,
+    },
+    { 'seedance-2.0': 'Seedance 2.0' },
+  )
+  assert.deepEqual(vid, {
+    title: 'Seedance 2.0',
+    meta: ['1080p', '16:9', '8s', '2参考图'],
+  })
+
+  const txt = formatJobSpec(
+    {
+      jobType: 'canvas_text',
+      inputPayload: { modelId: 'deepseek-chat' },
+      resultPayload: null,
+      usageSummary: { modelId: 'deepseek-chat', inputTokens: 820, outputTokens: 1500 },
+    },
+    { 'deepseek-chat': 'DeepSeek' },
+  )
+  assert.deepEqual(txt, {
+    title: 'DeepSeek',
+    meta: ['入 820 / 出 1.5k'],
+  })
+})

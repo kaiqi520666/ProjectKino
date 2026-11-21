@@ -22,6 +22,9 @@ export const JOB_TYPE_LABELS: Record<string, string> = {
   storyboard_generate: '生成单集分镜',
   clip_video: '生成分镜视频',
   episode_compose: '合成本集视频',
+  canvas_text: '画布文本生成',
+  canvas_image: '画布生图',
+  canvas_video: '画布生视频',
 }
 
 export const JOB_STATUS_LABELS: Record<string, string> = {

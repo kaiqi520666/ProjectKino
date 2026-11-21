@@ -71,6 +71,8 @@ export interface AdminJobItem {
   userNickname: string
   projectId?: string | null
   projectName?: string | null
+  canvasId?: string | null
+  canvasName?: string | null
   jobType: string
   targetId?: string | null
   status: 'queued' | 'running' | 'polling' | 'succeeded' | 'failed' | 'review'

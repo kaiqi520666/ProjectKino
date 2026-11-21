@@ -1,14 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import { Handle, Position } from '@xyflow/vue'
-import { Check, CircleDashed, CircleDot, FolderOpen, Pencil, Upload, X } from 'lucide-vue-next'
+import { AlertCircle, Check, CircleDashed, CircleDot, FolderOpen, Loader2, Pencil, Upload, X } from 'lucide-vue-next'
 import UiButton from '@/components/ui/UiButton.vue'
 import UiDialog from '@/components/ui/UiDialog.vue'
 import MediaPlayer from '@/components/ui/MediaPlayer.vue'
 import VideoThumbnail from '@/components/ui/VideoThumbnail.vue'
 import { useUiStore } from '@/stores/ui'
-import { canvasNodeLabels, canvasRatio, isGenerationNode, outputKind, type CanvasMedia, type CanvasNode, type CanvasNodeData, type CanvasNodeKind } from '../canvas-model'
+import { canvasNodeLabels, canvasRatio, isGenerationNode, outputKind, type CanvasGenerationSettings, type CanvasMedia, type CanvasNode, type CanvasNodeData, type CanvasNodeKind } from '../canvas-model'
 import { canvasNodeIcons } from '../canvas-node-icons'
+import type { CanvasNodeGenerationState } from '../canvas-store'
 import CanvasGenerationPanel from './CanvasGenerationPanel.vue'
 import CanvasMarkdown from './CanvasMarkdown.vue'
 import CanvasTextEditor from './CanvasTextEditor.vue'
@@ -20,7 +21,8 @@ const props = defineProps<{
   data: CanvasNodeData
   selected: boolean
   panelsVisible: boolean
-  generatingText: boolean
+  generationState?: CanvasNodeGenerationState
+  uploading?: boolean
   connecting: boolean
   outputConnected: boolean
   references: CanvasNode[]
@@ -28,7 +30,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   edit: [value: Partial<CanvasNodeData>]
   replace: [file: File]
-  generate: [prompt: string]
+  generate: [settings: CanvasGenerationSettings]
   cover: [media: CanvasMedia]
   preview: [kind: 'image' | 'video', media: CanvasMedia]
   collect: [title: string]
@@ -53,6 +55,15 @@ let originalText: string | undefined
 const title = computed(() => props.data.title || canvasNodeLabels[props.kind])
 const canGenerate = computed(() => props.kind === 'text' || isGenerationNode(props.kind))
 const mediaKind = computed(() => outputKind(props.kind))
+const isGenerating = computed(() => Boolean(props.generationState))
+const generationLabel = computed(() => {
+  const state = props.generationState
+  if (!state) return ''
+  if (state.progress > 0 && state.progress < 100) {
+    return `${state.stepLabel} ${state.progress}%`
+  }
+  return state.stepLabel
+})
 const isVideoPlaceholder = computed(() => props.kind === 'video-generation' && !props.data.media)
 const nodeWidth = computed(() => {
   if (props.kind === 'text') return 320
@@ -131,14 +142,10 @@ function saveText() {
   editingText.value = false
 }
 
-function generate() {
-  const references = new Map(props.references.map(node => [node.id, node]))
-  const resolved = prompt.value.replace(/\{\{ref:([\w-]+)\}\}/g, (_, id: string) => {
-    const node = references.get(id)
-    return node?.data.text || node?.data.media?.name || node?.data.title || ''
-  }).trim()
-  if (resolved) emit('generate', resolved)
-  else ui.notify('请输入提示词或选择可用的引用', 'error')
+function generate(effectiveSettings: CanvasGenerationSettings) {
+  const hasInput = Boolean(prompt.value.trim()) || props.references.some(node => Boolean(node.data.text?.trim()))
+  if (hasInput) emit('generate', effectiveSettings)
+  else ui.notify('请输入提示词或连接包含正文的文本节点', 'error')
 }
 
 function preview(media: CanvasMedia) {
@@ -186,7 +193,7 @@ function preview(media: CanvasMedia) {
         <div v-if="data.draft" class="canvas-text-draft-actions nodrag nopan">
           <UiButton variant="secondary" size="sm" @click.stop="resultOpen = true">查看生成结果</UiButton>
         </div>
-        <span v-if="generatingText" class="canvas-text-status" role="status">正在生成…</span>
+        <span v-if="isGenerating" class="canvas-text-status" role="status"><Loader2 :size="13" class="ui-spin" aria-hidden="true" />{{ generationLabel }}</span>
         <button type="button" class="canvas-edit-text nodrag nopan" title="编辑文本" aria-label="编辑文本" @click.stop="editText"><Pencil :size="14" />编辑</button>
       </div>
       <template v-else>
@@ -206,11 +213,21 @@ function preview(media: CanvasMedia) {
           </div>
         </div>
         <div v-else class="canvas-node-empty" :class="{ 'is-video': isVideoPlaceholder }"><component :is="canvasNodeIcons[kind]" :size="40" aria-hidden="true" /></div>
+        <div v-if="isGenerating || uploading" class="canvas-node-progress" role="status">
+          <Loader2 :size="20" class="ui-spin" aria-hidden="true" />
+          <span>{{ uploading ? '正在上传…' : generationLabel }}</span>
+        </div>
       </template>
+
+      <div v-if="data.lastError && !isGenerating" class="canvas-node-error nodrag nopan" :title="data.lastError">
+        <AlertCircle :size="14" aria-hidden="true" />
+        <span>{{ data.lastError }}</span>
+        <button type="button" aria-label="清除错误提示" @click.stop="emit('edit', { lastError: undefined })"><X :size="13" /></button>
+      </div>
     </div>
 
     <div v-if="panelsVisible && canGenerate" class="canvas-node-panels">
-      <CanvasGenerationPanel v-model="prompt" :kind="kind" :references="references" :settings="data.settings" :generating="generatingText || !!data.draft" @settings="emit('edit', { settings: $event })" @generate="generate"
+      <CanvasGenerationPanel v-model="prompt" :kind="kind" :references="references" :settings="data.settings" :generating="isGenerating || (kind === 'text' && !!data.draft)" @settings="emit('edit', { settings: $event })" @generate="generate($event)"
         @remove-reference="emit('unlink', $event)" @reorder-references="emit('edit', { referenceOrder: $event })" />
     </div>
 
@@ -273,7 +290,13 @@ function preview(media: CanvasMedia) {
 .canvas-node-top { bottom: calc(100% + 9px); }
 .canvas-node-panels { top: calc(100% + 12px); width: min(660px, calc(100vw - 28px)); }
 .canvas-text-draft-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; margin-top: auto; }
-.canvas-text-status { color: var(--color-muted); font-size: var(--font-size-caption); }
+.canvas-text-status { display: inline-flex; align-items: center; gap: 5px; color: var(--color-gold-soft); font-size: var(--font-size-caption); }
+.canvas-node-progress { position: absolute; inset: 8px; z-index: 2; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 12px; border-radius: 5px; background: rgb(11 11 14 / 76%); backdrop-filter: blur(2px); color: var(--color-gold-soft); font-size: var(--font-size-caption); text-align: center; }
+.canvas-node-error { display: flex; align-items: center; gap: 6px; margin-top: 8px; padding: 6px 8px; border: 1px solid rgb(239 68 68 / 32%); border-radius: 5px; background: rgb(239 68 68 / 10%); color: #fca5a5; font-size: var(--font-size-caption); }
+.canvas-node-error > svg { flex: none; }
+.canvas-node-error > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.canvas-node-error > button { flex: none; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 4px; color: inherit; cursor: pointer; }
+.canvas-node-error > button:hover { background: rgb(239 68 68 / 20%); }
 .canvas-result-preview { overflow: auto; }
 @media (hover: none) {
   .canvas-node.is-selected .canvas-node-close { opacity: 1; pointer-events: auto; }

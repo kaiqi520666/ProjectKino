@@ -1,10 +1,10 @@
 import type { Viewport } from '@xyflow/vue'
 import { http, unwrap } from '@/lib/http'
 import type { JobOut } from '@/features/studio/api-types'
-import { apiErrorMessage, uploadFileToOss } from '@/features/studio/api'
-import type { CanvasAsset, PersistedCanvasGraph } from './canvas-model'
+import { apiErrorMessage, JobFailureError, uploadFileToOss, watchJob } from '@/features/studio/api'
+import type { CanvasAsset, CanvasImageTier, PersistedCanvasGraph } from './canvas-model'
 
-export { apiErrorMessage, uploadFileToOss }
+export { apiErrorMessage, JobFailureError, uploadFileToOss, watchJob }
 
 export interface CanvasSummaryOut {
   id: string
@@ -87,6 +87,36 @@ export function createUserAssetApi(body: {
   sourceId?: string | null
 }) {
   return unwrap<UserAssetOut>(http.post('/assets', body))
+}
+
+export interface CanvasGenerateReference {
+  nodeId: string
+  kind: CanvasAsset['kind']
+  title: string
+  text?: string | null
+  mediaUrl?: string | null
+}
+
+export interface CanvasGenerateBody {
+  kind: 'text' | 'image' | 'video'
+  prompt: string
+  currentText?: string | null
+  modelId?: string | null
+  ratio?: string | null
+  tier?: CanvasImageTier | null
+  resolution?: string | null
+  durationSeconds?: number | null
+  references: CanvasGenerateReference[]
+}
+
+export interface CanvasJobAcceptedOut {
+  canvasId: string
+  nodeId: string
+  job: JobOut
+}
+
+export function generateCanvasNodeApi(canvasId: string, nodeId: string, body: CanvasGenerateBody) {
+  return unwrap<CanvasJobAcceptedOut>(http.post(`/canvases/${canvasId}/nodes/${nodeId}/generate`, body))
 }
 
 export function deleteUserAssetApi(assetId: string) {

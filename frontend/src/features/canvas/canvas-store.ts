@@ -1,24 +1,33 @@
 import axios from 'axios'
 import { defineStore } from 'pinia'
 import { reactive } from 'vue'
+import type { JobOut } from '@/features/studio/api-types'
 import {
+  apiErrorMessage,
   archiveCanvasApi,
   createCanvasApi,
   createUserAssetApi,
   deleteUserAssetApi,
+  generateCanvasNodeApi,
   getCanvasDetailApi,
+  JobFailureError,
   listCanvasesApi,
   listUserAssetsApi,
   updateCanvasApi,
   uploadFileToOss,
+  watchJob,
   type CanvasDetailOut,
+  type CanvasGenerateBody,
+  type CanvasGenerateReference,
   type CanvasSummaryOut,
   type UserAssetOut,
 } from './api'
 import {
+  canvasNodeLabels,
   createCanvasNode,
   hydrateCanvasGraph,
   isPersistedMediaUrl,
+  MAX_CANVAS_NODE_HISTORY,
   outputKind,
   serializeCanvasGraph,
   type CanvasAsset,
@@ -32,8 +41,44 @@ import {
 
 export type CanvasSaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 
+export interface CanvasNodeGenerationState {
+  jobId: string
+  jobType: string
+  status: JobOut['status']
+  progress: number
+  stepLabel: string
+}
+
+export interface CanvasJobWatchHooks {
+  onSuccess?: (job: JobOut) => void
+  onError?: (message: string) => void
+  onSettled?: () => void
+}
+
 const saveTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const pendingSaves = new Map<string, Promise<void>>()
+const watchedJobIds = new Set<string>()
+
+function buildGenerateReferences(nodes: readonly CanvasNode[]): CanvasGenerateReference[] {
+  return nodes.map((refNode) => {
+    const kind = outputKind(refNode.type)
+    const rawUrl = refNode.data.media?.url
+    return {
+      nodeId: refNode.id,
+      kind,
+      title: refNode.data.title || canvasNodeLabels[refNode.type ?? 'text'],
+      text: refNode.data.text ?? null,
+      mediaUrl: isPersistedMediaUrl(rawUrl) ? rawUrl! : null,
+    }
+  })
+}
+
+function defaultStepLabel(status: JobOut['status'], stepLabel?: string | null): string {
+  if (stepLabel && stepLabel.trim()) return stepLabel.trim()
+  if (status === 'queued') return '排队中...'
+  if (status === 'polling') return '等待生成结果...'
+  return '正在生成...'
+}
 
 function mapUserAsset(item: UserAssetOut): CanvasAsset {
   return {
@@ -117,7 +162,7 @@ export const useCanvasStore = defineStore('canvases', {
     assetsLoaded: false,
     saveStatus: {} as Record<string, CanvasSaveStatus>,
     uploadingNodes: {} as Record<string, boolean>,
-    generatingText: {} as Record<string, boolean>,
+    generatingNodes: {} as Record<string, CanvasNodeGenerationState>,
   }),
   actions: {
     getCanvas(id: string): CanvasDocument | undefined {
@@ -231,6 +276,12 @@ export const useCanvasStore = defineStore('canvases', {
               }
               if (srv.data.draft && !localData.draft) {
                 localData.draft = srv.data.draft
+              }
+              if (srv.data.text && !localData.text) {
+                localData.text = srv.data.text
+              }
+              if (srv.data.lastJobId && !localData.lastJobId) {
+                localData.lastJobId = srv.data.lastJobId
               }
             }
             canvas.version = latest.version
@@ -360,10 +411,192 @@ export const useCanvasStore = defineStore('canvases', {
       this.assets = this.assets.filter((item) => item.id !== id)
     },
 
+    async generateNode(
+      canvas: CanvasDocument,
+      nodeId: string,
+      references: readonly CanvasNode[],
+      hooks?: CanvasJobWatchHooks,
+    ): Promise<JobOut | null> {
+      const node = canvas.nodes.find((item) => item.id === nodeId)
+      if (!node) return null
+
+      let kind: CanvasGenerateBody['kind']
+      if (node.type === 'text') kind = 'text'
+      else if (node.type === 'image-generation') kind = 'image'
+      else if (node.type === 'video-generation') kind = 'video'
+      else return null
+
+      if (this.generatingNodes[nodeId]) return null
+
+      // Persist latest node / prompt / settings before dispatching worker writeback.
+      await this.flushSave(canvas)
+
+      const current = (this.getCanvas(canvas.id) ?? canvas).nodes.find((item) => item.id === nodeId)
+      if (!current) return null
+
+      const settings = current.data.settings
+      const baseText = current.data.text ?? ''
+      const body: CanvasGenerateBody = {
+        kind,
+        prompt: current.data.prompt ?? '',
+        currentText: kind === 'text' ? baseText : null,
+        modelId: settings?.modelId ?? null,
+        ratio: kind !== 'text' ? (settings?.ratio ?? '16:9') : null,
+        tier: kind === 'image' ? (settings?.tier ?? '1k') : null,
+        resolution: kind === 'video' ? (settings?.resolution ?? '720p') : null,
+        durationSeconds: kind === 'video' ? (settings?.durationSeconds ?? null) : null,
+        references: buildGenerateReferences(references),
+      }
+
+      const accepted = await generateCanvasNodeApi(canvas.id, nodeId, body)
+      const currentData = reactive(current.data)
+      currentData.lastJobId = accepted.job.id
+      currentData.lastError = undefined
+      if (canvas.activeJobs) {
+        canvas.activeJobs = [
+          ...canvas.activeJobs.filter((item) => item.id !== accepted.job.id),
+          accepted.job,
+        ]
+      } else {
+        canvas.activeJobs = [accepted.job]
+      }
+      hooks?.onSettled?.()
+      void this.watchCanvasJob(canvas, nodeId, accepted.job, { ...hooks, baseText })
+      return accepted.job
+    },
+
+    resumeActiveJobs(canvas: CanvasDocument, hooks?: CanvasJobWatchHooks) {
+      const activeJobs = canvas.activeJobs ?? []
+      for (const job of activeJobs) {
+        if (!job.targetId || watchedJobIds.has(job.id)) continue
+        const node = canvas.nodes.find((item) => item.id === job.targetId)
+        if (!node) continue
+        void this.watchCanvasJob(canvas, job.targetId, job, {
+          ...hooks,
+          baseText: node.data.text ?? '',
+        })
+      }
+    },
+
+    async watchCanvasJob(
+      canvas: CanvasDocument,
+      nodeId: string,
+      initialJob: JobOut,
+      options?: CanvasJobWatchHooks & { baseText?: string },
+    ): Promise<void> {
+      if (watchedJobIds.has(initialJob.id)) return
+      watchedJobIds.add(initialJob.id)
+
+      this.generatingNodes[nodeId] = {
+        jobId: initialJob.id,
+        jobType: initialJob.jobType,
+        status: initialJob.status,
+        progress: initialJob.progress,
+        stepLabel: defaultStepLabel(initialJob.status, initialJob.stepLabel),
+      }
+
+      try {
+        const finalJob = await watchJob(initialJob.id, (snapshot) => {
+          if (this.generatingNodes[nodeId]?.jobId === initialJob.id) {
+            this.generatingNodes[nodeId] = {
+              jobId: snapshot.id,
+              jobType: snapshot.jobType,
+              status: snapshot.status,
+              progress: snapshot.progress,
+              stepLabel: defaultStepLabel(snapshot.status, snapshot.stepLabel),
+            }
+          }
+        })
+
+        const doc = this.getCanvas(canvas.id) ?? canvas
+        const target = doc.nodes.find((item) => item.id === nodeId)
+        if (target) {
+          const targetData = reactive(target.data)
+          const res = finalJob.resultPayload ?? {}
+          if (finalJob.jobType === 'canvas_text') {
+            const generatedText = typeof res.text === 'string' ? res.text : ''
+            if (generatedText) {
+              const currentText = targetData.text ?? ''
+              const expectedBase = options?.baseText ?? ''
+              if (currentText === expectedBase) {
+                targetData.text = generatedText
+                targetData.draft = undefined
+              } else {
+                targetData.draft = generatedText
+              }
+            }
+          } else if (finalJob.jobType === 'canvas_image' || finalJob.jobType === 'canvas_video') {
+            const url =
+              typeof res.imageUrl === 'string'
+                ? res.imageUrl
+                : typeof res.videoUrl === 'string'
+                  ? res.videoUrl
+                  : ''
+            const key =
+              typeof res.imageKey === 'string'
+                ? res.imageKey
+                : typeof res.videoKey === 'string'
+                  ? res.videoKey
+                  : undefined
+            const modelId = typeof res.modelId === 'string' ? res.modelId : undefined
+            if (url) {
+              const ext = finalJob.jobType === 'canvas_video' ? 'mp4' : 'png'
+              const media: CanvasMedia = {
+                url,
+                key,
+                name: modelId ? `${modelId}.${ext}` : `generated.${ext}`,
+                jobId: finalJob.id,
+                modelId,
+                createdAt: finalJob.finishedAt || new Date().toISOString(),
+              }
+              targetData.media = media
+              const prevHistory = targetData.history ?? []
+              if (!prevHistory.some((item) => item.jobId === finalJob.id)) {
+                targetData.history = [...prevHistory, media].slice(-MAX_CANVAS_NODE_HISTORY)
+              }
+            }
+          }
+          targetData.lastJobId = finalJob.id
+          targetData.lastError = undefined
+        }
+
+        // Worker bumped canvases.version inside FOR UPDATE; advance locally to avoid unnecessary 409.
+        doc.version += 1
+        doc.updatedAt = finalJob.finishedAt || new Date().toISOString()
+        if (doc.activeJobs) {
+          doc.activeJobs = doc.activeJobs.filter((item) => item.id !== finalJob.id)
+        }
+        options?.onSuccess?.(finalJob)
+      } catch (error) {
+        const message = apiErrorMessage(error)
+        const doc = this.getCanvas(canvas.id) ?? canvas
+        const target = doc.nodes.find((item) => item.id === nodeId)
+        if (target) {
+          const targetData = reactive(target.data)
+          targetData.lastJobId = initialJob.id
+          targetData.lastError = message
+        }
+        if (doc.activeJobs) {
+          doc.activeJobs = doc.activeJobs.filter((item) => item.id !== initialJob.id)
+        }
+        if (error instanceof JobFailureError) {
+          doc.version += 1
+        }
+        options?.onError?.(message)
+      } finally {
+        watchedJobIds.delete(initialJob.id)
+        if (this.generatingNodes[nodeId]?.jobId === initialJob.id) {
+          delete this.generatingNodes[nodeId]
+        }
+        options?.onSettled?.()
+      }
+    },
+
     clearAll() {
       for (const timer of saveTimers.values()) clearTimeout(timer)
       saveTimers.clear()
       pendingSaves.clear()
+      watchedJobIds.clear()
       this.canvases = []
       this.canvasesLoading = false
       this.canvasesLoaded = false
@@ -371,7 +604,7 @@ export const useCanvasStore = defineStore('canvases', {
       this.assetsLoaded = false
       this.saveStatus = {}
       this.uploadingNodes = {}
-      this.generatingText = {}
+      this.generatingNodes = {}
     },
   },
 })

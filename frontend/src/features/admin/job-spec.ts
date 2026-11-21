@@ -62,7 +62,7 @@ export function formatJobSpec(
   const result = job.resultPayload
   const usage = job.usageSummary
 
-  if (job.jobType === 'asset_image') {
+  if (job.jobType === 'asset_image' || job.jobType === 'canvas_image') {
     const modelId = readString(result, 'modelId') ?? readString(input, 'modelId')
     const tier = formatImageTier(readString(result, 'tier') ?? readString(input, 'tier'))
     const ratio = readString(result, 'ratio') ?? readString(input, 'ratio')
@@ -72,7 +72,7 @@ export function formatJobSpec(
     return { title: title || '-', meta }
   }
 
-  if (job.jobType === 'clip_video') {
+  if (job.jobType === 'clip_video' || job.jobType === 'canvas_video') {
     const modelId = readString(result, 'modelId') ?? readString(input, 'modelId')
     const resolution = readString(result, 'resolution') ?? readString(input, 'resolution')
     const ratio = readString(result, 'ratio') ?? readString(input, 'ratio')

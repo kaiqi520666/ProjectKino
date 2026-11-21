@@ -248,18 +248,14 @@ onBeforeUnmount(() => {
   clearSearchTimer()
 })
 
+const MEDIA_JOB_TYPES = new Set(['asset_image', 'clip_video', 'canvas_image', 'canvas_video'])
+
 function canRefund(job: AdminJobItem): boolean {
-  return (
-    (job.jobType === 'asset_image' || job.jobType === 'clip_video')
-    && job.reservationStatus === 'frozen'
-  )
+  return MEDIA_JOB_TYPES.has(job.jobType) && job.reservationStatus === 'frozen'
 }
 
 function canRescue(job: AdminJobItem): boolean {
-  return (
-    (job.jobType === 'asset_image' || job.jobType === 'clip_video')
-    && (job.status === 'review' || job.status === 'failed')
-  )
+  return MEDIA_JOB_TYPES.has(job.jobType) && (job.status === 'review' || job.status === 'failed')
 }
 
 function openDetail(job: AdminJobItem) {
@@ -290,7 +286,7 @@ function readMediaUrl(
 function getJobPreviewMedia(job: AdminJobItem): JobPreviewMedia | null {
   if (job.status !== 'succeeded' || !job.resultPayload) return null
   const label = JOB_TYPE_LABELS[job.jobType] || job.jobType
-  const title = [label, job.projectName].filter(Boolean).join(' · ')
+  const title = [label, job.projectName || job.canvasName].filter(Boolean).join(' · ')
 
   const videoUrl = readMediaUrl(job.resultPayload, ['videoUrl', 'composedVideoUrl'])
   if (videoUrl) return { kind: 'video', src: videoUrl, title }
@@ -389,6 +385,9 @@ const JOB_TYPE_META: Record<string, { icon: Component; tone: JobTypeTone }> = {
   storyboard_generate: { icon: Clapperboard, tone: 'storyboard' },
   clip_video: { icon: Film, tone: 'video' },
   episode_compose: { icon: Video, tone: 'video' },
+  canvas_text: { icon: FileText, tone: 'script' },
+  canvas_image: { icon: ImageIcon, tone: 'asset' },
+  canvas_video: { icon: Film, tone: 'video' },
 }
 
 function getJobTypeMeta(jobType: string): { icon: Component; tone: JobTypeTone } {
@@ -642,12 +641,12 @@ onMounted(() => {
       <template #cell-owner="{ row }">
         <div
           class="admin-jobs-inline-cell"
-          :title="row.projectName ? `${row.userEmail} · ${row.projectName}` : row.userEmail"
+          :title="(row.projectName || row.canvasName) ? `${row.userEmail} · ${row.projectName || row.canvasName}` : row.userEmail"
         >
           <span class="admin-cell-primary">{{ row.userEmail }}</span>
-          <template v-if="row.projectName">
+          <template v-if="row.projectName || row.canvasName">
             <span class="admin-jobs-sep" aria-hidden="true">·</span>
-            <span class="admin-jobs-project">{{ row.projectName }}</span>
+            <span class="admin-jobs-project">{{ row.projectName || row.canvasName }}</span>
           </template>
         </div>
       </template>
@@ -737,7 +736,7 @@ onMounted(() => {
       <template v-if="detailJob">
         <dl class="admin-detail-grid">
           <div class="admin-detail-item">
-            <dt>所属用户 / 项目</dt>
+            <dt>所属用户 / 项目·画布</dt>
             <dd>
               {{ detailJob.userNickname || detailJob.userEmail }}
               <template v-if="detailJob.userNickname && detailJob.userNickname !== detailJob.userEmail">
@@ -745,6 +744,7 @@ onMounted(() => {
               </template>
               · #{{ detailJob.userId }}
               <template v-if="detailJob.projectName"> · {{ detailJob.projectName }}</template>
+              <template v-else-if="detailJob.canvasName"> · 画布：{{ detailJob.canvasName }}</template>
             </dd>
           </div>
           <div class="admin-detail-item">
