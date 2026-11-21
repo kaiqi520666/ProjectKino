@@ -168,7 +168,6 @@ async def generate_canvas_node_endpoint(
                 "rawPrompt": body.prompt,
                 "currentText": body.current_text,
                 "referenceTexts": resolved.reference_texts,
-                "referenceUrls": resolved.reference_urls,
                 "referenceImages": resolved.reference_images,
             },
             step_total=2,
