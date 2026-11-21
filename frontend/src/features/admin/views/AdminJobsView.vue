@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Activity, AlertTriangle, Eye, RefreshCw, RotateCcw, Search, Wrench, X } from 'lucide-vue-next'
+import { Activity, AlertTriangle, Check, Copy, Eye, RefreshCw, RotateCcw, Search, Wrench, X } from 'lucide-vue-next'
 import UiDataTable, { type DataTableColumn } from '@/components/ui/UiDataTable.vue'
 import UiDateRangePicker from '@/components/ui/UiDateRangePicker.vue'
 import UiDialog from '@/components/ui/UiDialog.vue'
@@ -326,6 +326,74 @@ function prettyJson(obj: unknown): string {
   }
 }
 
+const READABLE_INPUT_FIELDS: ReadonlyArray<{
+  key: string
+  label: string
+  alwaysExtract?: boolean
+}> = [
+  { key: 'prompt', label: '提示词 (Prompt)', alwaysExtract: true },
+  { key: 'text', label: '输入文本' },
+  { key: 'feedback', label: '修改意见' },
+]
+
+const detailInputView = computed(() => {
+  const payload = detailJob.value?.inputPayload ?? {}
+  const textBlocks: Array<{ key: string; label: string; content: string }> = []
+  const extractedKeys = new Set<string>()
+
+  for (const field of READABLE_INPUT_FIELDS) {
+    const raw = payload[field.key]
+    if (typeof raw !== 'string') continue
+    const trimmed = raw.trim()
+    if (!trimmed) continue
+    if (field.alwaysExtract || raw.includes('\n') || raw.includes('\\n') || raw.length > 80) {
+      const normalized = raw.replace(/\r\n/g, '\n').replace(/\\n/g, '\n')
+      textBlocks.push({ key: field.key, label: field.label, content: normalized })
+      extractedKeys.add(field.key)
+    }
+  }
+
+  const restPayload: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(payload)) {
+    if (!extractedKeys.has(key)) restPayload[key] = value
+  }
+
+  return {
+    textBlocks,
+    restPayload,
+    hasRestPayload: Object.keys(restPayload).length > 0,
+  }
+})
+
+const copiedKey = ref<string | null>(null)
+let copyTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearCopyTimer() {
+  if (copyTimer !== null) {
+    clearTimeout(copyTimer)
+    copyTimer = null
+  }
+}
+
+async function copyText(key: string, text: string) {
+  if (typeof navigator === 'undefined' || !navigator.clipboard) return
+  try {
+    await navigator.clipboard.writeText(text)
+    copiedKey.value = key
+    clearCopyTimer()
+    copyTimer = setTimeout(() => {
+      copiedKey.value = null
+      copyTimer = null
+    }, 1800)
+  } catch {
+    ui.notify('复制失败，请手动选中复制', 'error')
+  }
+}
+
+onBeforeUnmount(() => {
+  clearCopyTimer()
+})
+
 onMounted(() => loadJobs(true))
 </script>
 
@@ -560,9 +628,35 @@ onMounted(() => loadJobs(true))
             <div class="ui-label">用量摘要</div>
             <pre class="admin-json-block">{{ prettyJson(detailJob.usageSummary) }}</pre>
           </div>
-          <div>
-            <div class="ui-label">输入参数</div>
-            <pre class="admin-json-block">{{ prettyJson(detailJob.inputPayload) }}</pre>
+          <div v-for="block in detailInputView.textBlocks" :key="block.key">
+            <div class="admin-block-head">
+              <span class="ui-label">{{ block.label }}</span>
+              <button
+                type="button"
+                class="admin-copy-btn"
+                @click="copyText(block.key, block.content)"
+              >
+                <Check v-if="copiedKey === block.key" :size="12" aria-hidden="true" />
+                <Copy v-else :size="12" aria-hidden="true" />
+                <span>{{ copiedKey === block.key ? '已复制' : '复制' }}</span>
+              </button>
+            </div>
+            <pre class="admin-prompt-block">{{ block.content }}</pre>
+          </div>
+          <div v-if="detailInputView.hasRestPayload || !detailInputView.textBlocks.length">
+            <div class="admin-block-head">
+              <span class="ui-label">{{ detailInputView.textBlocks.length ? '其他输入参数' : '输入参数' }}</span>
+              <button
+                type="button"
+                class="admin-copy-btn"
+                @click="copyText('inputPayload', prettyJson(detailJob.inputPayload))"
+              >
+                <Check v-if="copiedKey === 'inputPayload'" :size="12" aria-hidden="true" />
+                <Copy v-else :size="12" aria-hidden="true" />
+                <span>{{ copiedKey === 'inputPayload' ? '已复制' : '复制完整 JSON' }}</span>
+              </button>
+            </div>
+            <pre class="admin-json-block">{{ prettyJson(detailInputView.textBlocks.length ? detailInputView.restPayload : detailJob.inputPayload) }}</pre>
           </div>
           <div>
             <div class="ui-label">执行结果</div>
@@ -723,5 +817,49 @@ onMounted(() => loadJobs(true))
   flex-direction: column;
   align-items: flex-start;
   gap: 4px;
+}
+
+.admin-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.admin-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 1px solid var(--border-control);
+  border-radius: 6px;
+  background: rgb(255 255 255 / 3%);
+  color: var(--color-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.14s, border-color 0.14s, color 0.14s;
+}
+
+.admin-copy-btn:hover {
+  background: var(--surface-hover);
+  border-color: rgb(255 255 255 / 22%);
+  color: var(--color-text);
+}
+
+.admin-prompt-block {
+  margin: 6px 0 0;
+  padding: 14px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: #0b0c10;
+  color: #e2e4ec;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.75;
+  overflow-y: auto;
+  max-height: 340px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
 }
 </style>
