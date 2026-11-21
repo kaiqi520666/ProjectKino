@@ -85,6 +85,7 @@ const jobColumns: DataTableColumn[] = [
   { key: 'createdAt', label: '创建时间', width: '164px' },
   { key: 'jobType', label: '任务类型', width: '172px' },
   { key: 'status', label: '状态', width: '120px' },
+  { key: 'duration', label: '耗时', width: '88px', align: 'right' },
   { key: 'owner', label: '用户 / 项目' },
   { key: 'reservation', label: '积分', width: '120px' },
   { key: 'upstream', label: '上游 ID' },
@@ -405,6 +406,17 @@ function reservationBadgeClass(status?: string | null) {
   return ''
 }
 
+function formatJobDuration(job: AdminJobItem): string {
+  const startIso = job.startedAt || (job.finishedAt ? job.createdAt : null)
+  if (!startIso) return '-'
+  const startMs = Date.parse(startIso)
+  const endMs = job.finishedAt ? Date.parse(job.finishedAt) : Date.now()
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return '-'
+  const diffSec = Math.max(0, (endMs - startMs) / 1000)
+  if (diffSec < 10) return `${diffSec.toFixed(1)}s`
+  return `${Math.round(diffSec)}s`
+}
+
 function prettyJson(obj: unknown): string {
   if (obj === null || obj === undefined) return 'null'
   try {
@@ -602,6 +614,10 @@ onMounted(() => loadJobs(true))
             · {{ row.progress }}%
           </template>
         </span>
+      </template>
+
+      <template #cell-duration="{ row }">
+        <span class="admin-mono admin-jobs-duration">{{ formatJobDuration(row) }}</span>
       </template>
 
       <template #cell-owner="{ row }">
@@ -910,6 +926,11 @@ onMounted(() => loadJobs(true))
 }
 
 .admin-jobs-time {
+  white-space: nowrap;
+}
+
+.admin-jobs-duration {
+  color: var(--color-muted);
   white-space: nowrap;
 }
 
