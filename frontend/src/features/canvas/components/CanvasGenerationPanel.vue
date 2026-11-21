@@ -171,7 +171,7 @@ const textPricingInfo = computed<{ summary: string; tooltip: string } | null>(()
   const outStr = formatCreditsNum(output)
   const cacheStr = formatCreditsNum(cached)
   return {
-    summary: `输入 ${inStr} · 输出 ${outStr} · 缓存 ${cacheStr} 积分/百万`,
+    summary: `入${inStr} / 出${outStr} / 缓${cacheStr} 分/M`,
     tooltip: `每百万 Token 计费：输入 ${inStr} 积分 · 输出 ${outStr} 积分 · 缓存命中 ${cacheStr} 积分`,
   }
 })
@@ -415,7 +415,7 @@ function applyPrompt() {
 .canvas-generation-controls :deep(.vmp-trigger) { max-width: 210px; }
 .canvas-generation-trigger { display: inline-flex; align-items: center; gap: 7px; min-height: 36px; padding: 0 9px; border: 1px solid transparent; border-radius: 6px; white-space: nowrap; }
 .canvas-generation-trigger svg { flex: none; }
-.canvas-model-select { width: 154px; border-color: var(--border-control); background: var(--color-elevated); }
+.canvas-model-select { width: 196px; border-color: var(--border-control); background: var(--color-elevated); }
 .canvas-model-value { flex: 1; min-width: 0; overflow: hidden; text-align: start; text-overflow: ellipsis; }
 .canvas-generation-trigger:is(:hover, [data-state='open']), .canvas-expand:hover { color: var(--color-gold-soft); background: var(--gold-tint); }
 .canvas-generation-trigger[data-state='open'] { border-color: var(--color-gold); }
