@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, watch } from 'vue'
 import { ChevronDown, RotateCcw, SlidersHorizontal } from 'lucide-vue-next'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import type { ModelCatalogItemOut } from '../api-types'
@@ -22,20 +22,25 @@ const props = withDefaults(
     defaultRatio?: string
     mode?: 'single' | 'batch'
     disabled?: boolean
+    align?: 'start' | 'center' | 'end'
+    showDefaultRatioHint?: boolean
+    triggerDataPopup?: string
   }>(),
   {
     model: null,
     defaultRatio: '16:9',
     mode: 'single',
     disabled: false,
+    align: 'end',
+    showDefaultRatioHint: true,
+    triggerDataPopup: undefined,
   },
 )
 
 const tier = defineModel<ImageTier>('tier', { default: '1k' })
 const ratio = defineModel<string>('ratio', { default: '16:9' })
 const ratioMode = defineModel<'auto' | 'override'>('ratioMode', { default: 'auto' })
-
-const open = ref(false)
+const open = defineModel<boolean>('open', { default: false })
 
 const tierOptions = computed<ImageTier[]>(() => {
   const raw = props.model?.capabilities?.tiers
@@ -93,7 +98,7 @@ function resetRatio() {
 <template>
   <PopoverRoot v-model:open="open">
     <PopoverTrigger as-child :disabled="disabled">
-      <button type="button" class="ip-trigger" :disabled="disabled" aria-label="图片生成参数">
+      <button type="button" :data-canvas-popup="triggerDataPopup" class="ip-trigger" :disabled="disabled" aria-label="图片生成参数">
         <SlidersHorizontal :size="13" class="ip-trigger-icon" aria-hidden="true" />
         <span class="ip-trigger-summary">{{ summaryText }}</span>
         <ChevronDown :size="13" class="ip-trigger-chevron" aria-hidden="true" />
@@ -104,14 +109,14 @@ function resetRatio() {
       <PopoverContent
         class="ip-popover"
         side="top"
-        align="end"
+        :align="align"
         :side-offset="8"
         :collision-padding="12"
       >
         <div class="ip-head">
           <strong>生图参数</strong>
           <button
-            v-if="isCustomRatio && ratioOptions.includes(defaultRatio)"
+            v-if="showDefaultRatioHint && isCustomRatio && ratioOptions.includes(defaultRatio)"
             type="button"
             class="ip-reset-btn"
             @click="resetRatio"
@@ -144,8 +149,8 @@ function resetRatio() {
         <div class="ip-section">
           <div class="ip-label-row">
             <span class="ip-label">画面比例</span>
-            <span v-if="mode === 'single'" class="ip-hint">默认 {{ defaultRatio }}</span>
-            <span v-else class="ip-hint">角色/场景 16:9 · 物品 1:1</span>
+            <span v-if="mode === 'single' && showDefaultRatioHint" class="ip-hint">默认 {{ defaultRatio }}</span>
+            <span v-else-if="mode === 'batch'" class="ip-hint">角色/场景 16:9 · 物品 1:1</span>
           </div>
 
           <div v-if="mode === 'batch'" class="ip-mode-switch">
@@ -230,7 +235,7 @@ function resetRatio() {
 
 <style>
 .ip-popover {
-  z-index: 86;
+  z-index: 110;
   width: min(340px, calc(100vw - 24px));
   padding: 14px 16px 16px;
   border-radius: 14px;

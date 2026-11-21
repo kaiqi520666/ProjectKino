@@ -11,6 +11,7 @@ import UiButton from '@/components/ui/UiButton.vue'
 import UiDialog from '@/components/ui/UiDialog.vue'
 import type { ModelCatalogItemOut } from '@/features/studio/api-types'
 import ImageModelPicker from '@/features/studio/components/ImageModelPicker.vue'
+import ImageParamsPopover from '@/features/studio/components/ImageParamsPopover.vue'
 import VideoModelPicker from '@/features/studio/components/VideoModelPicker.vue'
 import { useModelCatalog } from '@/features/studio/composables/useModelCatalog'
 import { useAuthStore } from '@/stores/auth'
@@ -364,7 +365,19 @@ function applyPrompt() {
           </SelectContent>
         </SelectPortal>
       </SelectRoot>
-      <PopoverRoot v-if="kind !== 'text'" v-model:open="parametersOpen">
+      <ImageParamsPopover
+        v-if="kind === 'image-generation'"
+        v-model:open="parametersOpen"
+        :model="selectedModel"
+        :tier="tier"
+        :ratio="ratio"
+        :show-default-ratio-hint="false"
+        :trigger-data-popup="parametersTriggerKey"
+        align="start"
+        @update:tier="onTierChange"
+        @update:ratio="onRatioChange"
+      />
+      <PopoverRoot v-else-if="kind === 'video-generation'" v-model:open="parametersOpen">
         <PopoverTrigger :data-canvas-popup="parametersTriggerKey" class="canvas-generation-trigger canvas-parameters" aria-label="生成参数">
           <RectangleHorizontal :size="16" aria-hidden="true" />
           <span>{{ parameters }}</span>
@@ -381,19 +394,19 @@ function applyPrompt() {
                 </RadioGroupItem>
               </RadioGroupRoot>
             </div>
-            <div v-if="kind === 'image-generation'" class="canvas-parameter-section">
-              <p>分辨率档位</p>
-              <RadioGroupRoot class="canvas-parameter-options" aria-label="分辨率档位" :model-value="tier" @update:model-value="onTierChange">
-                <RadioGroupItem v-for="option in imageTiers" :key="option.value" class="canvas-parameter-option" :value="option.value">{{ option.label }}</RadioGroupItem>
-              </RadioGroupRoot>
-            </div>
-            <div v-else class="canvas-parameter-section">
+            <div class="canvas-parameter-section">
               <p>分辨率</p>
-              <RadioGroupRoot class="canvas-parameter-options" aria-label="分辨率" :model-value="resolution" @update:model-value="onResolutionChange">
+              <RadioGroupRoot
+                class="canvas-parameter-options"
+                :class="{ 'is-single': videoResolutions.length === 1 }"
+                aria-label="分辨率"
+                :model-value="resolution"
+                @update:model-value="onResolutionChange"
+              >
                 <RadioGroupItem v-for="option in videoResolutions" :key="option.value" class="canvas-parameter-option" :value="option.value">{{ option.label }}</RadioGroupItem>
               </RadioGroupRoot>
             </div>
-            <div v-if="kind === 'video-generation'" class="canvas-parameter-section">
+            <div class="canvas-parameter-section">
               <p>时长</p>
               <RadioGroupRoot class="canvas-parameter-options canvas-duration-options" aria-label="时长" :model-value="String(durationSeconds)" @update:model-value="onDurationChange">
                 <RadioGroupItem v-for="sec in videoDurations" :key="sec" class="canvas-parameter-option" :value="String(sec)">{{ sec }} 秒</RadioGroupItem>
@@ -436,7 +449,10 @@ function applyPrompt() {
 .canvas-generation-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; padding-top: 8px; border-top: 1px solid var(--border-subtle); }
 .canvas-generation-controls > :is(.canvas-generation-trigger, .canvas-expand, .canvas-submit) { color: var(--color-muted); font-size: var(--font-size-body); cursor: pointer; }
 .canvas-generation-controls :deep(.imp-trigger),
-.canvas-generation-controls :deep(.vmp-trigger) { height: 36px; max-width: 210px; border-radius: 6px; background: var(--color-elevated); }
+.canvas-generation-controls :deep(.ip-trigger),
+.canvas-generation-controls :deep(.vmp-trigger) { height: 36px; border-radius: 6px; background: var(--color-elevated); }
+.canvas-generation-controls :deep(.imp-trigger),
+.canvas-generation-controls :deep(.vmp-trigger) { max-width: 210px; }
 .canvas-generation-trigger { display: inline-flex; align-items: center; gap: 7px; min-height: 36px; padding: 0 9px; border: 1px solid transparent; border-radius: 6px; white-space: nowrap; }
 .canvas-generation-trigger svg { flex: none; }
 .canvas-model-select { width: 154px; border-color: var(--border-control); background: var(--color-elevated); }
@@ -450,6 +466,7 @@ function applyPrompt() {
 .canvas-parameter-section + .canvas-parameter-section { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-subtle); }
 .canvas-parameter-section p { margin: 0 0 6px; color: var(--color-muted); font-size: var(--font-size-caption); }
 .canvas-parameter-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.canvas-parameter-options.is-single { grid-template-columns: minmax(0, 1fr); }
 .canvas-ratio-options { grid-template-columns: repeat(auto-fit, minmax(44px, 1fr)); }
 .canvas-duration-options { grid-template-columns: repeat(auto-fit, minmax(56px, 1fr)); }
 .canvas-parameter-option { display: grid; place-items: center; gap: 3px; min-height: 34px; padding: 4px; border: 1px solid var(--border-control); border-radius: 6px; background: var(--color-surface); color: var(--color-text); font-size: var(--font-size-caption); cursor: pointer; }
