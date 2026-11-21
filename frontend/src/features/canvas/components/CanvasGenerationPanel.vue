@@ -171,7 +171,7 @@ const textPricingInfo = computed<{ summary: string; tooltip: string } | null>(()
   const outStr = formatCreditsNum(output)
   const cacheStr = formatCreditsNum(cached)
   return {
-    summary: `入${inStr} / 出${outStr} / 缓${cacheStr} 分/M`,
+    summary: `入${inStr} / 出${outStr} / 缓${cacheStr} 积分/百万`,
     tooltip: `每百万 Token 计费：输入 ${inStr} 积分 · 输出 ${outStr} 积分 · 缓存命中 ${cacheStr} 积分`,
   }
 })
