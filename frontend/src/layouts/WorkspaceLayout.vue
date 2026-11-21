@@ -131,30 +131,14 @@ function openPanel(next: 'prices' | 'support' | 'announcements' | 'recharge') {
   if (next === 'recharge') loadLedgers(true)
 }
 
-watch(() => route.fullPath, async () => {
+watch(() => route.fullPath, () => {
   mobileOpen.value = false
   const title = String(route.meta.title || '工作台')
   document.title = isAdminRoute.value ? `后台 · ${title} | 帧剧 FrameDrama` : `${title} | 帧剧 FrameDrama`
-  if (auth.initialized && isAdminRoute.value && !auth.isAdmin) {
-    ui.notify('需要管理员权限', 'error')
-    await router.replace('/workspace')
-  }
 }, { immediate: true })
 
 onMounted(async () => {
-  const me = await auth.hydrate()
-  if (!me) {
-    await router.replace({ path: '/login', query: { next: route.fullPath } })
-    return
-  }
-  if (isAdminRoute.value && me.role !== 'admin') {
-    ui.notify('需要管理员权限', 'error')
-    await router.replace('/workspace')
-    return
-  }
-  if (me.role === 'admin') {
-    await refreshAdminReviewBadge()
-  }
+  if (auth.isAdmin) await refreshAdminReviewBadge()
 })
 
 async function handleLogout() {

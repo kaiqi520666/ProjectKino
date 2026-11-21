@@ -478,7 +478,7 @@ async function handleModelReorder(payload: { fromIndex: number; toIndex: number 
   visible.splice(payload.toIndex, 0, moved)
 
   // 乐观更新本地排序与序号，松手瞬间生效
-  const sortPool = [...visible.map((m) => m.sort)].sort((a, b) => a - b)
+  const sortPool = visible.map((m) => m.sort).sort((a, b) => a - b)
   const optimisticSorts = new Map<string, number>()
   let lastSort = -Infinity
   for (let i = 0; i < visible.length; i += 1) {

@@ -5,5 +5,5 @@ export const canvasEditorRoute: RouteRecordRaw = {
   name: 'canvas-editor',
   component: () => import('@/features/canvas/views/CanvasEditorView.vue'),
   props: true,
-  meta: { title: '画布编辑' },
+  meta: { title: '画布编辑', requiresAuth: true },
 }

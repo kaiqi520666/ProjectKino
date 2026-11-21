@@ -5,6 +5,7 @@ const pendingView = () => import('@/views/WorkspacePendingView.vue')
 export const workspaceRoutes: RouteRecordRaw[] = [{
   path: '/workspace',
   component: () => import('@/layouts/WorkspaceLayout.vue'),
+  meta: { requiresAuth: true },
   children: [
     {
       path: '',

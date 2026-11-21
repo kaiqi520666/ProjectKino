@@ -28,7 +28,6 @@ export interface CreditBalanceResponse {
 export const useAuthStore = defineStore('auth', () => {
   const token = ref<string | null>(readStoredToken())
   const user = ref<AuthUser | null>(null)
-  const initialized = ref(false)
   const loading = ref(false)
 
   const isAuthenticated = computed(() => !!token.value && !!user.value)
@@ -43,7 +42,6 @@ export const useAuthStore = defineStore('auth', () => {
   function applySession(session: AuthSessionResponse) {
     token.value = session.accessToken
     user.value = session.user
-    initialized.value = true
     writeStoredToken(session.accessToken)
   }
 
@@ -57,7 +55,6 @@ export const useAuthStore = defineStore('auth', () => {
     if (loading.value) return user.value
     const currentToken = token.value ?? readStoredToken()
     if (!currentToken) {
-      initialized.value = true
       user.value = null
       return null
     }
@@ -72,7 +69,6 @@ export const useAuthStore = defineStore('auth', () => {
       return null
     } finally {
       loading.value = false
-      initialized.value = true
     }
   }
 
@@ -122,7 +118,6 @@ export const useAuthStore = defineStore('auth', () => {
   return {
     token,
     user,
-    initialized,
     loading,
     isAuthenticated,
     isAdmin,

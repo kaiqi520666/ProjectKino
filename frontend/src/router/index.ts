@@ -1,4 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { useAuthStore } from '@/stores/auth'
+import { useUiStore } from '@/stores/ui'
 import { adminRoutes } from './admin'
 import { canvasEditorRoute } from './canvas'
 import { workspaceRoutes } from './workspace'
@@ -25,4 +27,20 @@ export const router = createRouter({
           component: () => import('@/dev/ComponentPreview.vue'),
         }] : []),
   ],
+})
+
+router.beforeEach(async (to) => {
+  const requiresAuth = to.matched.some((record) => record.meta.requiresAuth)
+  const requiresAdmin = to.matched.some((record) => record.meta.requiresAdmin)
+  if (!requiresAuth && !requiresAdmin) return true
+
+  const auth = useAuthStore()
+  const user = auth.user ?? await auth.hydrate()
+  if (!user) return { name: 'login', query: { next: to.fullPath } }
+
+  if (requiresAdmin && user.role !== 'admin') {
+    useUiStore().notify('需要管理员权限', 'error')
+    return { path: '/workspace' }
+  }
+  return true
 })

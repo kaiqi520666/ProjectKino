@@ -4,7 +4,7 @@ export const adminRoutes: RouteRecordRaw[] = [
   {
     path: '/admin',
     component: () => import('@/layouts/WorkspaceLayout.vue'),
-    meta: { requiresAdmin: true, workspaceNav: 'admin' },
+    meta: { requiresAuth: true, requiresAdmin: true, workspaceNav: 'admin' },
     children: [
       {
         path: '',

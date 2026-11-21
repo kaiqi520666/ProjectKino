@@ -41,6 +41,23 @@ http.interceptors.request.use((config) => {
   return config
 })
 
+let unauthorizedHandler: (() => void) | null = null
+
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  unauthorizedHandler = handler
+}
+
+http.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const isLoginRequest = typeof error?.config?.url === 'string' && error.config.url.endsWith('/auth/login')
+    if (axios.isAxiosError(error) && error.response?.status === 401 && !isLoginRequest) {
+      unauthorizedHandler?.()
+    }
+    return Promise.reject(error)
+  },
+)
+
 export function unwrap<T>(request: Promise<{ data: ApiEnvelope<T> }>): Promise<T> {
   return request.then((response) => response.data.data)
 }
