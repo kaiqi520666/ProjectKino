@@ -1,8 +1,16 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, watch } from 'vue'
 import { ChevronDown, RotateCcw, SlidersHorizontal } from 'lucide-vue-next'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import type { ModelCatalogItemOut } from '../api-types'
+
+type VideoResolution = '480p' | '720p' | '1080p'
+
+const RESOLUTION_SPEC: Record<VideoResolution, string> = {
+  '480p': '流畅试稿',
+  '720p': '标准高清',
+  '1080p': '全高清',
+}
 
 const props = withDefaults(
   defineProps<{
@@ -10,30 +18,37 @@ const props = withDefaults(
     defaultRatio?: string
     mode?: 'single' | 'batch'
     disabled?: boolean
+    align?: 'start' | 'center' | 'end'
+    showDefaultRatioHint?: boolean
+    triggerDataPopup?: string
   }>(),
   {
     model: null,
     defaultRatio: '16:9',
     mode: 'single',
     disabled: false,
+    align: 'end',
+    showDefaultRatioHint: true,
+    triggerDataPopup: undefined,
   },
 )
 
-const resolution = defineModel<'480p' | '720p' | '1080p'>('resolution', { default: '720p' })
+const resolution = defineModel<VideoResolution>('resolution', { default: '720p' })
 const ratio = defineModel<string>('ratio', { default: '16:9' })
 const duration = defineModel<number>('duration', { default: 10 })
 const durationMode = defineModel<'keep' | 'override'>('durationMode', { default: 'keep' })
+const open = defineModel<boolean>('open', { default: false })
 
 const emit = defineEmits<{
   durationCommit: [seconds: number]
 }>()
 
-const open = ref(false)
-
-const resolutionOptions = computed<('480p' | '720p' | '1080p')[]>(() => {
+const resolutionOptions = computed<VideoResolution[]>(() => {
   const raw = props.model?.capabilities?.resolutions
   const valid = Array.isArray(raw)
-    ? raw.map(String).filter((v): v is '480p' | '720p' | '1080p' => v === '480p' || v === '720p' || v === '1080p')
+    ? raw
+      .map((item) => String(item).trim().toLowerCase())
+      .filter((v): v is VideoResolution => v === '480p' || v === '720p' || v === '1080p')
     : []
   return valid.length ? valid : ['720p']
 })
@@ -66,13 +81,27 @@ watch(
   { immediate: true },
 )
 
+function resolutionPrice(res: VideoResolution): string {
+  const prices = props.model?.videoPrices ?? []
+  const row =
+    prices.find((p) => p.ruleKey.toLowerCase() === res)
+    ?? prices.find((p) => p.ruleKey === 'default')
+    ?? prices[0]
+  if (!row) return ''
+  const num = Number(row.creditPrice)
+  if (!Number.isFinite(num)) return ''
+  const formatted = Number(num.toFixed(2)).toString()
+  return row.unit === 'call' ? `${formatted}分/条` : `${formatted}分/秒`
+}
+
 const isCustomRatio = computed(() => ratio.value !== props.defaultRatio)
 
 const summaryText = computed(() => {
+  const ratioLabel = ratio.value === 'auto' ? '自动' : ratio.value
   const durLabel = props.mode === 'batch' && durationMode.value === 'keep'
     ? '原时长'
     : `${duration.value}s`
-  return `${resolution.value} · ${ratio.value} · ${durLabel}`
+  return `${resolution.value.toUpperCase()} · ${ratioLabel} · ${durLabel}`
 })
 
 function onRangeInput(event: Event) {
@@ -98,7 +127,7 @@ function resetRatio() {
 <template>
   <PopoverRoot v-model:open="open">
     <PopoverTrigger as-child :disabled="disabled">
-      <button type="button" class="vp-trigger" :disabled="disabled" aria-label="生成参数设置">
+      <button type="button" :data-canvas-popup="triggerDataPopup" class="vp-trigger" :disabled="disabled" aria-label="视频生成参数">
         <SlidersHorizontal :size="13" class="vp-trigger-icon" aria-hidden="true" />
         <span class="vp-trigger-summary">{{ summaryText }}</span>
         <ChevronDown :size="13" class="vp-trigger-chevron" aria-hidden="true" />
@@ -109,68 +138,69 @@ function resetRatio() {
       <PopoverContent
         class="vp-popover"
         side="top"
-        align="end"
+        :align="align"
         :side-offset="8"
         :collision-padding="12"
       >
         <div class="vp-head">
-          <strong>生成参数</strong>
+          <strong>视频参数</strong>
           <button
-            v-if="isCustomRatio && ratioOptions.includes(defaultRatio)"
+            v-if="showDefaultRatioHint && isCustomRatio && ratioOptions.includes(defaultRatio)"
             type="button"
             class="vp-reset-btn"
             @click="resetRatio"
           >
-            <RotateCcw :size="11" />
-            <span>恢复项目比例</span>
+            <RotateCcw :size="11" aria-hidden="true" />
+            <span>恢复默认 ({{ defaultRatio }})</span>
           </button>
         </div>
 
         <div class="vp-section">
           <div class="vp-label-row">
-            <span>分辨率</span>
-            <small>{{ resolution }}</small>
+            <span class="vp-label">分辨率</span>
+            <span class="vp-hint">{{ resolution.toUpperCase() }}</span>
           </div>
-          <div class="vp-chips">
+          <div class="vp-res-grid">
             <button
               v-for="res in resolutionOptions"
               :key="res"
               type="button"
-              class="vp-chip"
+              class="vp-res-chip"
               :class="{ 'is-active': resolution === res }"
               @click="resolution = res"
             >
-              {{ res }}
+              <strong>{{ res.toUpperCase() }}</strong>
+              <span class="vp-res-sub">{{ resolutionPrice(res) || RESOLUTION_SPEC[res] }}</span>
             </button>
           </div>
         </div>
 
         <div class="vp-section">
           <div class="vp-label-row">
-            <span>画面比例</span>
-            <small>项目默认 {{ defaultRatio }}</small>
+            <span class="vp-label">画面比例</span>
+            <span v-if="showDefaultRatioHint" class="vp-hint">默认 {{ defaultRatio }}</span>
           </div>
-          <div class="vp-chips">
+          <div class="vp-ratio-grid">
             <button
               v-for="r in ratioOptions"
               :key="r"
               type="button"
-              class="vp-chip"
+              class="vp-ratio-chip"
               :class="{ 'is-active': ratio === r }"
               @click="ratio = r"
             >
-              {{ r }}
+              {{ r === 'auto' ? '自动' : r }}
             </button>
           </div>
         </div>
 
         <div class="vp-section">
           <div class="vp-label-row">
-            <span>生成时长</span>
-            <small v-if="mode === 'single' || durationMode === 'override'" class="vp-dur-readout">
+            <span class="vp-label">生成时长</span>
+            <span v-if="mode === 'single' || durationMode === 'override'" class="vp-dur-readout">
               {{ duration }} 秒
-            </small>
-            <small v-else>保持各片段原时长</small>
+            </span>
+            <span v-else class="vp-hint">保持各片段原时长</span>
           </div>
 
           <div v-if="mode === 'batch'" class="vp-mode-switch">
@@ -218,27 +248,29 @@ function resetRatio() {
 .vp-trigger {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  min-height: 34px;
+  gap: 6px;
+  height: 36px;
   padding: 0 11px;
-  border-radius: var(--radius-control);
+  border-radius: 9px;
   border: 1px solid var(--border-control);
-  background: rgb(255 255 255 / 3%);
+  background: var(--color-surface);
   color: var(--color-text);
-  font-size: 12px;
+  font-size: 12.5px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-  transition: border-color 0.14s, background 0.14s;
+  cursor: pointer;
+  transition: border-color 0.15s, background-color 0.15s;
 }
 
 .vp-trigger:hover:not(:disabled),
 .vp-trigger[data-state="open"] {
   border-color: rgb(240 184 75 / 55%);
-  background: rgb(240 184 75 / 6%);
+  background: rgb(255 255 255 / 4%);
 }
 
 .vp-trigger:disabled {
-  opacity: 0.45;
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .vp-trigger-icon {
@@ -247,7 +279,6 @@ function resetRatio() {
 }
 
 .vp-trigger-summary {
-  color: #e2e3e9;
   font-weight: 500;
 }
 
@@ -259,31 +290,30 @@ function resetRatio() {
 
 <style>
 .vp-popover {
-  z-index: 86;
-  width: min(328px, calc(100vw - 24px));
+  z-index: 110;
+  width: min(340px, calc(100vw - 24px));
   padding: 14px 16px 16px;
-  border-radius: 12px;
+  border-radius: 14px;
   border: 1px solid rgb(255 255 255 / 14%);
-  background: #14151b;
-  box-shadow: 0 20px 56px rgb(0 0 0 / 62%);
+  background: #13141a;
+  box-shadow: 0 22px 60px rgb(0 0 0 / 65%);
   display: flex;
   flex-direction: column;
   gap: 14px;
+  animation: ui-fade-in 0.12s ease-out;
 }
 
 .vp-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--border-subtle);
+  gap: 8px;
 }
 
 .vp-head strong {
-  font-size: 13px;
+  font-size: 13.5px;
   font-weight: 600;
-  color: #f3f3f6;
+  color: #f3f4f6;
 }
 
 .vp-reset-btn {
@@ -291,16 +321,16 @@ function resetRatio() {
   align-items: center;
   gap: 4px;
   padding: 2px 7px;
-  border-radius: 5px;
-  border: 1px solid var(--border-subtle);
-  background: rgb(255 255 255 / 3%);
-  color: var(--color-muted);
+  border-radius: 6px;
+  border: 1px solid rgb(240 184 75 / 30%);
+  background: rgb(240 184 75 / 8%);
+  color: var(--color-gold-soft);
   font-size: 11px;
+  cursor: pointer;
 }
 
 .vp-reset-btn:hover {
-  color: var(--color-gold-soft);
-  border-color: rgb(240 184 75 / 38%);
+  background: rgb(240 184 75 / 16%);
 }
 
 .vp-section {
@@ -314,52 +344,103 @@ function resetRatio() {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  font-size: 12px;
-  color: #c3c5cf;
-  font-weight: 500;
 }
 
-.vp-label-row small {
+.vp-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: #d4d6de;
+}
+
+.vp-hint {
   font-size: 11px;
-  font-weight: 400;
   color: var(--color-muted);
+  font-variant-numeric: tabular-nums;
 }
 
 .vp-dur-readout {
-  color: var(--color-gold-soft) !important;
-  font-weight: 600 !important;
+  font-size: 12px;
+  color: var(--color-gold-soft);
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
-.vp-chips {
-  display: flex;
-  flex-wrap: wrap;
+.vp-res-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
   gap: 6px;
 }
 
-.vp-chip {
-  min-width: 52px;
-  height: 30px;
-  padding: 0 10px;
+.vp-res-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 7px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--border-control);
+  background: rgb(255 255 255 / 2%);
+  color: var(--color-muted);
+  cursor: pointer;
+  transition: border-color 0.15s, background-color 0.15s, color 0.15s;
+}
+
+.vp-res-chip strong {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-text);
+  line-height: 1.1;
+}
+
+.vp-res-sub {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.vp-res-chip:hover {
+  border-color: rgb(240 184 75 / 45%);
+}
+
+.vp-res-chip.is-active {
+  border-color: rgb(240 184 75 / 72%);
+  background: var(--gold-tint);
+  color: var(--color-gold-soft);
+}
+
+.vp-res-chip.is-active strong {
+  color: var(--color-gold-soft);
+}
+
+.vp-ratio-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.vp-ratio-chip {
+  height: 29px;
   border-radius: 7px;
   border: 1px solid var(--border-control);
-  background: rgb(255 255 255 / 2.5%);
+  background: rgb(255 255 255 / 2%);
   color: var(--color-muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
-  transition: background 0.12s, border-color 0.12s, color 0.12s;
+  cursor: pointer;
+  transition: border-color 0.15s, background-color 0.15s, color 0.15s;
 }
 
-.vp-chip:hover {
-  background: var(--surface-hover);
+.vp-ratio-chip:hover {
+  border-color: rgb(240 184 75 / 45%);
   color: var(--color-text);
 }
 
-.vp-chip.is-active {
+.vp-ratio-chip.is-active {
+  border-color: rgb(240 184 75 / 72%);
   background: var(--gold-tint);
-  border-color: rgb(240 184 75 / 50%);
   color: var(--color-gold-soft);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .vp-mode-switch {
@@ -379,12 +460,14 @@ function resetRatio() {
   background: transparent;
   color: var(--color-muted);
   font-size: 12px;
-  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
 }
 
 .vp-mode-btn.is-active {
-  background: #28261f;
+  background: var(--gold-tint);
   color: var(--color-gold-soft);
+  font-weight: 600;
 }
 
 .vp-slider-box {
