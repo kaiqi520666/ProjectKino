@@ -172,6 +172,16 @@ async def run_llm_job_core(
                         if isinstance(payload.get("referenceTexts"), list)
                         else None
                     ),
+                    reference_urls=(
+                        payload.get("referenceUrls")
+                        if isinstance(payload.get("referenceUrls"), list)
+                        else None
+                    ),
+                    reference_images=(
+                        payload.get("referenceImages")
+                        if isinstance(payload.get("referenceImages"), list)
+                        else None
+                    ),
                     usage=run_usage,
                     on_progress=on_progress,
                 )

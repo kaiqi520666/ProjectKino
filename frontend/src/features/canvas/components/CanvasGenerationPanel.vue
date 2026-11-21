@@ -41,7 +41,14 @@ const expandedReferences = computed(() => {
   const nodes = new Map(props.references.map(node => [node.id, node]))
   return expandedOrder.value.flatMap(id => nodes.get(id) ?? [])
 })
-const hasInput = computed(() => Boolean(prompt.value.trim()) || props.references.some(node => Boolean(node.data.text?.trim())))
+const hasInput = computed(
+  () =>
+    Boolean(prompt.value.trim())
+    || props.references.some(node =>
+      Boolean(node.data.text?.trim())
+      || (props.kind === 'text' && outputKind(node.type) === 'image' && Boolean(node.data.media?.url)),
+    ),
+)
 const imageReferenceCount = computed(() => props.references.filter(node => outputKind(node.type) === 'image').length)
 
 const DEFAULT_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4'] as const

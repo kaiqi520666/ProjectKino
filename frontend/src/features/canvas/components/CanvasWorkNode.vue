@@ -168,9 +168,14 @@ function saveText() {
 }
 
 function generate(effectiveSettings: CanvasGenerationSettings) {
-  const hasInput = Boolean(prompt.value.trim()) || props.references.some(node => Boolean(node.data.text?.trim()))
+  const hasInput =
+    Boolean(prompt.value.trim())
+    || props.references.some(node =>
+      Boolean(node.data.text?.trim())
+      || (props.kind === 'text' && outputKind(node.type) === 'image' && Boolean(node.data.media?.url)),
+    )
   if (hasInput) emit('generate', effectiveSettings)
-  else ui.notify('请输入提示词或连接包含正文的文本节点', 'error')
+  else ui.notify('请输入提示词或连接包含内容的参考节点', 'error')
 }
 
 function preview(media: CanvasMedia) {

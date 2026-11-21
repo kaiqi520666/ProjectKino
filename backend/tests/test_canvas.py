@@ -167,3 +167,63 @@ def test_resolve_canvas_generation_inputs_handles_refs_and_rejects_unsupported_m
         resolve_canvas_generation_inputs(bad_img_req)
     assert img_err.value.code == "image_reference_not_supported"
 
+    text_vision_req = CanvasGenerateRequest.model_validate(
+        {
+            "kind": "text",
+            "prompt": "描述 {{ref:img-1}} 里的人物穿搭",
+            "references": [
+                {
+                    "nodeId": "img-1",
+                    "kind": "image",
+                    "title": "主角定妆照",
+                    "mediaUrl": "https://image.nodepass.net/framedrama/1/images/hero.jpg",
+                }
+            ],
+        }
+    )
+    text_resolved = resolve_canvas_generation_inputs(text_vision_req)
+    assert text_resolved.reference_urls == ["https://image.nodepass.net/framedrama/1/images/hero.jpg"]
+    assert text_resolved.reference_images == [
+        {
+            "index": "1",
+            "title": "主角定妆照",
+            "url": "https://image.nodepass.net/framedrama/1/images/hero.jpg",
+        }
+    ]
+    assert "@[图片1]" in text_resolved.resolved_prompt
+
+
+@pytest.mark.asyncio
+async def test_generate_canvas_text_passes_image_urls_as_multimodal_parts() -> None:
+    from pydantic_ai import ImageUrl
+    from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+    from app.modules.canvas.generation import generate_canvas_text
+
+    seen_image_urls: list[str] = []
+
+    def fake_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        for msg in messages:
+            for part in getattr(msg, "parts", ()):
+                content = getattr(part, "content", None)
+                if isinstance(content, list):
+                    for item in content:
+                        if isinstance(item, ImageUrl):
+                            seen_image_urls.append(item.url)
+        return ModelResponse(parts=[TextPart("身穿驼色大衣与深红围巾的女性全身肖像。")])
+
+    output = await generate_canvas_text(
+        FunctionModel(fake_model),
+        prompt="这是一张什么样的图片？",
+        reference_images=[
+            {
+                "index": "1",
+                "title": "图片素材",
+                "url": "https://image.nodepass.net/framedrama/1/images/coat.jpg",
+            }
+        ],
+    )
+    assert seen_image_urls == ["https://image.nodepass.net/framedrama/1/images/coat.jpg"]
+    assert "驼色大衣" in output
+
