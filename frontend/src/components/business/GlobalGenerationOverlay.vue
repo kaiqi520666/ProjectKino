@@ -243,6 +243,7 @@ html.gen-scroll-locked {
   display: grid;
   place-items: center;
   padding: 20px;
+  pointer-events: auto;
   background:
     radial-gradient(circle at 50% 34%, rgb(240 184 75 / 9%), transparent 56%),
     rgb(9 10 13 / 82%);

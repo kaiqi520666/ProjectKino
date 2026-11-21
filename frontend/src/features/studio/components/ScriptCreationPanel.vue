@@ -19,6 +19,7 @@ const scriptFileExtensions = ['.txt', '.md'] as const
 const id = useId()
 const formId = `${id}-form`
 const open = ref(false)
+const preserveDraftOnClose = ref(false)
 const mode = ref<DramaCreation['mode']>('story')
 const draft = ref(initialDramaSettings())
 const story = ref('')
@@ -31,15 +32,23 @@ const canSubmit = computed(() => settings.value !== null &&
 
 function submit() {
   if (props.busy || !canSubmit.value || !settings.value) return
-  if (mode.value === 'story') {
-    emit('submit', { mode: 'story', settings: settings.value, story: story.value.trim() })
-  } else if (file.value) {
-    emit('submit', { mode: 'upload', settings: settings.value, file: file.value })
-  }
+  const payload: DramaCreation | null = mode.value === 'story'
+    ? { mode: 'story', settings: settings.value, story: story.value.trim() }
+    : file.value
+      ? { mode: 'upload', settings: settings.value, file: file.value }
+      : null
+  if (!payload) return
+  preserveDraftOnClose.value = true
+  open.value = false
+  emit('submit', payload)
 }
 
 watch(open, (isOpen) => {
   if (isOpen) return
+  if (preserveDraftOnClose.value) {
+    preserveDraftOnClose.value = false
+    return
+  }
   mode.value = 'story'
   draft.value = initialDramaSettings()
   story.value = ''

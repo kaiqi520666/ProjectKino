@@ -212,6 +212,7 @@ async function submitRegen() {
   const feedback = regenFeedback.value.trim()
   const settings = props.project.creation.settings
   const style = artStyles.find(({ value }) => value === settings.visualStyle)
+  regenMode.value = null
 
   if (mode === 'episode') {
     const targetNumber = number.value
@@ -250,10 +251,7 @@ async function submitRegen() {
         }
       },
     )
-    if (result) {
-      regenMode.value = null
-      regenFeedback.value = ''
-    }
+    if (result) regenFeedback.value = ''
     return
   }
 
@@ -299,10 +297,7 @@ async function submitRegen() {
         }
       },
     )
-    if (result) {
-      regenMode.value = null
-      regenFeedback.value = ''
-    }
+    if (result) regenFeedback.value = ''
     return
   }
 
@@ -343,10 +338,7 @@ async function submitRegen() {
       }
     },
   )
-  if (result) {
-    regenMode.value = null
-    regenFeedback.value = ''
-  }
+  if (result) regenFeedback.value = ''
 }
 
 onBeforeRouteLeave((to) => {
