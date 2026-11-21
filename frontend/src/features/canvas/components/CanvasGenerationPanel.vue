@@ -365,14 +365,17 @@ function applyPrompt() {
       />
       <span
         v-if="textPricingInfo"
-        class="canvas-credits canvas-text-pricing"
+        class="canvas-credits"
         :title="textPricingInfo.tooltip"
       >
         <Coins :size="14" aria-hidden="true" />
         <span>{{ textPricingInfo.summary }}</span>
       </span>
+      <span v-else-if="kind !== 'text'" class="canvas-credits">
+        <Coins :size="14" aria-hidden="true" />
+        <span>{{ estimatedCreditsText }}</span>
+      </span>
       <button type="button" class="canvas-expand" title="展开提示词" aria-label="展开提示词" @click="expandPrompt"><Maximize2 :size="15" /></button>
-      <span v-if="kind !== 'text'" class="canvas-credits"><Coins :size="14" />{{ estimatedCreditsText }}</span>
       <button
         type="button"
         class="canvas-submit"
@@ -421,8 +424,8 @@ function applyPrompt() {
 .canvas-model-option { min-height: 36px; padding-right: 10px; }
 .canvas-generation-controls :is(.canvas-expand, .canvas-submit) { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 6px; }
 .canvas-generation-controls .canvas-expand { margin-left: auto; }
-.canvas-generation-controls .canvas-text-pricing { margin-left: auto; font-variant-numeric: tabular-nums; }
-.canvas-generation-controls .canvas-text-pricing + .canvas-expand { margin-left: 0; }
+.canvas-generation-controls .canvas-credits { margin-left: auto; font-variant-numeric: tabular-nums; }
+.canvas-generation-controls .canvas-credits + .canvas-expand { margin-left: 0; }
 .canvas-credits { display: inline-flex; align-items: center; gap: 4px; color: var(--color-muted); font-size: var(--font-size-caption); white-space: nowrap; }
 .canvas-generation-controls .canvas-submit { border-radius: 50%; background: var(--color-gold); color: var(--color-canvas); }
 .canvas-generation-controls .canvas-submit:disabled { opacity: .42; cursor: default; }
