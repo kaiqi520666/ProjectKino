@@ -13,6 +13,7 @@ import { useUiStore } from '@/stores/ui'
 import type { TaskStatus } from '@/components'
 import MediaComponentsPreview from './MediaComponentsPreview.vue'
 import WorkspaceComponentsPreview from './WorkspaceComponentsPreview.vue'
+import './preview.css'
 
 const ui = useUiStore()
 const mediaPreview = ref<InstanceType<typeof MediaComponentsPreview>>()

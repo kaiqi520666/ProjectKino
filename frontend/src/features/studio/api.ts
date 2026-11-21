@@ -19,8 +19,6 @@ import type {
 } from './api-types'
 import type { StudioAssetDraft, StudioAssetKind } from './studio-assets'
 
-const TERMINAL_JOB_STATUSES = new Set<JobOut['status']>(['succeeded', 'failed', 'review'])
-
 export interface ScriptRequest {
   settings: DramaSettings & { visualStyleLabel?: string }
   mode: 'story' | 'upload'
@@ -250,96 +248,28 @@ export function getJob(jobId: string) {
   return unwrap<JobOut>(http.get(`/jobs/${jobId}`))
 }
 
-export class JobFailureError extends Error {
-  code?: string
-  retryable: boolean
+import { JobFailureError, watchJobStream } from './job-stream'
 
-  constructor(message: string, code?: string, retryable = true) {
-    super(message)
-    this.name = 'JobFailureError'
-    this.code = code
-    this.retryable = retryable
-  }
-}
-
-function finalizeJob(job: JobOut): JobOut {
-  if (job.status === 'succeeded') return job
-  const nonRetryable = new Set([
-    'insufficient_credits',
-    'validation_error',
-    'assets_required',
-    'provider_not_configured',
-    'oss_not_configured',
-    'duration_exceeds_model_limit',
-    'reference_image_missing',
-  ])
-  const retryable = !job.errorCode || !nonRetryable.has(job.errorCode)
-  throw new JobFailureError(job.errorMessage || '生成任务失败，请稍后重试', job.errorCode ?? undefined, retryable)
-}
+export { JobFailureError }
 
 export async function watchJob(
   jobId: string,
   onProgress?: (job: JobOut) => void,
 ): Promise<JobOut> {
-  const baseUrl = (import.meta.env.VITE_API_BASE_URL || '/api/v1').replace(/\/$/u, '')
+  const baseUrl = (import.meta.env?.VITE_API_BASE_URL || '/api/v1').replace(/\/$/u, '')
   const token = readStoredToken()
 
-  try {
-    const response = await fetch(`${baseUrl}/jobs/${jobId}/events`, {
-      headers: {
-        Accept: 'text/event-stream',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-    })
-    if (response.ok && response.body) {
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-      let latest: JobOut | undefined
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        let splitIdx = buffer.indexOf('\n\n')
-        while (splitIdx >= 0) {
-          const chunk = buffer.slice(0, splitIdx)
-          buffer = buffer.slice(splitIdx + 2)
-          for (const line of chunk.split('\n')) {
-            if (!line.startsWith('data:')) continue
-            const raw = line.slice(5).trim()
-            if (!raw) continue
-            try {
-              const job = JSON.parse(raw) as JobOut
-              latest = job
-              onProgress?.(job)
-              if (TERMINAL_JOB_STATUSES.has(job.status)) {
-                await reader.cancel().catch(() => {})
-                return finalizeJob(job)
-              }
-            } catch {
-              // Ignore malformed keepalive fragments.
-            }
-          }
-          splitIdx = buffer.indexOf('\n\n')
-        }
-      }
-      if (latest && TERMINAL_JOB_STATUSES.has(latest.status)) {
-        return finalizeJob(latest)
-      }
-    }
-  } catch {
-    // Fall back to polling if SSE stream is interrupted.
-  }
-
-  while (true) {
-    const job = await getJob(jobId)
-    onProgress?.(job)
-    if (TERMINAL_JOB_STATUSES.has(job.status)) {
-      return finalizeJob(job)
-    }
-    await new Promise((resolve) => setTimeout(resolve, 2000))
-  }
+  return watchJobStream({
+    fetchEvents: () =>
+      fetch(`${baseUrl}/jobs/${jobId}/events`, {
+        headers: {
+          Accept: 'text/event-stream',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      }),
+    fetchJob: () => getJob(jobId),
+    onProgress,
+  })
 }
 
 export function apiErrorMessage(error: unknown): string {
