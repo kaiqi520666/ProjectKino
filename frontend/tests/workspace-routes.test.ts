@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createMemoryHistory, createRouter } from 'vue-router'
+import { shouldTriggerUnauthorized } from '../src/lib/http.ts'
+import { adminRoutes } from '../src/router/admin.ts'
 import { canvasEditorRoute } from '../src/router/canvas.ts'
 import { workspaceRoutes } from '../src/router/workspace.ts'
 
-const router = createRouter({ history: createMemoryHistory(), routes: [...workspaceRoutes, canvasEditorRoute] })
+const router = createRouter({
+  history: createMemoryHistory(),
+  routes: [...workspaceRoutes, ...adminRoutes, canvasEditorRoute],
+})
 
 test('workspace pages share a layout without requiring a workspace URL prefix', () => {
   for (const [path, name, navigation] of [
@@ -46,4 +51,39 @@ test('studio steps and episode detail are scoped under one project', () => {
     assert.equal(route.path, `/projects/draft-1/${suffix}`)
     assert.equal(route.meta.workspaceNav, 'studio')
   }
+})
+
+test('protected workspace, canvas, and admin routes carry auth and role meta', () => {
+  for (const path of ['/workspace', '/projects', '/projects/p1/script', '/canvas', '/canvas/c1', '/assets', '/account']) {
+    const resolved = router.resolve(path)
+    assert.equal(
+      resolved.matched.some((record) => record.meta.requiresAuth === true),
+      true,
+      `${path} should require auth`,
+    )
+  }
+
+  for (const path of ['/admin', '/admin/users', '/admin/models', '/admin/jobs', '/admin/projects', '/admin/settings']) {
+    const resolved = router.resolve(path)
+    assert.equal(
+      resolved.matched.some((record) => record.meta.requiresAuth === true),
+      true,
+      `${path} should require auth`,
+    )
+    assert.equal(
+      resolved.matched.some((record) => record.meta.requiresAdmin === true),
+      true,
+      `${path} should require admin`,
+    )
+  }
+})
+
+test('401 unauthorized trigger skips auth endpoints and explicit opt-outs', () => {
+  assert.equal(shouldTriggerUnauthorized('/auth/login'), false)
+  assert.equal(shouldTriggerUnauthorized('/auth/register'), false)
+  assert.equal(shouldTriggerUnauthorized('/auth/logout'), false)
+  assert.equal(shouldTriggerUnauthorized('/api/v1/auth/logout?force=1'), false)
+  assert.equal(shouldTriggerUnauthorized('/users/me', true), false)
+  assert.equal(shouldTriggerUnauthorized('/projects'), true)
+  assert.equal(shouldTriggerUnauthorized('/credits/balance'), true)
 })

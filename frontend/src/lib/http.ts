@@ -27,7 +27,7 @@ export interface ApiEnvelope<T> {
 }
 
 export const http = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || '/api/v1',
+  baseURL: import.meta.env?.VITE_API_BASE_URL || '/api/v1',
   timeout: 30_000,
   headers: { Accept: 'application/json' },
 })
@@ -47,11 +47,29 @@ export function setUnauthorizedHandler(handler: (() => void) | null): void {
   unauthorizedHandler = handler
 }
 
+const AUTH_EXEMPT_SUFFIXES = ['/auth/login', '/auth/register', '/auth/logout']
+
+export function shouldTriggerUnauthorized(url?: string, skip = false): boolean {
+  if (skip) return false
+  if (typeof url !== 'string' || !url) return true
+  const path = url.split('?')[0] ?? url
+  return !AUTH_EXEMPT_SUFFIXES.some((suffix) => path.endsWith(suffix))
+}
+
+declare module 'axios' {
+  export interface AxiosRequestConfig {
+    skipUnauthorizedHandler?: boolean
+  }
+}
+
 http.interceptors.response.use(
   (response) => response,
   (error) => {
-    const isLoginRequest = typeof error?.config?.url === 'string' && error.config.url.endsWith('/auth/login')
-    if (axios.isAxiosError(error) && error.response?.status === 401 && !isLoginRequest) {
+    if (
+      axios.isAxiosError(error)
+      && error.response?.status === 401
+      && shouldTriggerUnauthorized(error.config?.url, error.config?.skipUnauthorizedHandler)
+    ) {
       unauthorizedHandler?.()
     }
     return Promise.reject(error)

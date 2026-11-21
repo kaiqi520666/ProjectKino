@@ -29,6 +29,7 @@ export const useAuthStore = defineStore('auth', () => {
   const token = ref<string | null>(readStoredToken())
   const user = ref<AuthUser | null>(null)
   const loading = ref(false)
+  let hydratePromise: Promise<AuthUser | null> | null = null
 
   const isAuthenticated = computed(() => !!token.value && !!user.value)
   const isAdmin = computed(() => user.value?.role === 'admin')
@@ -52,7 +53,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function hydrate() {
-    if (loading.value) return user.value
+    if (hydratePromise) return hydratePromise
     const currentToken = token.value ?? readStoredToken()
     if (!currentToken) {
       user.value = null
@@ -60,16 +61,20 @@ export const useAuthStore = defineStore('auth', () => {
     }
     token.value = currentToken
     loading.value = true
-    try {
-      const me = await unwrap<AuthUser>(http.get('/users/me'))
-      user.value = me
-      return me
-    } catch {
-      clearSession()
-      return null
-    } finally {
-      loading.value = false
-    }
+    hydratePromise = (async () => {
+      try {
+        const me = await unwrap<AuthUser>(http.get('/users/me', { skipUnauthorizedHandler: true }))
+        user.value = me
+        return me
+      } catch {
+        clearSession()
+        return null
+      } finally {
+        loading.value = false
+        hydratePromise = null
+      }
+    })()
+    return hydratePromise
   }
 
   async function register(email: string, password: string, nickname = '') {

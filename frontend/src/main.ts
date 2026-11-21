@@ -5,6 +5,7 @@ import { router } from './router'
 import { setUnauthorizedHandler } from './lib/http'
 import { useAuthStore } from './stores/auth'
 import { useUiStore } from './stores/ui'
+import { useStudioStore } from './features/studio/studio-store'
 import './styles/index.css'
 
 const pinia = createPinia()
@@ -14,9 +15,11 @@ let handlingUnauthorized = false
 
 setUnauthorizedHandler(() => {
   const auth = useAuthStore(pinia)
+  const studio = useStudioStore(pinia)
   const current = router.currentRoute.value
   const onProtectedRoute = current.matched.some((record) => record.meta.requiresAuth)
   auth.clearSession()
+  studio.clearProjects()
   if (!onProtectedRoute || handlingUnauthorized) return
 
   handlingUnauthorized = true
