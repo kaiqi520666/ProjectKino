@@ -35,10 +35,12 @@ import {
 import WorkspacePageHeader from '@/components/workspace/WorkspacePageHeader.vue'
 import {
   listAdminJobs,
+  listAdminModels,
   refundAdminJob,
   rescueAdminJobMedia,
   type AdminJobItem,
 } from '@/features/admin/api'
+import { formatJobSpec, readLlmCreditCost } from '@/features/admin/job-spec'
 import {
   extractErrorMessage,
   formatCredits,
@@ -64,6 +66,7 @@ const initialStatus = resolveRouteStatus(route.query.status)
 
 const loading = ref(false)
 const jobs = ref<AdminJobItem[]>([])
+const modelNameMap = ref<Record<string, string>>({})
 const total = ref(0)
 const reviewCount = ref(0)
 const page = ref(1)
@@ -87,8 +90,8 @@ const jobColumns: DataTableColumn[] = [
   { key: 'status', label: '状态', width: '120px' },
   { key: 'duration', label: '耗时', width: '88px', align: 'right' },
   { key: 'owner', label: '用户 / 项目' },
+  { key: 'spec', label: '模型 / 规格' },
   { key: 'reservation', label: '积分', width: '120px' },
-  { key: 'upstream', label: '上游 ID' },
   { key: 'actions', label: '操作', width: '180px' },
 ]
 
@@ -494,7 +497,23 @@ onBeforeUnmount(() => {
   clearCopyTimer()
 })
 
-onMounted(() => loadJobs(true))
+async function loadModelNames() {
+  try {
+    const models = await listAdminModels()
+    const next: Record<string, string> = {}
+    for (const model of models) {
+      if (model.displayName) next[model.id] = model.displayName
+    }
+    modelNameMap.value = next
+  } catch {
+    // Fallback to raw modelId when catalog fetch fails.
+  }
+}
+
+onMounted(() => {
+  void loadModelNames()
+  void loadJobs(true)
+})
 </script>
 
 <template>
@@ -625,6 +644,24 @@ onMounted(() => loadJobs(true))
         <div v-if="row.projectName" class="admin-cell-sub">{{ row.projectName }}</div>
       </template>
 
+      <template #cell-spec="{ row }">
+        <template v-if="formatJobSpec(row, modelNameMap)">
+          <div class="admin-cell-primary admin-job-spec-title">
+            {{ formatJobSpec(row, modelNameMap)?.title }}
+          </div>
+          <div v-if="formatJobSpec(row, modelNameMap)?.meta.length" class="admin-job-spec-tags">
+            <span
+              v-for="tag in formatJobSpec(row, modelNameMap)?.meta"
+              :key="tag"
+              class="admin-spec-chip"
+            >
+              {{ tag }}
+            </span>
+          </div>
+        </template>
+        <span v-else class="admin-cell-sub">-</span>
+      </template>
+
       <template #cell-reservation="{ row }">
         <template v-if="row.reservationAmount">
           <div class="admin-jobs-credit">
@@ -634,13 +671,12 @@ onMounted(() => loadJobs(true))
             </span>
           </div>
         </template>
-        <span v-else class="admin-cell-sub">-</span>
-      </template>
-
-      <template #cell-upstream="{ row }">
-        <span v-if="row.providerTaskId" class="admin-mono" :title="row.providerTaskId">
-          {{ row.providerTaskId.slice(0, 22) }}{{ row.providerTaskId.length > 22 ? '…' : '' }}
-        </span>
+        <template v-else-if="readLlmCreditCost(row.usageSummary)">
+          <div class="admin-jobs-credit">
+            <span class="admin-num">{{ readLlmCreditCost(row.usageSummary) }} 积分</span>
+            <span class="admin-badge admin-badge--success">已扣费</span>
+          </div>
+        </template>
         <span v-else class="admin-cell-sub">-</span>
       </template>
 
@@ -982,6 +1018,34 @@ onMounted(() => loadJobs(true))
   flex-direction: column;
   align-items: flex-start;
   gap: 4px;
+}
+
+.admin-job-spec-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 240px;
+}
+
+.admin-job-spec-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.admin-spec-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border-subtle);
+  background: rgb(255 255 255 / 4%);
+  color: var(--color-muted);
+  font-size: 11px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .admin-block-head {
