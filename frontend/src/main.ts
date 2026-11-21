@@ -6,6 +6,7 @@ import { setUnauthorizedHandler } from './lib/http'
 import { useAuthStore } from './stores/auth'
 import { useUiStore } from './stores/ui'
 import { clearModelCatalogCache } from './features/studio/composables/useModelCatalog'
+import { useCanvasStore } from './features/canvas/canvas-store'
 import { useStudioStore } from './features/studio/studio-store'
 import './styles/index.css'
 
@@ -17,10 +18,12 @@ let handlingUnauthorized = false
 setUnauthorizedHandler(() => {
   const auth = useAuthStore(pinia)
   const studio = useStudioStore(pinia)
+  const canvas = useCanvasStore(pinia)
   const current = router.currentRoute.value
   const onProtectedRoute = current.matched.some((record) => record.meta.requiresAuth)
   auth.clearSession()
   studio.clearProjects()
+  canvas.clearAll()
   clearModelCatalogCache()
   if (!onProtectedRoute || handlingUnauthorized) return
 

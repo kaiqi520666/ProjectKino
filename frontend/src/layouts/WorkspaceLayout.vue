@@ -10,6 +10,7 @@ import WorkspaceSidebar from '@/components/workspace/WorkspaceSidebar.vue'
 import type { WorkspaceBreadcrumb, WorkspaceUser } from '@/components/workspace/workspace-navigation'
 import { getAdminOverview, type CreditLedgerItem } from '@/features/admin/api'
 import { LEDGER_OP_LABELS } from '@/features/admin/format'
+import { useCanvasStore } from '@/features/canvas/canvas-store'
 import { useModelCatalog } from '@/features/studio/composables/useModelCatalog'
 import { useStudioStore } from '@/features/studio/studio-store'
 import {
@@ -30,6 +31,7 @@ const router = useRouter()
 const auth = useAuthStore()
 const ui = useUiStore()
 const studio = useStudioStore()
+const canvas = useCanvasStore()
 
 const mobileOpen = ref(false)
 const panel = ref<'prices' | 'support' | 'announcements' | 'recharge' | null>(null)
@@ -144,6 +146,7 @@ onMounted(async () => {
 async function handleLogout() {
   await auth.logout()
   studio.clearProjects()
+  canvas.clearAll()
   clearCatalog()
   await router.replace('/login')
 }

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, h, nextTick, onBeforeUnmount, reactive, ref, type FunctionalComponent } from 'vue'
-import { ArrowLeft, Copy, FolderOpen, Grid2X2, Magnet, Map as MapIcon, Maximize, Minus, Plus, Trash2, Unlink, Waypoints, X } from 'lucide-vue-next'
+import { ArrowLeft, Check, CloudAlert, Copy, FolderOpen, Grid2X2, Loader2, Magnet, Map as MapIcon, Maximize, Minus, Plus, Trash2, Unlink, Waypoints, X } from 'lucide-vue-next'
 import { Background, ConnectionLineType, MiniMap, setupVueFlow, SimpleBezierEdge, VueFlow, type Connection, type Edge, type FinalConnectionState, type NodeProps, type Viewport, type XYPosition } from '@xyflow/vue'
 import '@xyflow/vue/dist/style.css'
 import UiDialog from '@/components/ui/UiDialog.vue'
@@ -8,6 +8,7 @@ import UiIconButton from '@/components/ui/UiIconButton.vue'
 import ImagePreview from '@/components/ui/ImagePreview.vue'
 import VideoPreview from '@/components/ui/VideoPreview.vue'
 import { useUiStore } from '@/stores/ui'
+import { apiErrorMessage } from '../api'
 import { canvasNodeKinds, canvasNodeLabels, canConnectCanvasKinds, canConnectCanvasNodes, outputKind, type CanvasAsset, type CanvasDocument, type CanvasMedia, type CanvasNode, type CanvasNodeKind } from '../canvas-model'
 import { canvasNodeIcons } from '../canvas-node-icons'
 import { useCanvasStore } from '../canvas-store'
@@ -185,7 +186,7 @@ function appendAudio(id: string, file: File) {
   const base = props.canvas.nodes.find(node => node.id === id)
   if (!base) return
   const node = store.addNode(props.canvas, 'audio', base.position.x + 324, base.position.y)
-  store.replaceMedia(props.canvas, node.id, file)
+  void uploadNodeMedia(node.id, file)
 }
 
 function connectionEnded(event: MouseEvent | TouchEvent, connection: FinalConnectionState) {
@@ -199,15 +200,38 @@ function connectionEnded(event: MouseEvent | TouchEvent, connection: FinalConnec
   void openMenu({ x: point.clientX, y: point.clientY }, { from, reverse: connection.fromHandle?.type === 'target' })
 }
 
-function collect(node: CanvasNode, title: string) {
-  store.collectAsset(node, title)
-  ui.notify('已添加到素材库')
+async function collect(node: CanvasNode, title: string) {
+  try {
+    await store.collectAsset(props.canvas.id, node, title)
+    ui.notify('已添加到素材库', 'success')
+  } catch (error) {
+    ui.notify(apiErrorMessage(error), 'error')
+  }
+}
+
+async function removeAsset(id: string) {
+  try {
+    await store.removeAsset(id)
+  } catch (error) {
+    ui.notify(apiErrorMessage(error), 'error')
+  }
+}
+
+async function uploadNodeMedia(nodeId: string, file: File) {
+  try {
+    await store.replaceMedia(props.canvas, nodeId, file)
+  } catch (error) {
+    ui.notify(apiErrorMessage(error), 'error')
+  }
 }
 
 function openLibrary(id?: string) {
   libraryTarget.value = id
   libraryType.value = id ? outputKind(props.canvas.nodes.find(node => node.id === id)?.type) : 'all'
   libraryOpen.value = true
+  if (!store.assetsLoaded) {
+    void store.fetchAssets().catch(() => {})
+  }
 }
 
 function useAsset(asset: CanvasAsset) {
@@ -231,7 +255,7 @@ function dropFiles(event: DragEvent) {
     const kind = file.type.split('/')[0]
     if (kind === 'image' || kind === 'video' || kind === 'audio') {
       const node = store.addNode(props.canvas, kind, position.x + i * 26, position.y + i * 26)
-      store.replaceMedia(props.canvas, node.id, file)
+      void uploadNodeMedia(node.id, file)
     }
   })
 }
@@ -249,11 +273,13 @@ function connect(connection: Connection) {
 }
 
 function markEdited() {
-  props.canvas.updatedAt = '刚刚'
+  props.canvas.updatedAt = new Date().toISOString()
+  store.scheduleSave(props.canvas)
 }
 
 function saveViewport(viewport: Viewport) {
   props.canvas.viewport = viewport
+  store.scheduleSave(props.canvas, 1200)
 }
 
 async function fitCanvas() {
@@ -261,10 +287,24 @@ async function fitCanvas() {
   else await flow.setViewport({ x: 0, y: 0, zoom: 1 }, { duration: 180 })
 }
 
-function setCover(media: CanvasMedia) {
-  store.setCover(props.canvas, media)
-  ui.notify('已设为画布封面')
+async function setCover(media: CanvasMedia) {
+  try {
+    await store.setCover(props.canvas, media)
+    ui.notify('已设为画布封面', 'success')
+  } catch (error) {
+    ui.notify(apiErrorMessage(error), 'error')
+  }
 }
+
+async function retrySave() {
+  try {
+    await store.flushSave(props.canvas)
+  } catch (error) {
+    ui.notify(apiErrorMessage(error), 'error')
+  }
+}
+
+const currentSaveStatus = computed(() => store.saveStatus[props.canvas.id] ?? 'saved')
 
 function showPreview(kind: 'image' | 'video', media: CanvasMedia) {
   previewMedia.value = { kind, media }
@@ -285,13 +325,13 @@ const CanvasGraphNode: FunctionalComponent<NodeProps<CanvasNode>> = ({ id, type,
     outputConnected: connectedOutputs.value.has(id),
     references: references.value.get(id) ?? [],
     onEdit: value => store.updateNode(props.canvas, id, value),
-    onReplace: file => store.replaceMedia(props.canvas, id, file),
-    onGenerate: prompt => store.generateExample(props.canvas, id, prompt),
-    onCover: setCover,
+    onReplace: file => void uploadNodeMedia(id, file),
+    onGenerate: () => ui.notify('画布真实 AI 生成任务将在下一步接入', 'info'),
+    onCover: media => void setCover(media),
     onPreview: showPreview,
     onCollect: title => {
       const current = findNode()
-      if (current) collect(current, title)
+      if (current) void collect(current, title)
     },
     onBrowse: () => openLibrary(id),
     onRemove: () => deleteItem(findNode()),
@@ -307,6 +347,7 @@ onBeforeUnmount(() => {
   cancelTouchMenu()
   props.canvas.nodes = props.canvas.nodes.map(node => node.selected ? { ...node, selected: false } : node)
   props.canvas.edges = props.canvas.edges.map(edge => edge.selected ? { ...edge, selected: false } : edge)
+  void store.flushSave(props.canvas).catch(() => {})
 })
 </script>
 
@@ -317,6 +358,21 @@ onBeforeUnmount(() => {
         <ArrowLeft :size="17" aria-hidden="true" />
       </RouterLink>
       <h1 :title="canvas.name">{{ canvas.name }}</h1>
+      <button
+        v-if="currentSaveStatus === 'error'"
+        type="button"
+        class="canvas-save-badge is-error"
+        title="点击重试保存"
+        @click="retrySave"
+      >
+        <CloudAlert :size="13" aria-hidden="true" />
+        <span>重试保存</span>
+      </button>
+      <span v-else class="canvas-save-badge" :class="`is-${currentSaveStatus}`">
+        <Loader2 v-if="currentSaveStatus === 'saving'" :size="12" class="ui-spin" aria-hidden="true" />
+        <Check v-else :size="12" aria-hidden="true" />
+        <span>{{ currentSaveStatus === 'saving' ? '保存中' : '已保存' }}</span>
+      </span>
     </header>
 
     <div ref="stage" class="canvas-editor-stage" tabindex="0" aria-label="画布" @keydown="stageKey"
@@ -414,7 +470,7 @@ onBeforeUnmount(() => {
             <component :is="canvasNodeIcons[asset.kind]" v-else :size="23" />
             <span :title="asset.title">{{ asset.title }}</span>
           </button>
-          <UiIconButton :label="'移除 ' + asset.title" @click="store.removeAsset(asset.id)"><Trash2 :size="14" /></UiIconButton>
+          <UiIconButton :label="'移除 ' + asset.title" @click="removeAsset(asset.id)"><Trash2 :size="14" /></UiIconButton>
         </article>
       </div>
     </UiDialog>
@@ -461,6 +517,9 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
 }
 .canvas-editor-back { flex: none; width: 34px; height: 34px; border-radius: 6px; }
+.canvas-save-badge { display: inline-flex; align-items: center; gap: 4px; flex: none; padding: 2px 7px; border-radius: 99px; border: 1px solid var(--border-subtle); background: rgb(255 255 255 / 3%); color: var(--color-muted); font-size: 11px; white-space: nowrap; }
+.canvas-save-badge.is-saving { color: var(--color-gold-soft); border-color: rgb(240 184 75 / 28%); }
+.canvas-save-badge.is-error { color: var(--color-error); border-color: rgb(239 146 146 / 38%); background: rgb(239 146 146 / 10%); cursor: pointer; }
 .canvas-editor-stage { position: relative; min-width: 0; min-height: 0; }
 .canvas-editor-stage :deep(.vue-flow) {
   --xy-background-color: #0c0d10;
