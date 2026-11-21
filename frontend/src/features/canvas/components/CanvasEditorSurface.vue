@@ -1,0 +1,550 @@
+<script setup lang="ts">
+import { computed, h, nextTick, onBeforeUnmount, reactive, ref, type FunctionalComponent } from 'vue'
+import { ArrowLeft, Copy, FolderOpen, Grid2X2, Magnet, Map as MapIcon, Maximize, Minus, Plus, Trash2, Unlink, Waypoints, X } from 'lucide-vue-next'
+import { Background, ConnectionLineType, MiniMap, setupVueFlow, SimpleBezierEdge, VueFlow, type Connection, type Edge, type FinalConnectionState, type NodeProps, type Viewport, type XYPosition } from '@xyflow/vue'
+import '@xyflow/vue/dist/style.css'
+import UiDialog from '@/components/ui/UiDialog.vue'
+import UiIconButton from '@/components/ui/UiIconButton.vue'
+import ImagePreview from '@/components/ui/ImagePreview.vue'
+import VideoPreview from '@/components/ui/VideoPreview.vue'
+import { useUiStore } from '@/stores/ui'
+import { canvasNodeKinds, canvasNodeLabels, canConnectCanvasKinds, canConnectCanvasNodes, outputKind, type CanvasAsset, type CanvasDocument, type CanvasMedia, type CanvasNode, type CanvasNodeKind } from '../canvas-model'
+import { canvasNodeIcons } from '../canvas-node-icons'
+import { useCanvasStore } from '../canvas-store'
+import CanvasWorkNode from './CanvasWorkNode.vue'
+
+const props = defineProps<{ canvas: CanvasDocument }>()
+const store = useCanvasStore()
+const ui = useUiStore()
+const flow = setupVueFlow<CanvasNode>()
+const stage = ref<HTMLElement>()
+const menuElement = ref<HTMLElement>()
+const initialViewport = props.canvas.viewport
+const fitOnOpen = !initialViewport && props.canvas.nodes.length > 0
+const fitOptions = { padding: { top: '64px', right: '28px', bottom: '214px', left: '28px' }, maxZoom: 1 } as const
+const minZoom = 0.2
+const maxZoom = 8
+const zoom = ref(initialViewport?.zoom ?? 1)
+const previewOpen = ref(false)
+const previewMedia = ref<{ kind: 'image' | 'video'; media: CanvasMedia }>()
+const grid = ref(true)
+const minimap = ref(false)
+const snap = ref(false)
+const wires = ref(true)
+const draggedNode = ref<string>()
+const selecting = ref(false)
+const connecting = ref(false)
+const libraryOpen = ref(false)
+const libraryTarget = ref<string>()
+const libraryType = ref<CanvasAsset['kind'] | 'all'>('all')
+let touchStart: { point: XYPosition; timer: number } | undefined
+const selectedIds = computed(() => new Set(props.canvas.nodes.filter(node => node.selected).map(node => node.id)))
+const connectedOutputs = computed(() => new Set(props.canvas.edges.map(edge => edge.source)))
+const references = computed(() => {
+  const sources = new Map(props.canvas.nodes.map(node => [node.id, { ...node, data: reactive(node.data) }]))
+  const result = new Map<string, CanvasNode[]>()
+  for (const edge of props.canvas.edges) {
+    const source = sources.get(edge.source)
+    if (source) {
+      const items = result.get(edge.target) ?? []
+      items.push(source)
+      result.set(edge.target, items)
+    }
+  }
+  for (const [target, items] of result) {
+    const order = sources.get(target)?.data.referenceOrder
+    if (!order?.length) continue
+    const ranks = new Map(order.map((id, index) => [id, index]))
+    items.sort((a, b) => (ranks.get(a.id) ?? order.length) - (ranks.get(b.id) ?? order.length))
+  }
+  return result
+})
+const menu = ref<{ x: number; y: number; position: XYPosition; node?: CanvasNode; edge?: Edge; from?: string; reverse?: boolean }>()
+const menuKinds = computed(() => {
+  const source = props.canvas.nodes.find(node => node.id === menu.value?.from)
+  if (!source) return canvasNodeKinds
+  return canvasNodeKinds.filter(kind => menu.value?.reverse
+    ? canConnectCanvasKinds(kind, source.type)
+    : canConnectCanvasKinds(source.type, kind))
+})
+const libraryAssets = computed(() => store.assets.filter(asset => libraryType.value === 'all' || asset.kind === libraryType.value))
+
+function setNodes(nodes?: CanvasNode[]) {
+  if (nodes) store.replaceNodes(props.canvas, nodes)
+}
+
+function setEdges(edges?: Edge[]) {
+  if (edges) props.canvas.edges = edges
+}
+
+function edgeIsActive(edge: Pick<Edge, 'source' | 'target'>) {
+  return selectedIds.value.has(edge.source) || selectedIds.value.has(edge.target) ||
+    draggedNode.value === edge.source || draggedNode.value === edge.target
+}
+
+async function openMenu(point: XYPosition, details: Pick<NonNullable<typeof menu.value>, 'node' | 'edge' | 'from' | 'reverse'> = {}) {
+  const bounds = stage.value?.getBoundingClientRect()
+  if (!bounds) return
+  const position = flow.screenToFlowPosition(point)
+  if (snap.value) {
+    position.x = Math.round(position.x / 24) * 24
+    position.y = Math.round(position.y / 24) * 24
+  }
+  menu.value = { x: point.x - bounds.left, y: point.y - bounds.top, position, ...details }
+  if (details.from && !menuKinds.value.length) {
+    menu.value = undefined
+    return
+  }
+  await nextTick()
+  if (!menu.value || !menuElement.value) return
+  menu.value.x = Math.max(6, Math.min(menu.value.x, bounds.width - menuElement.value.offsetWidth - 6))
+  menu.value.y = Math.max(6, Math.min(menu.value.y, bounds.height - menuElement.value.offsetHeight - 6))
+  menuElement.value.querySelector<HTMLButtonElement>('button[role="menuitem"]')?.focus({ preventScroll: true })
+}
+
+function contextMenu(event: MouseEvent, details?: Parameters<typeof openMenu>[1]) {
+  event.preventDefault()
+  if ((event.target as Element).closest('input, textarea, [contenteditable]')) return
+  void openMenu({ x: event.clientX, y: event.clientY }, details)
+}
+
+function stageKey(event: KeyboardEvent) {
+  if (event.key === 'Escape' && menu.value) {
+    menu.value = undefined
+    stage.value?.focus()
+  }
+  if (event.target !== stage.value || (!((event.shiftKey && event.key === 'F10') || event.key === 'ContextMenu'))) return
+  event.preventDefault()
+  const bounds = stage.value.getBoundingClientRect()
+  void openMenu({ x: bounds.left + bounds.width / 3, y: bounds.top + bounds.height / 3 })
+}
+
+function cancelTouchMenu() {
+  if (!touchStart) return
+  window.clearTimeout(touchStart.timer)
+  touchStart = undefined
+}
+
+function stagePointerDown(event: PointerEvent) {
+  if (!menuElement.value?.contains(event.target as Node)) menu.value = undefined
+  cancelTouchMenu()
+  if (event.pointerType !== 'touch' || !(event.target instanceof Element) ||
+    !event.target.closest('.vue-flow__pane') || event.target.closest('.vue-flow__node, .vue-flow__edge')) return
+  const point = { x: event.clientX, y: event.clientY }
+  touchStart = { point, timer: window.setTimeout(() => {
+    touchStart = undefined
+    void openMenu(point)
+  }, 500) }
+}
+
+function stagePointerMove(event: PointerEvent) {
+  if (touchStart && Math.hypot(touchStart.point.x - event.clientX, touchStart.point.y - event.clientY) > 8) cancelTouchMenu()
+}
+
+function menuKey(event: KeyboardEvent) {
+  if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return
+  const buttons = [...(menuElement.value?.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]') ?? [])]
+  if (!buttons.length) return
+  event.preventDefault()
+  const index = buttons.findIndex(button => button === document.activeElement)
+  const step = event.key === 'ArrowDown' ? 1 : -1
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + step + buttons.length) % buttons.length
+  buttons[next]?.focus()
+}
+
+function addNode(type: CanvasNodeKind) {
+  const placement = menu.value
+  if (!placement) return
+  menu.value = undefined
+  const node = store.addNode(props.canvas, type, placement.position.x, placement.position.y)
+  if (placement.from) connect({
+    source: placement.reverse ? node.id : placement.from,
+    target: placement.reverse ? placement.from : node.id,
+    sourceHandle: null,
+    targetHandle: null,
+  })
+}
+
+function duplicateNode(node: CanvasNode) {
+  menu.value = undefined
+  if (!node.type) return
+  store.addNode(props.canvas, node.type, node.position.x + 32, node.position.y + 36, { ...node.data })
+}
+
+function deleteItem(node?: CanvasNode, edge?: Edge) {
+  menu.value = undefined
+  void flow.deleteElements({ nodes: node ? [node] : [], edges: edge ? [edge] : [] })
+}
+
+function unlink(target: string, source: string) {
+  props.canvas.edges = props.canvas.edges.filter(edge => edge.target !== target || edge.source !== source)
+  markEdited()
+}
+
+function appendAudio(id: string, file: File) {
+  const base = props.canvas.nodes.find(node => node.id === id)
+  if (!base) return
+  const node = store.addNode(props.canvas, 'audio', base.position.x + 324, base.position.y)
+  store.replaceMedia(props.canvas, node.id, file)
+}
+
+function connectionEnded(event: MouseEvent | TouchEvent, connection: FinalConnectionState) {
+  connecting.value = false
+  const from = connection.fromNode?.id
+  if (connection.isValid || !from) return
+  const point = 'changedTouches' in event ? event.changedTouches[0] : event
+  if (!point) return
+  const target = document.elementFromPoint(point.clientX, point.clientY)
+  if (!target?.closest('.vue-flow__pane') || target.closest('.vue-flow__node, .vue-flow__handle, .vue-flow__edge')) return
+  void openMenu({ x: point.clientX, y: point.clientY }, { from, reverse: connection.fromHandle?.type === 'target' })
+}
+
+function collect(node: CanvasNode, title: string) {
+  store.collectAsset(node, title)
+  ui.notify('已添加到素材库')
+}
+
+function openLibrary(id?: string) {
+  libraryTarget.value = id
+  libraryType.value = id ? outputKind(props.canvas.nodes.find(node => node.id === id)?.type) : 'all'
+  libraryOpen.value = true
+}
+
+function useAsset(asset: CanvasAsset) {
+  const data = { title: asset.title, media: asset.media, text: asset.text }
+  const target = libraryTarget.value
+  if (target) {
+    store.updateNode(props.canvas, target, data)
+  } else {
+    const bounds = stage.value?.getBoundingClientRect()
+    if (!bounds) return
+    const where = flow.screenToFlowPosition({ x: bounds.left + bounds.width / 2 - 140, y: bounds.top + bounds.height / 2 - 75 })
+    store.addNode(props.canvas, asset.kind, where.x, where.y, data)
+  }
+  libraryOpen.value = false
+}
+
+function dropFiles(event: DragEvent) {
+  if (!event.dataTransfer?.files.length) return
+  const position = flow.screenToFlowPosition({ x: event.clientX, y: event.clientY })
+  Array.from(event.dataTransfer.files).forEach((file, i) => {
+    const kind = file.type.split('/')[0]
+    if (kind === 'image' || kind === 'video' || kind === 'audio') {
+      const node = store.addNode(props.canvas, kind, position.x + i * 26, position.y + i * 26)
+      store.replaceMedia(props.canvas, node.id, file)
+    }
+  })
+}
+
+function canConnect(connection: Pick<Connection, 'source' | 'target'>) {
+  const source = props.canvas.nodes.find(node => node.id === connection.source)
+  const target = props.canvas.nodes.find(node => node.id === connection.target)
+  return !!source && !!target && canConnectCanvasNodes(source, target)
+}
+
+function connect(connection: Connection) {
+  if (!canConnect(connection) || props.canvas.edges.some(edge => edge.source === connection.source && edge.target === connection.target)) return
+  props.canvas.edges = [...props.canvas.edges, { ...connection, id: crypto.randomUUID() }]
+  markEdited()
+}
+
+function markEdited() {
+  props.canvas.updatedAt = '刚刚'
+}
+
+function saveViewport(viewport: Viewport) {
+  props.canvas.viewport = viewport
+}
+
+async function fitCanvas() {
+  if (props.canvas.nodes.length) await flow.fitView({ ...fitOptions, duration: 180 })
+  else await flow.setViewport({ x: 0, y: 0, zoom: 1 }, { duration: 180 })
+}
+
+function setCover(media: CanvasMedia) {
+  store.setCover(props.canvas, media)
+  ui.notify('已设为画布封面')
+}
+
+function showPreview(kind: 'image' | 'video', media: CanvasMedia) {
+  previewMedia.value = { kind, media }
+  previewOpen.value = true
+}
+
+// A registered component keeps the media element mounted when drag or selection state changes.
+const CanvasGraphNode: FunctionalComponent<NodeProps<CanvasNode>> = ({ id, type, data, selected }) => {
+  const findNode = () => props.canvas.nodes.find(item => item.id === id)
+
+  return h(CanvasWorkNode, {
+    kind: type ?? 'text',
+    data: reactive(data),
+    selected,
+    panelsVisible: selected && selectedIds.value.size === 1 && !draggedNode.value && !selecting.value && !connecting.value,
+    generatingText: store.generatingText[id] ?? false,
+    connecting: connecting.value,
+    outputConnected: connectedOutputs.value.has(id),
+    references: references.value.get(id) ?? [],
+    onEdit: value => store.updateNode(props.canvas, id, value),
+    onReplace: file => store.replaceMedia(props.canvas, id, file),
+    onGenerate: prompt => store.generateExample(props.canvas, id, prompt),
+    onCover: setCover,
+    onPreview: showPreview,
+    onCollect: title => {
+      const current = findNode()
+      if (current) collect(current, title)
+    },
+    onBrowse: () => openLibrary(id),
+    onRemove: () => deleteItem(findNode()),
+    onUnlink: source => unlink(id, source),
+    onClipAudio: file => appendAudio(id, file),
+  })
+}
+CanvasGraphNode.props = ['id', 'type', 'data', 'selected']
+CanvasGraphNode.inheritAttrs = false
+const nodeTypes = Object.fromEntries(canvasNodeKinds.map(kind => [kind, CanvasGraphNode]))
+
+onBeforeUnmount(() => {
+  cancelTouchMenu()
+  props.canvas.nodes = props.canvas.nodes.map(node => node.selected ? { ...node, selected: false } : node)
+  props.canvas.edges = props.canvas.edges.map(edge => edge.selected ? { ...edge, selected: false } : edge)
+})
+</script>
+
+<template>
+  <main class="canvas-editor">
+    <header class="canvas-editor-bar">
+      <RouterLink :to="{ name: 'canvas' }" class="ui-icon-button canvas-editor-back" title="返回画布列表" aria-label="返回画布列表">
+        <ArrowLeft :size="17" aria-hidden="true" />
+      </RouterLink>
+      <h1 :title="canvas.name">{{ canvas.name }}</h1>
+    </header>
+
+    <div ref="stage" class="canvas-editor-stage" tabindex="0" aria-label="画布" @keydown="stageKey"
+      @pointerdown.capture="stagePointerDown" @pointermove.capture="stagePointerMove" @pointerup.capture="cancelTouchMenu" @pointercancel.capture="cancelTouchMenu"
+      @dragover.prevent @drop.prevent="dropFiles">
+      <VueFlow
+        :nodes="canvas.nodes"
+        :node-types="nodeTypes"
+        :edges="canvas.edges"
+        :fit-view="fitOnOpen"
+        :fit-view-options="fitOptions"
+        :default-viewport="initialViewport"
+        :min-zoom="minZoom"
+        :max-zoom="maxZoom"
+        :snap-to-grid="snap"
+        :snap-grid="[24, 24]"
+        :pro-options="{ hideAttribution: true }"
+        :is-valid-connection="canConnect"
+        :default-edge-options="{ type: 'reference', interactionWidth: 20 }"
+        :connection-line-type="ConnectionLineType.SimpleBezier"
+        :select-nodes-on-drag="false"
+        :zoom-on-double-click="false"
+        :edges-reconnectable="false"
+        :delete-key-code="['Backspace', 'Delete']"
+        color-mode="dark"
+        @update:nodes="setNodes"
+        @update:edges="setEdges"
+        @connect="connect"
+        @node-drag-start="draggedNode = $event.node.id"
+        @node-drag-stop="draggedNode = undefined; markEdited()"
+        @selection-start="selecting = true"
+        @selection-end="selecting = false"
+        @edges-delete="markEdited"
+        @viewport-change="zoom = $event.zoom"
+        @viewport-change-end="saveViewport"
+        @pane-context-menu="contextMenu($event)"
+        @node-context-menu="contextMenu($event.event, { node: $event.node })"
+        @edge-context-menu="contextMenu($event.event, { edge: $event.edge })"
+        @connect-start="connecting = true"
+        @connect-end="connectionEnded($event.event, $event.connectionState)"
+        :class="{ 'canvas-hide-edges': !wires }"
+      >
+        <Background v-if="grid" variant="dots" :gap="24" :size="1" pattern-color="#37373d" />
+        <MiniMap v-if="minimap" pannable zoomable :style="{ bottom: 'var(--canvas-minimap-bottom, 54px)', width: '152px', height: '100px' }" node-color="#b48b47" mask-color="#0e0f12bb" />
+        <template #edge-reference="edge">
+          <g :class="{ 'canvas-edge-active': edgeIsActive(edge) }"><SimpleBezierEdge v-bind="edge" /></g>
+        </template>
+      </VueFlow>
+
+      <div v-if="menu" ref="menuElement" class="canvas-node-menu" :style="{ left: menu.x + 'px', top: menu.y + 'px' }" role="menu" aria-label="画布右键菜单" @keydown="menuKey" @contextmenu.prevent>
+        <div class="canvas-node-menu-label">
+          {{ menu.node ? '节点操作' : menu.edge ? '连线操作' : '添加节点' }}
+          <button type="button" title="关闭" aria-label="关闭菜单" @click="menu = undefined"><X :size="14" /></button>
+        </div>
+        <template v-if="menu.node">
+          <button v-if="menu.node.type && ['image', 'video', 'audio'].includes(menu.node.type)" type="button" role="menuitem" class="canvas-node-option"
+            @click="openLibrary(menu.node.id); menu = undefined"><FolderOpen :size="16" />从素材库选择</button>
+          <button type="button" role="menuitem" class="canvas-node-option" @click="duplicateNode(menu.node)"><Copy :size="16" />复制节点</button>
+          <button type="button" role="menuitem" class="canvas-node-option" @click="deleteItem(menu.node)"><Trash2 :size="16" />删除节点</button>
+        </template>
+        <button v-else-if="menu.edge" type="button" role="menuitem" class="canvas-node-option" @click="deleteItem(undefined, menu.edge)"><Unlink :size="16" />删除连线</button>
+        <template v-else>
+          <button v-for="kind in menuKinds" :key="kind" type="button" role="menuitem" class="canvas-node-option" @click="addNode(kind)">
+            <component :is="canvasNodeIcons[kind]" :size="16" aria-hidden="true" />{{ canvasNodeLabels[kind] }}
+          </button>
+        </template>
+      </div>
+
+      <div class="canvas-tools" role="group" aria-label="画布工具">
+        <div class="canvas-tool-group">
+          <UiIconButton label="素材库" @click="openLibrary()"><FolderOpen :size="17" /></UiIconButton>
+          <UiIconButton label="小地图" :active="minimap" @click="minimap = !minimap"><MapIcon :size="17" /></UiIconButton>
+          <UiIconButton label="网格" :active="grid" @click="grid = !grid"><Grid2X2 :size="17" /></UiIconButton>
+          <UiIconButton label="网格吸附" :active="snap" @click="snap = !snap"><Magnet :size="17" /></UiIconButton>
+          <UiIconButton label="显示连线" :active="wires" @click="wires = !wires"><Waypoints :size="17" /></UiIconButton>
+        </div>
+        <div class="canvas-tool-group canvas-zoom-controls" role="group" aria-label="画布缩放">
+          <UiIconButton label="缩小" :disabled="zoom <= minZoom" @click="flow.zoomOut({ duration: 140 })"><Minus :size="16" aria-hidden="true" /></UiIconButton>
+          <button type="button" class="canvas-reset-zoom" title="重置为 100%" @click="flow.zoomTo(1, { duration: 140 })">{{ Math.round(zoom * 100) }}%</button>
+          <UiIconButton label="放大" :disabled="zoom >= maxZoom" @click="flow.zoomIn({ duration: 140 })"><Plus :size="16" aria-hidden="true" /></UiIconButton>
+          <UiIconButton label="适应画布" @click="fitCanvas"><Maximize :size="16" aria-hidden="true" /></UiIconButton>
+        </div>
+      </div>
+    </div>
+
+    <UiDialog v-model:open="libraryOpen" title="素材库" size="wide">
+      <div v-if="!libraryTarget" class="canvas-library-filters" role="group" aria-label="素材类型">
+        <button v-for="item in (['all', 'text', 'image', 'video', 'audio'] as const)" :key="item" type="button" :aria-pressed="libraryType === item" @click="libraryType = item">{{ item === 'all' ? '全部' : canvasNodeLabels[item] }}</button>
+      </div>
+      <p v-if="!libraryAssets.length" class="canvas-library-empty">暂无素材</p>
+      <div v-else class="canvas-library-grid">
+        <article v-for="asset in libraryAssets" :key="asset.id" class="canvas-library-card">
+          <button type="button" class="canvas-library-item" :aria-label="(libraryTarget ? '使用' : '添加到画布') + ' ' + asset.title" @click="useAsset(asset)">
+            <img v-if="asset.kind === 'image' && asset.media" :src="asset.media.url" alt="" />
+            <component :is="canvasNodeIcons[asset.kind]" v-else :size="23" />
+            <span :title="asset.title">{{ asset.title }}</span>
+          </button>
+          <UiIconButton :label="'移除 ' + asset.title" @click="store.removeAsset(asset.id)"><Trash2 :size="14" /></UiIconButton>
+        </article>
+      </div>
+    </UiDialog>
+
+    <ImagePreview v-if="previewMedia?.kind === 'image'" v-model:open="previewOpen" :src="previewMedia.media.url" :title="previewMedia.media.name" />
+    <VideoPreview v-else-if="previewMedia" v-model:open="previewOpen" :src="previewMedia.media.url" :title="previewMedia.media.name" />
+  </main>
+</template>
+
+<style scoped>
+.canvas-editor {
+  position: relative;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  width: 100%;
+  height: 100dvh;
+  overflow: hidden;
+  background: var(--color-canvas);
+  color: var(--color-text);
+  isolation: isolate;
+}
+.canvas-editor-bar {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: max-content;
+  max-width: min(360px, calc(100% - 28px));
+  padding: 3px 12px 3px 3px;
+  border: 1px solid var(--border-control);
+  border-radius: 8px;
+  background: var(--color-surface);
+}
+.canvas-editor-bar h1 {
+  min-width: 0;
+  overflow: hidden;
+  margin: 0;
+  font-size: var(--font-size-body);
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.canvas-editor-back { flex: none; width: 34px; height: 34px; border-radius: 6px; }
+.canvas-editor-stage { position: relative; min-width: 0; min-height: 0; }
+.canvas-editor-stage :deep(.vue-flow) {
+  --xy-background-color: #0c0d10;
+  --xy-edge-stroke: #84858a;
+  --xy-edge-stroke-width: 1.15px;
+  --xy-edge-stroke-selected: #f0b84b;
+  --xy-connectionline-stroke: #f0b84b;
+  background: #0c0d10;
+}
+.canvas-editor-stage:focus { outline: none; }
+.canvas-editor-stage :deep(.canvas-edge-active .vue-flow__edge-path),
+.canvas-editor-stage :deep(.vue-flow__edge.selected .vue-flow__edge-path),
+.canvas-editor-stage :deep(.vue-flow__connection-path) { stroke: var(--color-gold); stroke-dasharray: 5 5; }
+.canvas-editor-stage :deep(.canvas-hide-edges .vue-flow__edge) { visibility: hidden; }
+.canvas-node-menu {
+  position: absolute;
+  z-index: 60;
+  width: 170px;
+  max-height: calc(100% - 12px);
+  overflow: auto;
+  padding: 5px;
+  border: 1px solid var(--border-control);
+  border-radius: 8px;
+  background: var(--color-elevated);
+  color: var(--color-text);
+  box-shadow: 0 10px 28px rgb(0 0 0 / 35%);
+}
+.canvas-node-menu-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 9px 7px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--color-muted);
+  font-size: var(--font-size-caption);
+}
+.canvas-node-menu-label button { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 4px; cursor: pointer; }
+.canvas-node-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 9px;
+  min-height: 34px;
+  width: 100%;
+  border-radius: 5px;
+  font-size: var(--font-size-body);
+  cursor: pointer;
+}
+.canvas-node-option svg { color: var(--color-muted); }
+.canvas-node-option:is(:hover, :focus-visible), .canvas-node-menu-label button:hover { background: var(--gold-tint); color: var(--color-gold-soft); }
+.canvas-tools {
+  position: absolute;
+  left: 14px;
+  bottom: 14px;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  width: max-content;
+  max-width: calc(100% - 28px);
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--border-control);
+  border-radius: 8px;
+  background: var(--color-surface);
+}
+.canvas-tool-group { display: flex; align-items: center; gap: 3px; }
+.canvas-zoom-controls { margin-left: 3px; padding-left: 6px; border-left: 1px solid var(--border-control); }
+.canvas-tools .ui-icon-button { width: 32px; height: 32px; border-radius: 5px; }
+.canvas-tools .ui-icon-button[aria-pressed='true'] { background: var(--gold-tint); color: var(--color-gold-soft); }
+.canvas-reset-zoom { width: 48px; height: 32px; border-radius: 5px; text-align: center; color: var(--color-muted); font-size: var(--font-size-caption); font-variant-numeric: tabular-nums; cursor: pointer; }
+.canvas-reset-zoom:hover { background: var(--gold-tint); color: var(--color-gold-soft); }
+.canvas-library-filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.canvas-library-filters button { padding: 6px 9px; border-radius: 5px; color: var(--color-muted); }
+.canvas-library-filters button[aria-pressed='true'] { background: var(--gold-tint); color: var(--color-gold-soft); }
+.canvas-library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); gap: 9px; }
+.canvas-library-card { display: flex; align-items: flex-start; min-width: 0; border: 1px solid var(--border-subtle); border-radius: 7px; }
+.canvas-library-item { display: grid; justify-items: center; flex: 1; min-width: 0; gap: 6px; padding: 7px; color: var(--color-text); cursor: pointer; }
+.canvas-library-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; font-size: var(--font-size-caption); }
+.canvas-library-item img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 4px; }
+.canvas-library-empty { padding: 26px 0; text-align: center; color: var(--color-muted); }
+@media (max-width: 375px) {
+  .canvas-editor-stage { --canvas-minimap-bottom: 90px; }
+  .canvas-tools { flex-direction: column; align-items: stretch; }
+  .canvas-zoom-controls { margin-left: 0; padding-top: 3px; padding-left: 0; border-top: 1px solid var(--border-control); border-left: 0; }
+}
+</style>

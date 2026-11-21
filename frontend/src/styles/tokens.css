@@ -1,0 +1,28 @@
+@theme static {
+  --color-canvas: #090a0d;
+  --color-surface: #101115;
+  --color-elevated: #191a1f;
+  --color-gold: #f0b84b;
+  --color-gold-soft: #ffd98a;
+  --color-ink: #18130a;
+  --color-text: #eeeeef;
+  --color-muted: #999ba5;
+  --color-success: #80c9a1;
+  --color-error: #ef9292;
+  --color-info: #8fb9e9;
+  --font-sans: "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+:root {
+  color-scheme: dark;
+  --font-size-caption: 12px;
+  --font-size-body: 14px;
+  --font-size-action: 15px;
+  --border-subtle: rgb(255 255 255 / 7.5%);
+  --border-control: rgb(255 255 255 / 13%);
+  --surface-hover: rgb(255 255 255 / 6%);
+  --gold-tint: rgb(240 184 75 / 10%);
+  --focus-ring: rgb(240 184 75 / 28%);
+  --radius-control: 10px;
+  --radius-panel: 12px;
+}

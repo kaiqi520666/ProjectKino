@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" fill="none" role="img" aria-labelledby="title description">
+  <title id="title">FrameDrama</title>
+  <desc id="description">A gold film frame and play symbol on a black square.</desc>
+  <rect width="256" height="256" fill="#0D0E12"/>
+  <path d="M208 94V64C208 55.163 200.837 48 192 48H64C55.163 48 48 55.163 48 64V192C48 200.837 55.163 208 64 208H192C200.837 208 208 200.837 208 192V162" stroke="#F0B84B" stroke-width="12" stroke-linecap="square"/>
+  <path d="M104 87C104 81.7 107.7 79.6 112.2 82.5L175.8 122.5C180.3 125.4 180.3 130.6 175.8 133.5L112.2 173.5C107.7 176.4 104 174.3 104 169V87Z" fill="#F0B84B"/>
+</svg>

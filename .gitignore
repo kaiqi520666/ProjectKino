@@ -1,0 +1,31 @@
+# Local agent & IDE state
+.claude/
+.codegraph/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Node / Frontend
+node_modules/
+dist/
+*.tsbuildinfo
+*.local
+
+# Logs & temporary outputs
+*.log
+tmp/
+output/
+artifacts/

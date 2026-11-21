@@ -1,0 +1,238 @@
+from datetime import datetime
+from decimal import Decimal
+from typing import Any, Literal
+from uuid import UUID
+
+from pydantic import Field
+
+from app.core.schemas import CamelModel
+from app.modules.jobs.schemas import JobOut
+
+
+class ProjectSettingsIn(CamelModel):
+    name: str = Field(min_length=1, max_length=120)
+    ratio: Literal["16:9", "9:16", "1:1", "4:3", "3:4"] = "16:9"
+    language: Literal["zh-CN", "zh-TW", "en"] = "zh-CN"
+    visual_style: str = Field(min_length=1, max_length=80)
+    visual_style_label: str = Field(default="", max_length=500)
+    episode_count: int = Field(gt=0, le=100)
+    max_segment_duration: Literal[15, 30] = 15
+    seconds_per_episode: int = Field(default=120, gt=0, le=600)
+    background_music: bool = True
+
+
+class GenerateProjectRequest(CamelModel):
+    settings: ProjectSettingsIn
+    mode: Literal["story", "upload"] = "story"
+    text: str = Field(min_length=1)
+    feedback: str = Field(default="", max_length=500)
+
+
+class RegenerateStoryRequest(CamelModel):
+    feedback: str = Field(default="", max_length=500)
+
+
+class RewriteEpisodeRequest(CamelModel):
+    feedback: str = Field(default="", max_length=500)
+
+
+class AppendEpisodeRequest(CamelModel):
+    feedback: str = Field(default="", max_length=500)
+
+
+class RenameProjectRequest(CamelModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class StructuredEpisodeSaveRequest(CamelModel):
+    title: str = Field(min_length=1, max_length=160)
+    scenes: list[dict[str, Any]] = Field(min_length=1)
+
+
+class AssetCreateRequest(CamelModel):
+    kind: Literal["character", "scene", "prop"]
+    name: str = Field(min_length=1, max_length=120)
+    description: str = ""
+    prompt: str = ""
+    voice: str = ""
+    image_url: str | None = None
+    image_key: str | None = None
+
+
+class AssetUpdateRequest(CamelModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = None
+    prompt: str | None = None
+    voice: str | None = None
+    image_url: str | None = None
+    image_key: str | None = None
+    clear_image: bool = False
+
+
+class ExtractAssetsRequest(CamelModel):
+    mode: Literal["full", "incremental"] = "incremental"
+
+
+class ClipCreateRequest(CamelModel):
+    duration_seconds: int = Field(default=15, ge=1, le=30)
+    prompt: str = ""
+    references: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ClipUpdateRequest(CamelModel):
+    duration_seconds: int | None = Field(default=None, ge=1, le=30)
+    prompt: str | None = None
+    references: list[dict[str, Any]] | None = None
+
+
+class ClipReorderRequest(CamelModel):
+    clip_ids: list[UUID] = Field(min_length=1, max_length=200)
+
+
+class GenerateAssetImageRequest(CamelModel):
+    model_id: str = Field(default="gpt-image-2", min_length=1, max_length=48)
+    tier: Literal["web", "1k", "2k", "4k"] = "1k"
+    ratio: str | None = Field(default=None, max_length=16)
+
+
+class BatchGenerateAssetImagesRequest(CamelModel):
+    asset_ids: list[UUID] = Field(min_length=1, max_length=30)
+    model_id: str = Field(default="gpt-image-2", min_length=1, max_length=48)
+    tier: Literal["web", "1k", "2k", "4k"] = "1k"
+    ratio: str | None = Field(default=None, max_length=16)
+
+
+class BatchSkippedAssetOut(CamelModel):
+    asset_id: UUID
+    name: str
+    reason: str
+
+
+class BatchAssetImageAcceptedOut(CamelModel):
+    project_id: UUID
+    batch_id: str
+    accepted_count: int
+    total_frozen_credits: Decimal
+    jobs: list[JobOut]
+    skipped: list[BatchSkippedAssetOut]
+
+
+class GenerateClipVideoRequest(CamelModel):
+    model_id: str = Field(default="cc-sd2-fast-720", min_length=1, max_length=48)
+    resolution: Literal["480p", "720p", "1080p"] = "720p"
+    ratio: str | None = Field(default=None, max_length=16)
+    duration_seconds: int | None = Field(default=None, ge=1, le=60)
+
+
+class BatchGenerateClipVideosRequest(CamelModel):
+    clip_ids: list[UUID] = Field(min_length=1, max_length=30)
+    model_id: str = Field(default="cc-sd2-fast-720", min_length=1, max_length=48)
+    resolution: Literal["480p", "720p", "1080p"] = "720p"
+    ratio: str | None = Field(default=None, max_length=16)
+    duration_seconds: int | None = Field(default=None, ge=1, le=60)
+
+
+class BatchSkippedClipOut(CamelModel):
+    clip_id: UUID
+    clip_index: int | None = None
+    reason: str
+
+
+class BatchClipVideoAcceptedOut(CamelModel):
+    project_id: UUID
+    episode_number: int
+    batch_id: str
+    accepted_count: int
+    total_duration_seconds: int
+    total_frozen_credits: Decimal
+    jobs: list[JobOut]
+    skipped: list[BatchSkippedClipOut]
+
+
+class EpisodeOut(CamelModel):
+    id: UUID
+    number: int
+    title: str
+    summary: str
+    target_seconds: int
+    seconds: float
+    hook: str
+    cliff: str
+    hook_beat: list[int]
+    scenes: list[dict[str, Any]]
+    script: str
+    warnings: list[str]
+    composed_video_url: str | None = None
+    composed_duration: float | None = None
+
+
+class ProjectAssetOut(CamelModel):
+    id: UUID
+    asset_code: str
+    kind: str
+    name: str
+    description: str
+    prompt: str
+    voice: str
+    episode_numbers: list[int]
+    image_url: str | None = None
+    image_model_id: str | None = None
+    image_tier: str | None = None
+    image_status: str
+    last_job_id: UUID | None = None
+
+
+class StoryboardClipOut(CamelModel):
+    id: UUID
+    episode_id: UUID
+    clip_index: int
+    duration_seconds: int
+    prompt: str
+    prompt_customized: bool
+    references: list[dict[str, Any]]
+    beats: list[int] | None = None
+    blocking: str | None = None
+    cuts: list[dict[str, Any]] | None = None
+    preview_url: str | None = None
+    video_url: str | None = None
+    video_model_id: str | None = None
+    video_status: str
+    last_job_id: UUID | None = None
+
+
+class EpisodeStoryboardOut(CamelModel):
+    episode_number: int
+    clips: list[StoryboardClipOut]
+
+
+class ProjectSummaryOut(CamelModel):
+    id: UUID
+    name: str
+    mode: str
+    settings: dict[str, Any]
+    script_confirmed: bool
+    episode_count: int
+    asset_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectDetailOut(CamelModel):
+    id: UUID
+    name: str
+    mode: str
+    source_text: str
+    settings: dict[str, Any]
+    outline: dict[str, Any] | None = None
+    script_confirmed: bool
+    episodes: list[EpisodeOut]
+    assets: list[ProjectAssetOut]
+    storyboards: dict[int, list[StoryboardClipOut]]
+    active_jobs: list[JobOut]
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectJobAcceptedOut(CamelModel):
+    project_id: UUID
+    job: JobOut
