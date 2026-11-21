@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Check, MapPin, Package, Sparkles, UserRound } from 'lucide-vue-next'
+import { Check, Sparkles } from 'lucide-vue-next'
 import UiButton from '@/components/ui/UiButton.vue'
 import UiDialog from '@/components/ui/UiDialog.vue'
 import type { ModelCatalogItemOut } from '../api-types'
+import { assetKindIcons } from '../asset-icons'
 import { assetKindOptions } from '../studio-assets'
 import type { StudioAsset, StudioAssetKind } from '../studio-assets'
 import ImageModelPicker from './ImageModelPicker.vue'
@@ -35,38 +36,13 @@ const emit = defineEmits<{
   }]
 }>()
 
-const categoryIcons = { character: UserRound, scene: MapPin, prop: Package }
 const selectedIds = ref<string[]>([])
-const selectedModelId = ref('gpt-image-2')
+const selectedModelId = ref('')
 const selectedTier = ref<'web' | '1k' | '2k' | '4k'>('1k')
 const ratioMode = ref<'auto' | 'override'>('auto')
 const overrideRatio = ref('16:9')
 
-const modelCatalogList = computed<ModelCatalogItemOut[]>(() => {
-  if (props.imageModels.length) return props.imageModels
-  return [
-    {
-      id: 'gpt-image-2',
-      mediaType: 'image',
-      category: 'GPT Image 2',
-      displayName: 'GPT Image 2',
-      isDefault: true,
-      capabilities: {
-        description: '经典稳定、性价比高，适合日常角色与场景批量出图',
-        tiers: ['web', '1k', '2k', '4k'],
-        ratios: ['16:9', '9:16', '1:1', '4:3', '3:4', '3:2', '2:3', '5:4', '4:5', '21:9', '9:21', 'auto'],
-      },
-      defaults: { tier: '1k' },
-      imagePrices: [
-        { tier: 'web', creditPrice: '1.0000' },
-        { tier: '1k', creditPrice: '2.0000' },
-        { tier: '2k', creditPrice: '4.0000' },
-        { tier: '4k', creditPrice: '8.0000' },
-      ],
-      videoPrices: [],
-    },
-  ]
-})
+const modelCatalogList = computed<ModelCatalogItemOut[]>(() => props.imageModels)
 
 const currentModel = computed(
   () => modelCatalogList.value.find((m) => m.id === selectedModelId.value) ?? modelCatalogList.value[0] ?? null,
@@ -101,7 +77,7 @@ const groups = computed(() =>
   assetKindOptions
     .map((item) => ({
       ...item,
-      icon: categoryIcons[item.value],
+      icon: assetKindIcons[item.value],
       assets: props.assets.filter((a) => a.kind === item.value),
     }))
     .filter((group) => group.assets.length > 0),
@@ -135,7 +111,7 @@ watch(open, (isOpen) => {
   if (!isOpen) return
   ratioMode.value = 'auto'
   overrideRatio.value = '16:9'
-  const defaultModel = modelCatalogList.value.find((m) => m.isDefault)?.id || modelCatalogList.value[0]?.id || 'gpt-image-2'
+  const defaultModel = modelCatalogList.value.find((m) => m.isDefault)?.id || modelCatalogList.value[0]?.id || ''
   selectedModelId.value = defaultModel
   if (props.initialSelectedIds.length) {
     const allowed = new Set(selectableAssets.value.map((a) => a.backendId!))
@@ -174,10 +150,10 @@ function clearSelection() {
 
 function confirmSubmit() {
   const ids = selectedAssets.value.map((a) => a.backendId!)
-  if (!ids.length || props.submitting) return
+  if (!ids.length || !currentModel.value || props.submitting) return
   emit('submit', {
     assetIds: ids,
-    modelId: selectedModelId.value,
+    modelId: currentModel.value.id,
     tier: selectedTier.value,
     ratio: ratioMode.value === 'override' ? overrideRatio.value : undefined,
   })
@@ -295,7 +271,7 @@ function confirmSubmit() {
           variant="primary"
           size="sm"
           :loading="submitting"
-          :disabled="!selectedAssets.length || submitting"
+          :disabled="!selectedAssets.length || !currentModel || submitting"
           @click="confirmSubmit"
         >
           <template v-if="!submitting" #leading><Sparkles :size="14" aria-hidden="true" /></template>

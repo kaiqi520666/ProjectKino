@@ -51,31 +51,7 @@ const selectedRatio = ref('16:9')
 const fileInput = useTemplateRef<HTMLInputElement>('fileInput')
 const library = computed(() => exampleAssetLibrary[kind.value])
 
-const modelCatalogList = computed<ModelCatalogItemOut[]>(() => {
-  if (props.imageModels.length) return props.imageModels
-  return [
-    {
-      id: 'gpt-image-2',
-      mediaType: 'image',
-      category: 'GPT Image 2',
-      displayName: 'GPT Image 2',
-      isDefault: true,
-      capabilities: {
-        description: '经典稳定、性价比高，适合日常角色与场景批量出图',
-        tiers: ['web', '1k', '2k', '4k'],
-        ratios: ['16:9', '9:16', '1:1', '4:3', '3:4', '3:2', '2:3', '5:4', '4:5', '21:9', '9:21', 'auto'],
-      },
-      defaults: { tier: '1k' },
-      imagePrices: [
-        { tier: 'web', creditPrice: '1.0000' },
-        { tier: '1k', creditPrice: '2.0000' },
-        { tier: '2k', creditPrice: '4.0000' },
-        { tier: '4k', creditPrice: '8.0000' },
-      ],
-      videoPrices: [],
-    },
-  ]
-})
+const modelCatalogList = computed<ModelCatalogItemOut[]>(() => props.imageModels)
 
 const currentModel = computed(
   () => modelCatalogList.value.find((m) => m.id === selectedModelId.value) ?? modelCatalogList.value[0] ?? null,
@@ -94,6 +70,7 @@ const canGenerateAiImage = computed(
   () =>
     props.persisted
     && !!asset.value?.backendId
+    && !!currentModel.value
     && !!draft.value?.prompt.trim()
     && !loadingImage.value
     && !props.generatingImage,

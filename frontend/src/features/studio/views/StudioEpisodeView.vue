@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, useTemplateRef, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   AlertCircle,
@@ -14,14 +14,11 @@ import {
   Download,
   Film,
   Loader2,
-  MapPin,
-  Package,
   Play,
   Plus,
   RefreshCw,
   Sparkles,
   Trash2,
-  UserRound,
   Video,
   X,
 } from 'lucide-vue-next'
@@ -40,7 +37,6 @@ import {
   createClipApi,
   deleteClipApi,
   getJob,
-  getModelCatalog,
   getProjectDetail,
   isRetryableApiError,
   reorderClipsApi,
@@ -51,27 +47,25 @@ import {
   updateClipApi,
   watchJob,
 } from '../api'
-import type { ModelCatalogItemOut } from '../api-types'
+import { assetCategoryItems, assetKindIcons } from '../asset-icons'
 import { defaultSegmentDuration } from '../components/drama-creation'
 import StudioBatchVideoDialog from '../components/StudioBatchVideoDialog.vue'
 import VideoModelPicker from '../components/VideoModelPicker.vue'
 import VideoParamsPopover from '../components/VideoParamsPopover.vue'
+import { useBatchJobTracker } from '../composables/useBatchJobTracker'
+import { useModelCatalog } from '../composables/useModelCatalog'
 import type { StudioAsset } from '../studio-assets'
 import { episodeLabel, isEpisodeNumber, readEpisode } from '../studio-project'
 import type { StudioProject } from '../studio-project'
 import type { StoryboardClip } from '../studio-storyboard'
 import { useStudioStore } from '../studio-store'
 
-interface VideoBatchTracker {
+interface VideoBatchMeta {
   episodeNumber: number
   modelId: string
   resolution: '480p' | '720p' | '1080p'
   ratio?: string
   durationSeconds?: number
-  jobToClip: Record<string, string>
-  succeededClips: string[]
-  failedClips: Record<string, string>
-  dismissed: boolean
 }
 
 const props = defineProps<{ project: StudioProject }>()
@@ -80,12 +74,7 @@ const auth = useAuthStore()
 const studio = useStudioStore()
 const generation = useGenerationStore()
 const ui = useUiStore()
-const categories = [
-  { kind: 'character', label: '角色', icon: UserRound },
-  { kind: 'scene', label: '场景', icon: MapPin },
-  { kind: 'prop', label: '物品', icon: Package },
-] as const
-const categoryIcons = { character: UserRound, scene: MapPin, prop: Package }
+const { videoModels, ensureLoaded: ensureModelCatalog } = useModelCatalog()
 const selectedId = ref<number>()
 const deleteOpen = ref(false)
 const pickerOpen = ref(false)
@@ -98,10 +87,6 @@ const checkedClipIds = ref<string[]>([])
 const reorderingClips = ref(false)
 const dragSourceIndex = ref<number | null>(null)
 const dragOverIndex = ref<number | null>(null)
-const batchTracker = ref<VideoBatchTracker | null>(null)
-const checkedJobTerminals = new Set<string>()
-let pollTimer: ReturnType<typeof setInterval> | null = null
-let pollingInFlight = false
 
 const previewClip = ref<{ id: number; src: string; poster?: string } | null>(null)
 const previewOpen = computed({
@@ -112,8 +97,7 @@ const previewOpen = computed({
 })
 const generating = ref(false)
 const clipToDelete = ref<number>()
-const videoModels = ref<ModelCatalogItemOut[]>([])
-const selectedVideoModelId = ref('cc-sd2-fast-720')
+const selectedVideoModelId = ref('')
 const selectedResolution = ref<'480p' | '720p' | '1080p'>('720p')
 const selectedRatio = ref(props.project.creation.settings.ratio || '16:9')
 const selectedDuration = ref(10)
@@ -121,20 +105,11 @@ let deleteTrigger: HTMLButtonElement | undefined
 const clipList = useTemplateRef<HTMLOListElement>('clipList')
 
 onMounted(async () => {
-  try {
-    const catalog = await getModelCatalog()
-    videoModels.value = catalog.video
-    const def = catalog.video.find((m) => m.isDefault) ?? catalog.video[0]
-    if (def) {
-      selectedVideoModelId.value = def.id
-    }
-  } catch {
-    // 保留默认视频模型兜底选项。
+  await ensureModelCatalog()
+  if (!selectedVideoModelId.value || !videoModels.value.some((m) => m.id === selectedVideoModelId.value)) {
+    const def = videoModels.value.find((m) => m.isDefault) ?? videoModels.value[0]
+    if (def) selectedVideoModelId.value = def.id
   }
-})
-
-onUnmounted(() => {
-  stopBatchPolling()
 })
 
 const number = computed(() => Number(route.params.episode))
@@ -185,6 +160,46 @@ const activeClipIds = computed(() => {
 
 const hasActiveVideoJobs = computed(() => activeClipIds.value.size > 0)
 
+const activeClipCount = computed(() => activeClipIds.value.size)
+
+const {
+  tracker: batchTracker,
+  summary: batchSummary,
+  trackJobs: trackVideoBatchJobs,
+  startPolling: startBatchPolling,
+  failedReason: failedReasonForClipId,
+  dismiss: dismissBatchBanner,
+} = useBatchJobTracker<VideoBatchMeta>({
+  jobType: 'clip_video',
+  pollIntervalMs: 5000,
+  fallbackErrorMessage: '视频生成失败',
+  canPoll: () => !!props.project.persisted,
+  activeCount: activeClipCount,
+  hasActiveJobs: hasActiveVideoJobs,
+  isInScope: (meta) => meta.episodeNumber === number.value,
+  fetchProjectDetail: () => getProjectDetail(props.project.id),
+  fetchJob: getJob,
+  onDetail: (detail) => {
+    studio.hydrateProjectDetail(detail)
+    void auth.refreshBalance()
+  },
+  isStillRunning: (detail) => {
+    const epClips = detail.storyboards[String(number.value)] ?? []
+    const epClipIds = new Set(epClips.map((c) => c.id))
+    return (detail.activeJobs ?? []).some(
+      (j) => j.jobType === 'clip_video' && j.targetId && epClipIds.has(j.targetId),
+    ) || epClips.some((c) => c.videoStatus === 'generating')
+  },
+  onBatchComplete: ({ okCount, failCount }) => {
+    ui.notify(
+      failCount > 0
+        ? `第 ${number.value} 集批量生视频结束：成功 ${okCount} 段，失败 ${failCount} 段（失败已自动退还积分）`
+        : `第 ${number.value} 集批量生视频完成：共生成 ${okCount} 段视频`,
+      failCount > 0 ? 'info' : 'success',
+    )
+  },
+})
+
 function isClipGenerating(item?: StoryboardClip) {
   return !!item?.backendId && activeClipIds.value.has(item.backendId)
 }
@@ -198,8 +213,7 @@ function clipJobProgress(item: StoryboardClip): string {
 }
 
 function clipFailedReason(item: StoryboardClip): string {
-  if (!item.backendId) return ''
-  return batchTracker.value?.failedClips[item.backendId] ?? ''
+  return failedReasonForClipId(item.backendId)
 }
 
 const canCompose = computed(
@@ -207,133 +221,6 @@ const canCompose = computed(
 )
 
 const checkedSet = computed(() => new Set(checkedClipIds.value))
-
-const batchSummary = computed(() => {
-  const tracker = batchTracker.value
-  const activeCount = activeClipIds.value.size
-  if (tracker && tracker.episodeNumber === number.value && !tracker.dismissed) {
-    const total = Object.keys(tracker.jobToClip).length
-    const succeeded = tracker.succeededClips.length
-    const failedIds = Object.keys(tracker.failedClips)
-    const failed = failedIds.length
-    const running = Math.max(0, total - succeeded - failed)
-    const done = succeeded + failed
-    const percent = total > 0 ? Math.round((done / total) * 100) : 0
-    return {
-      visible: true,
-      total,
-      succeeded,
-      failed,
-      failedIds,
-      running,
-      percent,
-      finished: running === 0 && activeCount === 0,
-    }
-  }
-  if (activeCount > 0) {
-    return {
-      visible: true,
-      total: activeCount,
-      succeeded: 0,
-      failed: 0,
-      failedIds: [] as string[],
-      running: activeCount,
-      percent: 15,
-      finished: false,
-    }
-  }
-  return null
-})
-
-function startBatchPolling() {
-  if (pollTimer !== null || !props.project.persisted) return
-  pollTimer = setInterval(() => {
-    void pollBatchProgress()
-  }, 5000)
-}
-
-function stopBatchPolling() {
-  if (pollTimer !== null) {
-    clearInterval(pollTimer)
-    pollTimer = null
-  }
-}
-
-async function pollBatchProgress() {
-  if (pollingInFlight || !props.project.persisted) return
-  pollingInFlight = true
-  try {
-    const detail = await getProjectDetail(props.project.id)
-    studio.hydrateProjectDetail(detail)
-    void auth.refreshBalance()
-
-    const activeIds = new Set(
-      (detail.activeJobs ?? [])
-        .filter((j) => j.jobType === 'clip_video')
-        .map((j) => j.id),
-    )
-
-    const tracker = batchTracker.value
-    if (tracker) {
-      const newlyFinished = Object.keys(tracker.jobToClip).filter(
-        (jid) => !activeIds.has(jid) && !checkedJobTerminals.has(jid),
-      )
-      for (const jid of newlyFinished) {
-        checkedJobTerminals.add(jid)
-        try {
-          const job = await getJob(jid)
-          const cid = tracker.jobToClip[jid]
-          if (!cid) continue
-          if (job.status === 'succeeded') {
-            if (!tracker.succeededClips.includes(cid)) tracker.succeededClips.push(cid)
-            delete tracker.failedClips[cid]
-          } else if (job.status === 'failed' || job.status === 'review') {
-            tracker.failedClips[cid] = job.errorMessage || '视频生成失败'
-          } else {
-            checkedJobTerminals.delete(jid)
-          }
-        } catch {
-          checkedJobTerminals.delete(jid)
-        }
-      }
-    }
-
-    const epClips = detail.storyboards[String(number.value)] ?? []
-    const epClipIds = new Set(epClips.map((c) => c.id))
-    const stillRunning = (detail.activeJobs ?? []).some(
-      (j) => j.jobType === 'clip_video' && j.targetId && epClipIds.has(j.targetId),
-    ) || epClips.some((c) => c.videoStatus === 'generating')
-
-    if (!stillRunning) {
-      stopBatchPolling()
-      if (tracker && tracker.episodeNumber === number.value && !tracker.dismissed) {
-        const okCount = tracker.succeededClips.length
-        const failCount = Object.keys(tracker.failedClips).length
-        if (okCount > 0 || failCount > 0) {
-          ui.notify(
-            failCount > 0
-              ? `第 ${number.value} 集批量生视频结束：成功 ${okCount} 段，失败 ${failCount} 段（失败已自动退还积分）`
-              : `第 ${number.value} 集批量生视频完成：共生成 ${okCount} 段视频`,
-            failCount > 0 ? 'info' : 'success',
-          )
-        }
-      }
-    }
-  } catch {
-    // 忽略单次轮询网络波动，下个周期重试。
-  } finally {
-    pollingInFlight = false
-  }
-}
-
-watch(
-  hasActiveVideoJobs,
-  (active) => {
-    if (active) startBatchPolling()
-    else if (!batchSummary.value || batchSummary.value.finished) stopBatchPolling()
-  },
-  { immediate: true },
-)
 
 const projectAssetsById = computed(() => new Map((props.project.assets ?? []).map((item) => [item.id, item])))
 const resolvedStoryboardAssets = computed(() => (storyboard.value?.assets ?? []).map((asset) => {
@@ -344,7 +231,7 @@ const resolvedStoryboardAssets = computed(() => (storyboard.value?.assets ?? [])
     imageUrl: live?.imageUrl ?? asset.imageUrl,
   }
 }))
-const assetGroups = computed(() => categories.map((category) => ({
+const assetGroups = computed(() => assetCategoryItems.map((category) => ({
   ...category,
   assets: resolvedStoryboardAssets.value.filter(({ kind }) => kind === category.kind),
 })))
@@ -360,7 +247,7 @@ const references = computed(() => {
         name: live?.name || boardAsset?.name || reference.name,
         kind: reference.kind,
         index: reference.index as number | undefined,
-        icon: categoryIcons[reference.kind],
+        icon: assetKindIcons[reference.kind],
         imageUrl: live?.imageUrl ?? boardAsset?.imageUrl,
       }
     })
@@ -377,34 +264,8 @@ const availablePickerAssets = computed(() => {
   return (props.project.assets ?? []).filter((item) => !used.has(item.id))
 })
 
-const availableVideoModels = computed<ModelCatalogItemOut[]>(() => {
-  if (videoModels.value.length) return videoModels.value
-  return [
-    {
-      id: 'cc-sd2-fast-720',
-      mediaType: 'video',
-      category: 'Seedance 2.0',
-      displayName: 'Seedance 2.0 极速 720p',
-      isDefault: true,
-      capabilities: {
-        description: '快速稳定不限并发，适合日常分镜批量出片',
-        minDuration: 4,
-        maxDuration: 15,
-        maxPromptChars: 5000,
-        maxReferenceImages: 9,
-        maxReferenceVideos: 3,
-        maxReferenceAudios: 3,
-        resolutions: ['720p'],
-      },
-      defaults: { resolution: '720p' },
-      imagePrices: [],
-      videoPrices: [{ ruleKey: 'default', unit: 'call', creditPrice: '15.0000' }],
-    },
-  ]
-})
-
 const currentVideoModel = computed(
-  () => availableVideoModels.value.find((m) => m.id === selectedVideoModelId.value) ?? availableVideoModels.value[0],
+  () => videoModels.value.find((m) => m.id === selectedVideoModelId.value) ?? videoModels.value[0] ?? null,
 )
 
 const estimatedVideoQuote = computed(() => {
@@ -607,55 +468,6 @@ function openBatchFromSelection() {
   void openBatchDialog([...checkedClipIds.value])
 }
 
-function trackVideoJobs(
-  jobs: Array<{ id: string; targetId?: string | null }>,
-  modelId: string,
-  resolution: '480p' | '720p' | '1080p',
-  ratio?: string,
-  durationSeconds?: number,
-) {
-  const existing = batchTracker.value
-  const shouldMerge =
-    !!existing
-    && existing.episodeNumber === number.value
-    && !existing.dismissed
-    && !!batchSummary.value
-    && !batchSummary.value.finished
-
-  const tracker: VideoBatchTracker = shouldMerge
-    ? {
-        ...existing,
-        modelId,
-        resolution,
-        ratio,
-        durationSeconds,
-        jobToClip: { ...existing.jobToClip },
-        succeededClips: [...existing.succeededClips],
-        failedClips: { ...existing.failedClips },
-        dismissed: false,
-      }
-    : {
-        episodeNumber: number.value,
-        modelId,
-        resolution,
-        ratio,
-        durationSeconds,
-        jobToClip: {},
-        succeededClips: [],
-        failedClips: {},
-        dismissed: false,
-      }
-
-  for (const job of jobs) {
-    if (!job.targetId) continue
-    tracker.jobToClip[job.id] = job.targetId
-    checkedJobTerminals.delete(job.id)
-    delete tracker.failedClips[job.targetId]
-    tracker.succeededClips = tracker.succeededClips.filter((cid) => cid !== job.targetId)
-  }
-  batchTracker.value = tracker
-}
-
 async function submitBatchClipVideos(payload: {
   clipIds: string[]
   modelId: string
@@ -672,7 +484,13 @@ async function submitBatchClipVideos(payload: {
     selectMode.value = false
     checkedClipIds.value = []
 
-    trackVideoJobs(res.jobs, payload.modelId, payload.resolution, payload.ratio, payload.durationSeconds)
+    trackVideoBatchJobs(res.jobs, {
+      episodeNumber: number.value,
+      modelId: payload.modelId,
+      resolution: payload.resolution,
+      ratio: payload.ratio,
+      durationSeconds: payload.durationSeconds,
+    })
 
     const detail = await getProjectDetail(props.project.id)
     studio.hydrateProjectDetail(detail)
@@ -694,19 +512,15 @@ async function submitBatchClipVideos(payload: {
 function retryFailedBatchClips() {
   const tracker = batchTracker.value
   if (!tracker) return
-  const ids = Object.keys(tracker.failedClips)
+  const ids = Object.keys(tracker.failedById)
   if (!ids.length) return
   void submitBatchClipVideos({
     clipIds: ids,
-    modelId: tracker.modelId,
-    resolution: tracker.resolution,
-    ratio: tracker.ratio,
-    durationSeconds: tracker.durationSeconds,
+    modelId: tracker.meta.modelId,
+    resolution: tracker.meta.resolution,
+    ratio: tracker.meta.ratio,
+    durationSeconds: tracker.meta.durationSeconds,
   })
-}
-
-function dismissBatchBanner() {
-  if (batchTracker.value) batchTracker.value.dismissed = true
 }
 
 async function generateFromScript() {
@@ -857,7 +671,12 @@ async function generateClipVideo() {
   const clipIndex = activeClip.id
   const backendClipId = activeClip.backendId
   const isRedraw = !!activeClip.videoUrl
-  const modelId = selectedVideoModelId.value
+  const modelId = currentVideoModel.value?.id
+  if (!modelId) {
+    ui.notify('视频模型目录尚未加载完成，请稍后重试', 'error')
+    void ensureModelCatalog()
+    return
+  }
   const resolution = selectedResolution.value
   const ratio = selectedRatio.value
   const durationSeconds = selectedDuration.value
@@ -871,7 +690,13 @@ async function generateClipVideo() {
       ratio,
       durationSeconds,
     })
-    trackVideoJobs([accepted.job], modelId, resolution, ratio, durationSeconds)
+    trackVideoBatchJobs([accepted.job], {
+      episodeNumber: number.value,
+      modelId,
+      resolution,
+      ratio,
+      durationSeconds,
+    })
 
     const detail = await getProjectDetail(props.project.id)
     studio.hydrateProjectDetail(detail)
@@ -1176,7 +1001,7 @@ async function deleteClip() {
             <div class="episode-video-controls">
               <VideoModelPicker
                 v-model="selectedVideoModelId"
-                :models="availableVideoModels"
+                :models="videoModels"
                 :clip-duration="selectedDuration"
                 :project-ratio="selectedRatio"
                 :reference-count="references.length"
@@ -1213,7 +1038,7 @@ async function deleteClip() {
                   variant="primary"
                   size="sm"
                   :loading="submittingClipId === clip.backendId || isClipGenerating(clip)"
-                  :disabled="!clip.prompt.trim() || generating || submittingClipId === clip.backendId || isClipGenerating(clip)"
+                  :disabled="!clip.prompt.trim() || !currentVideoModel || generating || submittingClipId === clip.backendId || isClipGenerating(clip)"
                   @click="generateClipVideo"
                 >
                   <template v-if="submittingClipId !== clip.backendId && !isClipGenerating(clip)" #leading><Video :size="15" aria-hidden="true" /></template>
@@ -1381,7 +1206,7 @@ async function deleteClip() {
           <button type="button" class="picker-asset-card" @click="addReferenceAsset(asset)">
             <span class="picker-asset-thumb">
               <img v-if="asset.imageUrl" :src="asset.imageUrl" alt="" />
-              <component :is="categoryIcons[asset.kind]" v-else :size="20" aria-hidden="true" />
+              <component :is="assetKindIcons[asset.kind]" v-else :size="20" aria-hidden="true" />
             </span>
             <span class="picker-asset-info">
               <strong>{{ asset.name }}</strong>

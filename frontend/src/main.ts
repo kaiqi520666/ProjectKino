@@ -5,6 +5,7 @@ import { router } from './router'
 import { setUnauthorizedHandler } from './lib/http'
 import { useAuthStore } from './stores/auth'
 import { useUiStore } from './stores/ui'
+import { clearModelCatalogCache } from './features/studio/composables/useModelCatalog'
 import { useStudioStore } from './features/studio/studio-store'
 import './styles/index.css'
 
@@ -20,6 +21,7 @@ setUnauthorizedHandler(() => {
   const onProtectedRoute = current.matched.some((record) => record.meta.requiresAuth)
   auth.clearSession()
   studio.clearProjects()
+  clearModelCatalogCache()
   if (!onProtectedRoute || handlingUnauthorized) return
 
   handlingUnauthorized = true

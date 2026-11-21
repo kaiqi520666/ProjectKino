@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue'
+import { computed, onMounted, ref, useTemplateRef } from 'vue'
 import {
   AlertCircle,
   Boxes,
@@ -9,15 +9,12 @@ import {
   ImageIcon,
   ImageOff,
   Loader2,
-  MapPin,
-  Package,
   Pencil,
   Plus,
   RefreshCw,
   ScanText,
   Sparkles,
   Trash2,
-  UserRound,
   X,
 } from 'lucide-vue-next'
 import EmptyState from '@/components/business/EmptyState.vue'
@@ -34,7 +31,6 @@ import {
   createAssetApi,
   deleteAssetApi,
   getJob,
-  getModelCatalog,
   getProjectDetail,
   isRetryableApiError,
   startBatchGenerateAssetImages,
@@ -43,22 +39,21 @@ import {
   updateAssetApi,
   watchJob,
 } from '../api'
-import type { ModelCatalogItemOut, ProjectDetailOut } from '../api-types'
+import type { ProjectDetailOut } from '../api-types'
+import { assetKindIcons } from '../asset-icons'
 import StudioAssetEditor from '../components/StudioAssetEditor.vue'
 import StudioBatchImageDialog from '../components/StudioBatchImageDialog.vue'
+import { useBatchJobTracker } from '../composables/useBatchJobTracker'
+import { useModelCatalog } from '../composables/useModelCatalog'
 import { assetKindOptions } from '../studio-assets'
 import type { StudioAsset, StudioAssetDraft, StudioAssetKind } from '../studio-assets'
 import type { StudioProject } from '../studio-project'
 import { useStudioStore } from '../studio-store'
 
-interface BatchTracker {
+interface ImageBatchMeta {
   modelId: string
   tier: 'web' | '1k' | '2k' | '4k'
   ratio?: string
-  jobToAsset: Record<string, string>
-  succeededAssets: string[]
-  failedAssets: Record<string, string>
-  dismissed: boolean
 }
 
 const props = defineProps<{ project: StudioProject }>()
@@ -66,7 +61,7 @@ const auth = useAuthStore()
 const studio = useStudioStore()
 const generation = useGenerationStore()
 const ui = useUiStore()
-const categoryIcons = { character: UserRound, scene: MapPin, prop: Package }
+const { imageModels, ensureLoaded: ensureModelCatalog } = useModelCatalog()
 const category = ref<StudioAssetKind>('character')
 const editor = useTemplateRef<InstanceType<typeof StudioAssetEditor>>('editor')
 const deleteOpen = ref(false)
@@ -79,23 +74,9 @@ const selectMode = ref(false)
 const checkedAssetIds = ref<string[]>([])
 const assetToDelete = ref<StudioAsset>()
 const generating = ref(false)
-const imageModels = ref<ModelCatalogItemOut[]>([])
-const batchTracker = ref<BatchTracker | null>(null)
-const checkedJobTerminals = new Set<string>()
-let pollTimer: ReturnType<typeof setInterval> | null = null
-let pollingInFlight = false
 
-onMounted(async () => {
-  try {
-    const catalog = await getModelCatalog()
-    imageModels.value = catalog.image
-  } catch {
-    // 保留默认模型兜底选项。
-  }
-})
-
-onUnmounted(() => {
-  stopBatchPolling()
+onMounted(() => {
+  void ensureModelCatalog()
 })
 
 const activeImageJobs = computed(() =>
@@ -117,13 +98,47 @@ const activeImageAssetIds = computed(() => {
 
 const hasActiveImageJobs = computed(() => activeImageJobs.value.length > 0 || activeImageAssetIds.value.size > 0)
 
+const activeImageCount = computed(() => activeImageAssetIds.value.size)
+
+const {
+  tracker: batchTracker,
+  summary: batchSummary,
+  trackJobs: trackImageBatchJobs,
+  startPolling: startBatchPolling,
+  failedReason: failedReasonForId,
+  dismiss: dismissBatchBanner,
+} = useBatchJobTracker<ImageBatchMeta>({
+  jobType: 'asset_image',
+  pollIntervalMs: 3000,
+  fallbackErrorMessage: '图片生成失败',
+  canPoll: () => !!props.project.persisted,
+  activeCount: activeImageCount,
+  hasActiveJobs: hasActiveImageJobs,
+  fetchProjectDetail: () => getProjectDetail(props.project.id),
+  fetchJob: getJob,
+  onDetail: (detail) => {
+    studio.hydrateProjectDetail(detail)
+    void auth.refreshBalance()
+  },
+  isStillRunning: (detail) =>
+    (detail.activeJobs ?? []).some((j) => j.jobType === 'asset_image')
+    || detail.assets.some((a) => a.imageStatus === 'generating'),
+  onBatchComplete: ({ okCount, failCount }) => {
+    ui.notify(
+      failCount > 0
+        ? `批量生图结束：成功 ${okCount} 张，失败 ${failCount} 张（失败已自动退还冻结积分）`
+        : `批量生图完成：共生成 ${okCount} 张资产图片`,
+      failCount > 0 ? 'info' : 'success',
+    )
+  },
+})
+
 function isAssetGenerating(asset: StudioAsset) {
   return !!asset.backendId && activeImageAssetIds.value.has(asset.backendId)
 }
 
 function failedReasonForAsset(asset: StudioAsset) {
-  if (!asset.backendId) return ''
-  return batchTracker.value?.failedAssets[asset.backendId] ?? ''
+  return failedReasonForId(asset.backendId)
 }
 
 const missingImageCount = computed(() =>
@@ -135,7 +150,7 @@ const missingImageCount = computed(() =>
 const groups = computed(() => assetKindOptions.map((item) => {
   const assets = props.project.assets?.filter(({ kind }) => kind === item.value) ?? []
   const images = assets.flatMap(asset => asset.imageUrl ? [{ src: asset.imageUrl, title: asset.name }] : [])
-  return { ...item, icon: categoryIcons[item.value], count: assets.length, assets, images }
+  return { ...item, icon: assetKindIcons[item.value], count: assets.length, assets, images }
 }))
 
 const missingScriptAssetIds = computed(() => {
@@ -156,134 +171,6 @@ const hasExistingAssets = computed(() => !!props.project.assets?.length)
 const canIncrementalSync = computed(() => !!props.project.scriptResult && hasExistingAssets.value && missingScriptAssetIds.value.length > 0)
 
 const checkedSet = computed(() => new Set(checkedAssetIds.value))
-
-const batchSummary = computed(() => {
-  const tracker = batchTracker.value
-  const activeCount = activeImageAssetIds.value.size
-  if (tracker && !tracker.dismissed) {
-    const total = Object.keys(tracker.jobToAsset).length
-    const succeeded = tracker.succeededAssets.length
-    const failedIds = Object.keys(tracker.failedAssets)
-    const failed = failedIds.length
-    const running = Math.max(0, total - succeeded - failed)
-    const done = succeeded + failed
-    const percent = total > 0 ? Math.round((done / total) * 100) : 0
-    return {
-      visible: true,
-      total,
-      succeeded,
-      failed,
-      failedIds,
-      running,
-      percent,
-      finished: running === 0 && activeCount === 0,
-      modelId: tracker.modelId,
-      tier: tracker.tier,
-    }
-  }
-  if (activeCount > 0) {
-    return {
-      visible: true,
-      total: activeCount,
-      succeeded: 0,
-      failed: 0,
-      failedIds: [] as string[],
-      running: activeCount,
-      percent: 15,
-      finished: false,
-      modelId: '',
-      tier: '1k' as const,
-    }
-  }
-  return null
-})
-
-function startBatchPolling() {
-  if (pollTimer !== null || !props.project.persisted) return
-  pollTimer = setInterval(() => {
-    void pollBatchProgress()
-  }, 3000)
-}
-
-function stopBatchPolling() {
-  if (pollTimer !== null) {
-    clearInterval(pollTimer)
-    pollTimer = null
-  }
-}
-
-async function pollBatchProgress() {
-  if (pollingInFlight || !props.project.persisted) return
-  pollingInFlight = true
-  try {
-    const detail = await getProjectDetail(props.project.id)
-    studio.hydrateProjectDetail(detail)
-    void auth.refreshBalance()
-
-    const activeIds = new Set(
-      (detail.activeJobs ?? [])
-        .filter((j) => j.jobType === 'asset_image')
-        .map((j) => j.id),
-    )
-
-    const tracker = batchTracker.value
-    if (tracker) {
-      const newlyFinishedJobIds = Object.keys(tracker.jobToAsset).filter(
-        (jid) => !activeIds.has(jid) && !checkedJobTerminals.has(jid),
-      )
-      for (const jid of newlyFinishedJobIds) {
-        checkedJobTerminals.add(jid)
-        try {
-          const job = await getJob(jid)
-          const aid = tracker.jobToAsset[jid]
-          if (!aid) continue
-          if (job.status === 'succeeded') {
-            if (!tracker.succeededAssets.includes(aid)) tracker.succeededAssets.push(aid)
-            delete tracker.failedAssets[aid]
-          } else if (job.status === 'failed' || job.status === 'review') {
-            tracker.failedAssets[aid] = job.errorMessage || '图片生成失败'
-          } else {
-            // 尚未进入终态，放回下次继续检查
-            checkedJobTerminals.delete(jid)
-          }
-        } catch {
-          checkedJobTerminals.delete(jid)
-        }
-      }
-    }
-
-    const stillRunning = activeIds.size > 0
-      || detail.assets.some((a) => a.imageStatus === 'generating')
-    if (!stillRunning) {
-      stopBatchPolling()
-      if (tracker && !tracker.dismissed) {
-        const okCount = tracker.succeededAssets.length
-        const failCount = Object.keys(tracker.failedAssets).length
-        if (okCount > 0 || failCount > 0) {
-          ui.notify(
-            failCount > 0
-              ? `批量生图结束：成功 ${okCount} 张，失败 ${failCount} 张（失败已自动退还冻结积分）`
-              : `批量生图完成：共生成 ${okCount} 张资产图片`,
-            failCount > 0 ? 'info' : 'success',
-          )
-        }
-      }
-    }
-  } catch {
-    // 静默忽略单次轮询波动，下个周期重试。
-  } finally {
-    pollingInFlight = false
-  }
-}
-
-watch(
-  hasActiveImageJobs,
-  (active) => {
-    if (active) startBatchPolling()
-    else if (!batchSummary.value || batchSummary.value.finished) stopBatchPolling()
-  },
-  { immediate: true },
-)
 
 function openBatchDialog(presetIds: string[] = []) {
   if (!props.project.persisted) {
@@ -314,45 +201,6 @@ function openBatchFromSelection() {
   openBatchDialog([...checkedAssetIds.value])
 }
 
-function trackImageJobs(
-  jobs: Array<{ id: string; targetId?: string | null }>,
-  modelId: string,
-  tier: 'web' | '1k' | '2k' | '4k',
-  ratio?: string,
-) {
-  const existing = batchTracker.value
-  const shouldMerge = !!existing && !existing.dismissed && !!batchSummary.value && !batchSummary.value.finished
-  const tracker: BatchTracker = shouldMerge
-    ? {
-        ...existing,
-        modelId,
-        tier,
-        ratio,
-        jobToAsset: { ...existing.jobToAsset },
-        succeededAssets: [...existing.succeededAssets],
-        failedAssets: { ...existing.failedAssets },
-        dismissed: false,
-      }
-    : {
-        modelId,
-        tier,
-        ratio,
-        jobToAsset: {},
-        succeededAssets: [],
-        failedAssets: {},
-        dismissed: false,
-      }
-
-  for (const job of jobs) {
-    if (!job.targetId) continue
-    tracker.jobToAsset[job.id] = job.targetId
-    checkedJobTerminals.delete(job.id)
-    delete tracker.failedAssets[job.targetId]
-    tracker.succeededAssets = tracker.succeededAssets.filter((aid) => aid !== job.targetId)
-  }
-  batchTracker.value = tracker
-}
-
 async function submitBatchImageGeneration(payload: {
   assetIds: string[]
   modelId: string
@@ -367,7 +215,11 @@ async function submitBatchImageGeneration(payload: {
     selectMode.value = false
     checkedAssetIds.value = []
 
-    trackImageJobs(res.jobs, payload.modelId, payload.tier, payload.ratio)
+    trackImageBatchJobs(res.jobs, {
+      modelId: payload.modelId,
+      tier: payload.tier,
+      ratio: payload.ratio,
+    })
 
     const detail = await getProjectDetail(props.project.id)
     studio.hydrateProjectDetail(detail)
@@ -389,18 +241,14 @@ async function submitBatchImageGeneration(payload: {
 function retryFailedBatchAssets() {
   const tracker = batchTracker.value
   if (!tracker) return
-  const ids = Object.keys(tracker.failedAssets)
+  const ids = Object.keys(tracker.failedById)
   if (!ids.length) return
   void submitBatchImageGeneration({
     assetIds: ids,
-    modelId: tracker.modelId,
-    tier: tracker.tier,
-    ratio: tracker.ratio,
+    modelId: tracker.meta.modelId,
+    tier: tracker.meta.tier,
+    ratio: tracker.meta.ratio,
   })
-}
-
-function dismissBatchBanner() {
-  if (batchTracker.value) batchTracker.value.dismissed = true
 }
 
 function handleRecognizeClick() {
@@ -513,7 +361,11 @@ async function generateAssetImage(
       tier: options.tier,
       ratio: options.ratio,
     })
-    trackImageJobs([accepted.job], options.modelId, options.tier, options.ratio)
+    trackImageBatchJobs([accepted.job], {
+      modelId: options.modelId,
+      tier: options.tier,
+      ratio: options.ratio,
+    })
 
     const detail = await getProjectDetail(props.project.id)
     studio.hydrateProjectDetail(detail)
@@ -535,11 +387,19 @@ function quickGenerateAssetImage(asset: StudioAsset, event: MouseEvent) {
     ui.notify('请先填写该资产的文生图提示词', 'info')
     return
   }
-  const defaultModel = imageModels.value.find((m) => m.isDefault)?.id || imageModels.value[0]?.id || 'gpt-image-2'
+  const defaultModel = imageModels.value.find((m) => m.isDefault)?.id || imageModels.value[0]?.id
+  const modelId = asset.imageModelId && imageModels.value.some((m) => m.id === asset.imageModelId)
+    ? asset.imageModelId
+    : defaultModel
+  if (!modelId) {
+    ui.notify('图片模型目录尚未加载完成，请稍后重试', 'error')
+    void ensureModelCatalog()
+    return
+  }
   const tierVal = asset.imageTier
   const tier: 'web' | '1k' | '2k' | '4k' = tierVal === 'web' || tierVal === '1k' || tierVal === '2k' || tierVal === '4k' ? tierVal : '1k'
   void generateAssetImage(asset, {
-    modelId: asset.imageModelId || defaultModel,
+    modelId,
     tier,
   })
 }

@@ -9,17 +9,16 @@ import WorkspaceHeader from '@/components/workspace/WorkspaceHeader.vue'
 import WorkspaceSidebar from '@/components/workspace/WorkspaceSidebar.vue'
 import type { WorkspaceBreadcrumb, WorkspaceUser } from '@/components/workspace/workspace-navigation'
 import { getAdminOverview, type CreditLedgerItem } from '@/features/admin/api'
+import { LEDGER_OP_LABELS } from '@/features/admin/format'
+import { useModelCatalog } from '@/features/studio/composables/useModelCatalog'
+import { useStudioStore } from '@/features/studio/studio-store'
 import {
   extractErrorMessage,
   formatCredits,
   formatDateTime,
   formatSignedCredits,
   formatTokenUsage,
-  LEDGER_OP_LABELS,
-} from '@/features/admin/format'
-import { getModelCatalog } from '@/features/studio/api'
-import type { ModelCatalogOut } from '@/features/studio/api-types'
-import { useStudioStore } from '@/features/studio/studio-store'
+} from '@/lib/format'
 import { http, unwrap } from '@/lib/http'
 import { useAuthStore } from '@/stores/auth'
 import { useUiStore } from '@/stores/ui'
@@ -37,8 +36,13 @@ const panel = ref<'prices' | 'support' | 'announcements' | 'recharge' | null>(nu
 const adminReviewCount = ref(0)
 const adminArchivedCount = ref(0)
 
-const catalogLoading = ref(false)
-const catalog = ref<ModelCatalogOut | null>(null)
+const {
+  catalog,
+  loading: catalogLoading,
+  error: catalogError,
+  refresh: refreshCatalog,
+  clearCatalog,
+} = useModelCatalog()
 const ledgersLoading = ref(false)
 const ledgers = ref<CreditLedgerItem[]>([])
 const ledgersTotal = ref(0)
@@ -93,13 +97,9 @@ const dialogSize = computed(() => (panel.value === 'prices' || panel.value === '
 const previousTitle = document.title
 
 async function loadPrices() {
-  catalogLoading.value = true
-  try {
-    catalog.value = await getModelCatalog()
-  } catch (err) {
-    ui.notify(extractErrorMessage(err, '加载模型价格失败'), 'error')
-  } finally {
-    catalogLoading.value = false
+  const data = await refreshCatalog()
+  if (!data && catalogError.value) {
+    ui.notify(catalogError.value, 'error')
   }
 }
 
@@ -144,6 +144,7 @@ onMounted(async () => {
 async function handleLogout() {
   await auth.logout()
   studio.clearProjects()
+  clearCatalog()
   await router.replace('/login')
 }
 

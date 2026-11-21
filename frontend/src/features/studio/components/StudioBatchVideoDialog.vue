@@ -40,7 +40,7 @@ const emit = defineEmits<{
 }>()
 
 const selectedIds = ref<string[]>([])
-const selectedModelId = ref('cc-sd2-fast-720')
+const selectedModelId = ref('')
 const selectedResolution = ref<'480p' | '720p' | '1080p'>('720p')
 const selectedRatio = ref(props.projectRatio || '16:9')
 const durationMode = ref<'keep' | 'override'>('keep')
@@ -51,34 +51,10 @@ const assetsByBackendId = computed(
   () => new Map(props.projectAssets.filter((a) => a.backendId).map((a) => [a.backendId!, a])),
 )
 
-const modelCatalogList = computed<ModelCatalogItemOut[]>(() => {
-  if (props.videoModels.length) return props.videoModels
-  return [
-    {
-      id: 'cc-sd2-fast-720',
-      mediaType: 'video',
-      category: 'Seedance 2.0',
-      displayName: 'Seedance 2.0 极速 720p',
-      isDefault: true,
-      capabilities: {
-        description: '快速稳定不限并发，适合日常分镜批量出片',
-        minDuration: 4,
-        maxDuration: 15,
-        maxPromptChars: 5000,
-        maxReferenceImages: 9,
-        maxReferenceVideos: 3,
-        maxReferenceAudios: 3,
-        resolutions: ['720p'],
-      },
-      defaults: { resolution: '720p' },
-      imagePrices: [],
-      videoPrices: [{ ruleKey: 'default', unit: 'call', creditPrice: '15.0000' }],
-    },
-  ]
-})
+const modelCatalogList = computed<ModelCatalogItemOut[]>(() => props.videoModels)
 
 const currentModel = computed(
-  () => modelCatalogList.value.find((m) => m.id === selectedModelId.value) ?? modelCatalogList.value[0],
+  () => modelCatalogList.value.find((m) => m.id === selectedModelId.value) ?? modelCatalogList.value[0] ?? null,
 )
 
 const minDuration = computed(() => Number(currentModel.value?.capabilities?.minDuration || 4))
@@ -163,8 +139,8 @@ watch(open, (isOpen) => {
   const defaultModel = hasLongClip
     ? (modelCatalogList.value.find((m) => Number(m.capabilities?.maxDuration || 15) >= 30)?.id
       ?? modelCatalogList.value[0]?.id
-      ?? 'cc-sd2.5-720')
-    : (modelCatalogList.value.find((m) => m.isDefault)?.id ?? modelCatalogList.value[0]?.id ?? 'cc-sd2-fast-720')
+      ?? '')
+    : (modelCatalogList.value.find((m) => m.isDefault)?.id ?? modelCatalogList.value[0]?.id ?? '')
   selectedModelId.value = defaultModel
 
   if (props.initialSelectedIds.length) {
@@ -210,10 +186,10 @@ function promptSnippet(prompt: string) {
 
 function confirmSubmit() {
   const ids = selectedClips.value.map((c) => c.backendId!)
-  if (!ids.length || props.submitting) return
+  if (!ids.length || !currentModel.value || props.submitting) return
   emit('submit', {
     clipIds: ids,
-    modelId: selectedModelId.value,
+    modelId: currentModel.value.id,
     resolution: selectedResolution.value,
     ratio: selectedRatio.value,
     durationSeconds: durationMode.value === 'override' ? overrideDuration.value : undefined,
@@ -331,7 +307,7 @@ function confirmSubmit() {
           variant="primary"
           size="sm"
           :loading="submitting"
-          :disabled="!selectedClips.length || submitting"
+          :disabled="!selectedClips.length || !currentModel || submitting"
           @click="confirmSubmit"
         >
           <template v-if="!submitting" #leading><Video :size="14" aria-hidden="true" /></template>
