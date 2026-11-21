@@ -131,9 +131,48 @@ export function isGenerationNode(kind?: CanvasNodeKind) {
   return kind === 'image-generation' || kind === 'video-generation'
 }
 
-export function canvasRatio(value = '16:9') {
+export function parseCanvasRatio(value?: string | null): number | null {
+  if (!value || value === 'auto') return null
   const [width, height] = value.split(':').map(Number)
-  return width && height ? width / height : 16 / 9
+  if (!width || !height || !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return null
+  }
+  return width / height
+}
+
+export function canvasRatio(value = '16:9') {
+  return parseCanvasRatio(value) ?? 16 / 9
+}
+
+export function computeCanvasMediaBox(ratioValue: number): { width: number; height: number } {
+  const r = Number.isFinite(ratioValue) && ratioValue > 0
+    ? Math.min(3, Math.max(0.35, ratioValue))
+    : 16 / 9
+  const baseArea = 256 * 256
+  let width = Math.sqrt(baseArea * r)
+  let height = Math.sqrt(baseArea / r)
+  const maxWidth = 440
+  const maxHeight = 340
+  const minWidth = 150
+  const minHeight = 140
+
+  if (width > maxWidth) {
+    height = (height * maxWidth) / width
+    width = maxWidth
+  }
+  if (height > maxHeight) {
+    width = (width * maxHeight) / height
+    height = maxHeight
+  }
+  if (width < minWidth) {
+    width = minWidth
+    height = Math.min(maxHeight, width / r)
+  }
+  if (height < minHeight) {
+    height = minHeight
+    width = Math.min(maxWidth, height * r)
+  }
+  return { width: Math.round(width), height: Math.round(height) }
 }
 
 export function outputKind(kind?: CanvasNodeKind): CanvasAsset['kind'] {

@@ -7,7 +7,7 @@ import UiDialog from '@/components/ui/UiDialog.vue'
 import MediaPlayer from '@/components/ui/MediaPlayer.vue'
 import VideoThumbnail from '@/components/ui/VideoThumbnail.vue'
 import { useUiStore } from '@/stores/ui'
-import { canvasNodeLabels, canvasRatio, isGenerationNode, outputKind, type CanvasGenerationSettings, type CanvasMedia, type CanvasNode, type CanvasNodeData, type CanvasNodeKind } from '../canvas-model'
+import { canvasNodeLabels, computeCanvasMediaBox, isGenerationNode, outputKind, parseCanvasRatio, type CanvasGenerationSettings, type CanvasMedia, type CanvasNode, type CanvasNodeData, type CanvasNodeKind } from '../canvas-model'
 import { canvasNodeIcons } from '../canvas-node-icons'
 import type { CanvasNodeGenerationState } from '../canvas-store'
 import CanvasGenerationPanel from './CanvasGenerationPanel.vue'
@@ -44,6 +44,7 @@ const ui = useUiStore()
 const titleInput = ref<HTMLInputElement>()
 const fileInput = ref<HTMLInputElement>()
 const intrinsicRatio = ref<number>()
+const preferSettingsRatio = ref(false)
 const confirmingDelete = ref(false)
 const editingTitle = ref(false)
 const titleDraft = ref('')
@@ -64,11 +65,27 @@ const generationLabel = computed(() => {
   }
   return state.stepLabel
 })
-const isVideoPlaceholder = computed(() => props.kind === 'video-generation' && !props.data.media)
+const activeRatio = computed<number | null>(() => {
+  if (props.kind === 'text' || mediaKind.value === 'audio') return null
+  if (isGenerationNode(props.kind)) {
+    const configured = parseCanvasRatio(props.data.settings?.ratio)
+    if (!props.data.media) return configured ?? 16 / 9
+    if (preferSettingsRatio.value && configured !== null) return configured
+    return intrinsicRatio.value ?? configured ?? 16 / 9
+  }
+  if (!props.data.media) return null
+  return intrinsicRatio.value ?? 16 / 9
+})
+const mediaBox = computed(() => (activeRatio.value !== null ? computeCanvasMediaBox(activeRatio.value) : null))
+const mediaHeightStyle = computed(() => (mediaBox.value ? { height: `${mediaBox.value.height}px` } : undefined))
+const placeholderRatioLabel = computed(() => {
+  const raw = props.data.settings?.ratio
+  if (raw === 'auto') return '自动比例'
+  return raw || '16:9'
+})
 const nodeWidth = computed(() => {
   if (props.kind === 'text') return 320
-  if (intrinsicRatio.value) return Math.round(Math.min(540, Math.max(144, 240 * intrinsicRatio.value))) + 18
-  if (isVideoPlaceholder.value) return Math.round(Math.max(180, 240 * canvasRatio(props.data.settings?.ratio))) + 18
+  if (mediaBox.value) return mediaBox.value.width + 18
   return 280
 })
 const prompt = computed({
@@ -79,7 +96,15 @@ const prompt = computed({
 watch(() => props.selected, value => {
   if (!value) editingTitle.value = false
 })
-watch(() => props.data.media?.url, () => { intrinsicRatio.value = undefined })
+watch(() => props.data.media?.url, () => {
+  intrinsicRatio.value = undefined
+  preferSettingsRatio.value = false
+})
+watch(() => props.data.settings?.ratio, (next, prev) => {
+  if (next !== prev) {
+    preferSettingsRatio.value = parseCanvasRatio(next) !== null
+  }
+})
 
 async function startRename() {
   titleDraft.value = title.value
@@ -199,8 +224,9 @@ function preview(media: CanvasMedia) {
       <template v-else>
         <input ref="fileInput" type="file" :accept="mediaKind + '/*'" :aria-label="'上传' + title" hidden @change="onFileChange" />
         <template v-if="data.media">
-          <img v-if="mediaKind === 'image'" :key="data.media.url" class="canvas-node-image" :src="data.media.url" :alt="data.media.name" draggable="false" @load="onImageLoad" />
+          <img v-if="mediaKind === 'image'" :key="data.media.url" class="canvas-node-image" :style="mediaHeightStyle" :src="data.media.url" :alt="data.media.name" draggable="false" @load="onImageLoad" />
           <VideoThumbnail v-else-if="mediaKind === 'video'" :key="data.media.url" class="canvas-node-video nodrag nopan"
+            :style="mediaHeightStyle"
             :src="data.media.url" :label="'预览视频 ' + data.media.name"
             @ratio="intrinsicRatio = $event" @click.stop="preview(data.media)" />
           <MediaPlayer v-else-if="mediaKind === 'audio'" :key="data.media.url" kind="audio" :src="data.media.url" :label="data.media.name" />
@@ -212,7 +238,10 @@ function preview(media: CanvasMedia) {
             <button class="nodrag nopan" type="button" @click.stop="emit('browse')"><FolderOpen :size="14" />从素材库选择</button>
           </div>
         </div>
-        <div v-else class="canvas-node-empty" :class="{ 'is-video': isVideoPlaceholder }"><component :is="canvasNodeIcons[kind]" :size="40" aria-hidden="true" /></div>
+        <div v-else class="canvas-node-empty is-generation" :style="mediaHeightStyle">
+          <component :is="canvasNodeIcons[kind]" :size="36" aria-hidden="true" />
+          <span class="canvas-empty-ratio">{{ placeholderRatioLabel }}</span>
+        </div>
         <div v-if="isGenerating || uploading" class="canvas-node-progress" role="status">
           <Loader2 :size="20" class="ui-spin" aria-hidden="true" />
           <span>{{ uploading ? '正在上传…' : generationLabel }}</span>
@@ -257,7 +286,7 @@ function preview(media: CanvasMedia) {
 </template>
 
 <style scoped>
-.canvas-node { position: relative; }
+.canvas-node { position: relative; transition: width .18s ease; }
 .canvas-node-header { display: flex; align-items: center; gap: 7px; height: 28px; padding: 0 3px 0 5px; margin-bottom: 3px; }
 .canvas-node-header > svg { flex: none; color: var(--color-muted); }
 .canvas-node-header h2 { flex: 1; min-width: 0; margin: 0; overflow: hidden; font-size: var(--font-size-body); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
@@ -272,10 +301,11 @@ function preview(media: CanvasMedia) {
 .canvas-node-markdown { max-height: 240px; padding: 4px; overflow: auto; cursor: text; user-select: text; }
 .canvas-edit-text { display: inline-flex; align-items: center; gap: 6px; padding: 5px 7px; border-radius: 5px; color: var(--color-muted); cursor: pointer; font-size: var(--font-size-caption); }
 .has-text .canvas-edit-text { align-self: flex-end; margin-top: auto; }
-.canvas-node-image { display: block; width: 100%; height: 240px; border-radius: 5px; background: var(--color-canvas); object-fit: contain; }
-.canvas-node-video { height: 240px; }
+.canvas-node-image { display: block; width: 100%; height: 240px; border-radius: 5px; background: var(--color-canvas); object-fit: contain; transition: height .18s ease; }
+.canvas-node-video { height: 240px; transition: height .18s ease; }
 .canvas-node-empty { display: grid; place-items: center; width: 100%; height: 126px; color: var(--color-muted); border-radius: 5px; }
-.canvas-node-empty.is-video { height: 240px; }
+.canvas-node-empty.is-generation { align-content: center; gap: 8px; background: var(--color-canvas); transition: height .18s ease; }
+.canvas-empty-ratio { padding: 2px 8px; border: 1px solid var(--border-subtle); border-radius: 999px; font-size: var(--font-size-caption); font-variant-numeric: tabular-nums; color: var(--color-muted); }
 .canvas-upload { align-content: center; gap: 10px; }
 .canvas-upload-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; }
 .canvas-upload-actions button { display: inline-flex; align-items: center; gap: 5px; padding: 5px 7px; border: 1px solid var(--border-control); border-radius: 5px; font-size: var(--font-size-caption); cursor: pointer; }

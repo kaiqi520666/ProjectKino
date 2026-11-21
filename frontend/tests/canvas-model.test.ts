@@ -2,10 +2,12 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   canConnectCanvasKinds,
+  computeCanvasMediaBox,
   createCanvasNode,
   hydrateCanvasGraph,
   isPersistedMediaUrl,
   MAX_CANVAS_NODE_HISTORY,
+  parseCanvasRatio,
   serializeCanvasGraph,
 } from '../src/features/canvas/canvas-model.ts'
 
@@ -67,4 +69,25 @@ test('canConnectCanvasKinds enforces valid media/generation connection rules', (
   assert.equal(canConnectCanvasKinds('video', 'image-generation'), false)
   assert.equal(canConnectCanvasKinds('video', 'video-generation'), true)
   assert.equal(canConnectCanvasKinds('image', 'video-generation'), true)
+})
+
+test('parseCanvasRatio and computeCanvasMediaBox preserve aspect ratio across landscape, square, and portrait', () => {
+  assert.equal(parseCanvasRatio('16:9'), 16 / 9)
+  assert.equal(parseCanvasRatio('9:16'), 9 / 16)
+  assert.equal(parseCanvasRatio('auto'), null)
+
+  const landscape = computeCanvasMediaBox(16 / 9)
+  assert.ok(landscape.width > landscape.height)
+  assert.ok(Math.abs(landscape.width / landscape.height - 16 / 9) < 0.03)
+
+  const portrait = computeCanvasMediaBox(9 / 16)
+  assert.ok(portrait.height > portrait.width)
+  assert.ok(Math.abs(portrait.width / portrait.height - 9 / 16) < 0.03)
+
+  const square = computeCanvasMediaBox(1)
+  assert.equal(square.width, square.height)
+
+  const ultrawide = computeCanvasMediaBox(21 / 9)
+  assert.ok(ultrawide.width > landscape.width)
+  assert.ok(Math.abs(ultrawide.width / ultrawide.height - 21 / 9) < 0.04)
 })
