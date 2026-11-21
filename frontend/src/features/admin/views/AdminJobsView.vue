@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, inject, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Activity, AlertTriangle, Check, Copy, Eye, RefreshCw, RotateCcw, Search, Wrench, X } from 'lucide-vue-next'
+import { Activity, AlertTriangle, Check, Copy, Eye, Image as ImageIcon, Play, RefreshCw, RotateCcw, Search, Wrench, X } from 'lucide-vue-next'
+import ImagePreview from '@/components/ui/ImagePreview.vue'
 import UiDataTable, { type DataTableColumn } from '@/components/ui/UiDataTable.vue'
 import UiDateRangePicker from '@/components/ui/UiDateRangePicker.vue'
 import UiDialog from '@/components/ui/UiDialog.vue'
 import UiSelect from '@/components/ui/UiSelect.vue'
+import VideoPreview from '@/components/ui/VideoPreview.vue'
 import {
   createDateRangePreset,
   isDateRangeEqual,
@@ -98,6 +100,14 @@ const hasNonDefaultFilters = computed(() => {
 
 const detailDialogOpen = ref(false)
 const detailJob = ref<AdminJobItem | null>(null)
+
+const imagePreviewOpen = ref(false)
+const imagePreviewSrc = ref('')
+const imagePreviewTitle = ref('')
+
+const videoPreviewOpen = ref(false)
+const videoPreviewSrc = ref('')
+const videoPreviewTitle = ref('')
 
 const refundDialogOpen = ref(false)
 const refundSubmitting = ref(false)
@@ -234,6 +244,56 @@ function openDetail(job: AdminJobItem) {
   detailJob.value = job
   detailDialogOpen.value = true
 }
+
+interface JobPreviewMedia {
+  kind: 'image' | 'video'
+  src: string
+  title: string
+}
+
+function readMediaUrl(
+  payload: Record<string, unknown> | null | undefined,
+  keys: readonly string[],
+): string | null {
+  if (!payload) return null
+  for (const key of keys) {
+    const value = payload[key]
+    if (typeof value === 'string' && /^https?:\/\//i.test(value.trim())) {
+      return value.trim()
+    }
+  }
+  return null
+}
+
+function getJobPreviewMedia(job: AdminJobItem): JobPreviewMedia | null {
+  if (job.status !== 'succeeded' || !job.resultPayload) return null
+  const label = JOB_TYPE_LABELS[job.jobType] || job.jobType
+  const title = [label, job.projectName].filter(Boolean).join(' · ')
+
+  const videoUrl = readMediaUrl(job.resultPayload, ['videoUrl', 'composedVideoUrl'])
+  if (videoUrl) return { kind: 'video', src: videoUrl, title }
+
+  const imageUrl = readMediaUrl(job.resultPayload, ['imageUrl'])
+  if (imageUrl) return { kind: 'image', src: imageUrl, title }
+
+  return null
+}
+
+function openMediaPreview(job: AdminJobItem) {
+  const media = getJobPreviewMedia(job)
+  if (!media) return
+  if (media.kind === 'image') {
+    imagePreviewSrc.value = media.src
+    imagePreviewTitle.value = media.title
+    imagePreviewOpen.value = true
+  } else {
+    videoPreviewSrc.value = media.src
+    videoPreviewTitle.value = media.title
+    videoPreviewOpen.value = true
+  }
+}
+
+const detailPreviewMedia = computed(() => (detailJob.value ? getJobPreviewMedia(detailJob.value) : null))
 
 function openRefund(job: AdminJobItem) {
   refundJob.value = job
@@ -545,6 +605,17 @@ onMounted(() => loadJobs(true))
 
       <template #cell-actions="{ row }">
         <div class="admin-actions">
+          <button
+            v-if="getJobPreviewMedia(row)"
+            type="button"
+            class="ui-button ui-button--outline ui-button--sm"
+            :aria-label="getJobPreviewMedia(row)?.kind === 'video' ? '预览视频' : '预览图片'"
+            @click="openMediaPreview(row)"
+          >
+            <Play v-if="getJobPreviewMedia(row)?.kind === 'video'" :size="13" aria-hidden="true" />
+            <ImageIcon v-else :size="13" aria-hidden="true" />
+            <span>预览</span>
+          </button>
           <button type="button" class="ui-button ui-button--ghost ui-button--sm" @click="openDetail(row)">
             <Eye :size="13" />
             <span>详情</span>
@@ -659,12 +730,36 @@ onMounted(() => loadJobs(true))
             <pre class="admin-json-block">{{ prettyJson(detailInputView.textBlocks.length ? detailInputView.restPayload : detailJob.inputPayload) }}</pre>
           </div>
           <div>
-            <div class="ui-label">执行结果</div>
+            <div class="admin-block-head">
+              <span class="ui-label">执行结果</span>
+              <button
+                v-if="detailPreviewMedia"
+                type="button"
+                class="admin-copy-btn admin-copy-btn--gold"
+                @click="detailJob && openMediaPreview(detailJob)"
+              >
+                <Play v-if="detailPreviewMedia.kind === 'video'" :size="12" aria-hidden="true" />
+                <ImageIcon v-else :size="12" aria-hidden="true" />
+                <span>{{ detailPreviewMedia.kind === 'video' ? '预览视频' : '预览图片' }}</span>
+              </button>
+            </div>
             <pre class="admin-json-block">{{ prettyJson(detailJob.resultPayload) }}</pre>
           </div>
         </div>
       </template>
     </UiDialog>
+
+    <ImagePreview
+      v-model:open="imagePreviewOpen"
+      :src="imagePreviewSrc"
+      :title="imagePreviewTitle"
+    />
+    <VideoPreview
+      v-model:open="videoPreviewOpen"
+      :src="videoPreviewSrc"
+      :title="videoPreviewTitle"
+      autoplay
+    />
 
     <UiDialog
       v-model:open="refundDialogOpen"
@@ -844,6 +939,18 @@ onMounted(() => loadJobs(true))
   background: var(--surface-hover);
   border-color: rgb(255 255 255 / 22%);
   color: var(--color-text);
+}
+
+.admin-copy-btn--gold {
+  border-color: rgb(240 184 75 / 36%);
+  background: rgb(240 184 75 / 10%);
+  color: var(--color-gold-soft);
+}
+
+.admin-copy-btn--gold:hover {
+  border-color: rgb(240 184 75 / 55%);
+  background: rgb(240 184 75 / 18%);
+  color: var(--color-gold-soft);
 }
 
 .admin-prompt-block {
