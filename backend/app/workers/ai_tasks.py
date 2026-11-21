@@ -31,7 +31,7 @@ from app.modules.jobs.service import (
     update_job_progress,
 )
 from app.modules.llm_engine.asset_gen import analyze_assets
-from app.modules.llm_engine.provider import resolve_deepseek_model
+from app.modules.llm_engine.provider import DEFAULT_TEXT_MODEL_ID, resolve_text_model
 from app.modules.llm_engine.schema import ProjectSettings
 from app.modules.llm_engine.script_gen import (
     Source,
@@ -125,7 +125,7 @@ async def run_llm_job_core(
 
     heartbeat = asyncio.create_task(heartbeat_job_lease(sessions, job_id, lease_token))
     run_usage = RunUsage()
-    model_id = "deepseek-flash"
+    model_id = DEFAULT_TEXT_MODEL_ID
 
     async def on_progress(step_index: int, step_total: int, label: str, progress: int) -> None:
         await update_job_progress(
@@ -144,7 +144,7 @@ async def run_llm_job_core(
             if model_override is not None:
                 model, model_id = model_override
             else:
-                model, model_id = await resolve_deepseek_model(session)
+                model, model_id = await resolve_text_model(session)
             project = (
                 await session.scalar(select(Project).where(Project.id == job.project_id))
                 if job.project_id

@@ -19,6 +19,7 @@ const ALL_IMAGE_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4', '3:2', '2:3', '5:
 const ALL_TIERS = ['web', '1k', '2k', '4k'] as const
 const VIDEO_CATEGORY_PRESETS = ['Seedance 2.0', 'Seedance 2.5', 'Seedance 2.5 Flash', 'Wan 3.0'] as const
 const IMAGE_CATEGORY_PRESETS = ['GPT Image 2', 'GPT Image 2.5', 'GPT Image 2.6'] as const
+const TEXT_CATEGORY_PRESETS = ['OpenRouter'] as const
 const IMAGE_SERIES_OPTIONS = [
   { value: '', label: '标准（无变体）' },
   { value: 'flare', label: 'Flare 极速' },
@@ -78,9 +79,11 @@ const isCreate = computed(() => props.target === null)
 const providerSelectOptions = computed(() =>
   props.providers.map((p) => ({ value: p.key, label: `${p.displayName} (${p.key})` })),
 )
-const currentCategoryPresets = computed(() =>
-  form.mediaType === 'image' ? IMAGE_CATEGORY_PRESETS : VIDEO_CATEGORY_PRESETS,
-)
+const currentCategoryPresets = computed(() => {
+  if (form.mediaType === 'image') return IMAGE_CATEGORY_PRESETS
+  if (form.mediaType === 'text') return TEXT_CATEGORY_PRESETS
+  return VIDEO_CATEGORY_PRESETS
+})
 
 const form = reactive({
   id: '',
@@ -120,13 +123,14 @@ function initForm() {
   const m = props.target
   if (!m) {
     const createImage = props.defaultMediaType === 'image'
+    const createText = props.defaultMediaType === 'text'
     form.id = ''
-    form.providerKey = createImage ? 'cangyuan' : 'cc'
-    form.mediaType = createImage ? 'image' : 'video'
-    form.category = createImage ? 'GPT Image 2.6' : 'Seedance 2.0'
+    form.providerKey = createImage ? 'cangyuan' : createText ? 'openrouter' : 'cc'
+    form.mediaType = createImage ? 'image' : createText ? 'text' : 'video'
+    form.category = createImage ? 'GPT Image 2.6' : createText ? 'OpenRouter' : 'Seedance 2.0'
     form.displayName = ''
     form.description = ''
-    form.upstreamModelId = createImage ? 'gpt-image-2.6-x' : ''
+    form.upstreamModelId = createImage ? 'gpt-image-2.6-x' : createText ? '@preset/ds-baidu' : ''
     form.enabled = 'true'
     form.isDefault = 'false'
     form.sort = '50'
@@ -140,9 +144,9 @@ function initForm() {
     form.maxReferenceAudios = '3'
     form.videoUnit = 'call'
     form.videoCreditPrice = '15'
-    form.textInputPrice = '0'
-    form.textCachedPrice = '0'
-    form.textOutputPrice = '0'
+    form.textInputPrice = createText ? '2' : '0'
+    form.textCachedPrice = createText ? '0.2' : '0'
+    form.textOutputPrice = createText ? '3' : '0'
     form.imageSeries = createImage ? 'flare' : ''
     form.imageQuality = 'high'
     form.imageRatios = [...ALL_IMAGE_RATIOS]

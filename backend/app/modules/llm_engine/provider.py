@@ -1,8 +1,7 @@
 import os
 
-from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.providers.deepseek import DeepSeekProvider
-from pydantic_ai.settings import ModelSettings
+from pydantic_ai.models.openrouter import OpenRouterModel, OpenRouterModelSettings
+from pydantic_ai.providers.openrouter import OpenRouterProvider
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import undefer
@@ -10,19 +9,26 @@ from sqlalchemy.orm import undefer
 from app.core.errors import AppError
 from app.modules.catalog.models import AiModel, AiProvider
 
-MODEL_SETTINGS = ModelSettings(
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_TEXT_MODEL_ID = "or-ds-baidu"
+DEFAULT_UPSTREAM_PRESET = "@preset/ds-baidu"
+
+MODEL_SETTINGS = OpenRouterModelSettings(
     timeout=300,
     max_tokens=8192,
-    thinking=False,
-    extra_body={"thinking": {"type": "disabled"}},
+    openrouter_reasoning={"enabled": False},
+    openrouter_usage={"include": True},
 )
 
 
-async def resolve_deepseek_model(
+async def resolve_text_model(
     session: AsyncSession,
     model_id: str | None = None,
-) -> tuple[OpenAIChatModel, str]:
-    """从数据库读取 DeepSeek 供应商与模型配置；若数据库未填 Key 则回退到环境变量 DEEPSEEK_API_KEY。"""
+) -> tuple[OpenRouterModel, str]:
+    """
+    从数据库读取已启用的文本模型与 OpenRouter 供应商配置。
+    若数据库未填 Key，仅回退环境变量 OPENROUTER_API_KEY（不串用其他供应商 Key）。
+    """
     stmt = (
         select(AiModel, AiProvider)
         .join(AiProvider, AiModel.provider_id == AiProvider.id)
@@ -32,26 +38,57 @@ async def resolve_deepseek_model(
     if model_id:
         stmt = stmt.where(AiModel.id == model_id)
     else:
-        stmt = stmt.order_by(AiModel.is_default.desc(), AiModel.sort)
+        stmt = stmt.order_by(AiModel.is_default.desc(), AiModel.sort, AiModel.id)
 
     row = (await session.execute(stmt)).first()
     if row is None:
-        key = os.getenv("DEEPSEEK_API_KEY", "").strip()
-        if not key:
-            raise AppError(503, "llm_provider_unavailable", "未配置可用的 DeepSeek 文本模型")
-        fallback_model = os.getenv("DEEPSEEK_MODEL", "deepseek-flash")
-        provider = DeepSeekProvider(api_key=key, base_url=os.getenv("DEEPSEEK_BASE_URL"))
-        return OpenAIChatModel(fallback_model, provider=provider), "deepseek-flash"
+        env_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+        if not env_key:
+            raise AppError(
+                503,
+                "llm_provider_unavailable",
+                "未配置可用的 OpenRouter 文本模型，请先在管理后台启用并填写 API Key",
+            )
+        fallback_upstream = (
+            os.getenv("OPENROUTER_MODEL", DEFAULT_UPSTREAM_PRESET).strip()
+            or DEFAULT_UPSTREAM_PRESET
+        )
+        fallback_base = (
+            os.getenv("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL).strip()
+            or DEFAULT_OPENROUTER_BASE_URL
+        )
+        provider = OpenRouterProvider(
+            api_key=env_key,
+            base_url=fallback_base,
+            app_title="FrameDrama",
+        )
+        model = OpenRouterModel(fallback_upstream, provider=provider, settings=MODEL_SETTINGS)
+        return model, DEFAULT_TEXT_MODEL_ID
 
     ai_model, ai_provider = row
     db_key = (ai_provider.api_key or "").strip()
-    key = db_key or os.getenv("DEEPSEEK_API_KEY", "").strip()
+    key = db_key or os.getenv("OPENROUTER_API_KEY", "").strip()
     if not key:
-        raise AppError(503, "llm_api_key_missing", "尚未配置 DeepSeek API Key")
-    db_base_url = (ai_provider.base_url or "").strip()
-    env_base_url = os.getenv("DEEPSEEK_BASE_URL", "").strip()
-    env_model = os.getenv("DEEPSEEK_MODEL", "").strip()
-    base_url = db_base_url if db_key else (env_base_url or db_base_url)
-    upstream_model = ai_model.upstream_model_id if db_key else (env_model or ai_model.upstream_model_id)
-    provider = DeepSeekProvider(api_key=key, base_url=base_url or None)
-    return OpenAIChatModel(upstream_model, provider=provider), ai_model.id
+        raise AppError(
+            503,
+            "llm_api_key_missing",
+            f"尚未配置 {ai_provider.display_name} API Key，请在管理后台「供应商与定价」中填写",
+        )
+
+    base_url = (ai_provider.base_url or "").strip() or DEFAULT_OPENROUTER_BASE_URL
+    cfg = ai_provider.configuration or {}
+    app_title = str(cfg.get("appTitle") or "FrameDrama")
+    app_url = str(cfg.get("appUrl") or "").strip() or None
+
+    provider = OpenRouterProvider(
+        api_key=key,
+        base_url=base_url,
+        app_url=app_url,
+        app_title=app_title,
+    )
+    model = OpenRouterModel(ai_model.upstream_model_id, provider=provider, settings=MODEL_SETTINGS)
+    return model, ai_model.id
+
+
+# 保留别名，兼容既有内部引用
+resolve_deepseek_model = resolve_text_model
