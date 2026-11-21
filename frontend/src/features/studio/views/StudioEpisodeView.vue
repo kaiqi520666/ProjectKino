@@ -4,11 +4,7 @@ import { useRoute } from 'vue-router'
 import {
   AlertCircle,
   ArrowLeft,
-  ArrowRight,
-  Boxes,
-  Check,
   CheckCircle2,
-  CheckSquare,
   ChevronRight,
   Clapperboard,
   Download,
@@ -18,7 +14,6 @@ import {
   Plus,
   RefreshCw,
   Sparkles,
-  Trash2,
   Video,
   X,
 } from 'lucide-vue-next'
@@ -26,7 +21,6 @@ import EmptyState from '@/components/business/EmptyState.vue'
 import ImagePreview from '@/components/ui/ImagePreview.vue'
 import UiButton from '@/components/ui/UiButton.vue'
 import UiDialog from '@/components/ui/UiDialog.vue'
-import UiIconButton from '@/components/ui/UiIconButton.vue'
 import UiTextarea from '@/components/ui/UiTextarea.vue'
 import VideoPreview from '@/components/ui/VideoPreview.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -49,6 +43,8 @@ import {
 } from '../api'
 import { assetCategoryItems, assetKindIcons } from '../asset-icons'
 import { defaultSegmentDuration } from '../components/drama-creation'
+import EpisodeAssetsSidebar from '../components/EpisodeAssetsSidebar.vue'
+import EpisodeClipStrip from '../components/EpisodeClipStrip.vue'
 import StudioBatchVideoDialog from '../components/StudioBatchVideoDialog.vue'
 import VideoModelPicker from '../components/VideoModelPicker.vue'
 import VideoParamsPopover from '../components/VideoParamsPopover.vue'
@@ -85,8 +81,6 @@ const submittingClipId = ref<string | null>(null)
 const selectMode = ref(false)
 const checkedClipIds = ref<string[]>([])
 const reorderingClips = ref(false)
-const dragSourceIndex = ref<number | null>(null)
-const dragOverIndex = ref<number | null>(null)
 
 const previewClip = ref<{ id: number; src: string; poster?: string } | null>(null)
 const previewOpen = computed({
@@ -102,7 +96,7 @@ const selectedResolution = ref<'480p' | '720p' | '1080p'>('720p')
 const selectedRatio = ref(props.project.creation.settings.ratio || '16:9')
 const selectedDuration = ref(10)
 let deleteTrigger: HTMLButtonElement | undefined
-const clipList = useTemplateRef<HTMLOListElement>('clipList')
+const clipStrip = useTemplateRef<InstanceType<typeof EpisodeClipStrip>>('clipStrip')
 
 onMounted(async () => {
   await ensureModelCatalog()
@@ -328,10 +322,11 @@ watch(deleteOpen, (open) => {
   const trigger = deleteTrigger
   deleteTrigger = undefined
   requestAnimationFrame(() => {
-    const target = trigger?.isConnected ? trigger : clipList.value?.querySelector<HTMLButtonElement>(
-      '.episode-clip[aria-pressed="true"], .episode-clip-add',
-    )
-    target?.focus({ preventScroll: true })
+    if (trigger?.isConnected) {
+      trigger.focus({ preventScroll: true })
+    } else {
+      clipStrip.value?.focusSelectedOrAdd()
+    }
   })
 })
 
@@ -397,40 +392,6 @@ async function moveClipOrder(fromIndex: number, toIndex: number) {
   } finally {
     reorderingClips.value = false
   }
-}
-
-function handleClipDragStart(index: number, event: DragEvent) {
-  if (selectMode.value || reorderingClips.value || clips.value.length <= 1) {
-    event.preventDefault()
-    return
-  }
-  dragSourceIndex.value = index
-  if (event.dataTransfer) {
-    event.dataTransfer.effectAllowed = 'move'
-    event.dataTransfer.setData('text/plain', String(index))
-  }
-}
-
-function handleClipDragOver(index: number, event: DragEvent) {
-  if (dragSourceIndex.value === null) return
-  event.preventDefault()
-  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
-  dragOverIndex.value = index
-}
-
-function handleClipDrop(index: number, event: DragEvent) {
-  event.preventDefault()
-  const from = dragSourceIndex.value
-  dragSourceIndex.value = null
-  dragOverIndex.value = null
-  if (from !== null && from !== index) {
-    void moveClipOrder(from, index)
-  }
-}
-
-function handleClipDragEnd() {
-  dragSourceIndex.value = null
-  dragOverIndex.value = null
 }
 
 async function openBatchDialog(presetIds: string[] = []) {
@@ -762,8 +723,7 @@ async function addClip() {
       studio.hydrateProjectDetail(detail)
       selectedId.value = created.clipIndex
       await nextTick()
-      const list = clipList.value
-      if (list) list.scrollLeft = list.scrollWidth
+      clipStrip.value?.scrollToEnd()
       return
     } catch (error) {
       ui.notify(apiErrorMessage(error), 'error')
@@ -775,8 +735,7 @@ async function addClip() {
 
   selectedId.value = id
   await nextTick()
-  const list = clipList.value
-  if (list) list.scrollLeft = list.scrollWidth
+  clipStrip.value?.scrollToEnd()
 }
 
 function confirmClipDeletion(id: number, event: MouseEvent) {
@@ -918,28 +877,11 @@ async function deleteClip() {
     </div>
 
     <div v-if="episode" class="episode-layout" :class="{ 'episode-layout--solo': !storyboard }">
-      <aside v-if="storyboard" class="episode-assets" aria-labelledby="episode-assets-title">
-        <h2 id="episode-assets-title"><Boxes :size="17" aria-hidden="true" />本集资产</h2>
-        <p v-if="!storyboard?.assets.length" class="episode-meta episode-assets-empty">暂无本集资产</p>
-        <div v-else class="episode-asset-groups">
-          <section v-for="group in assetGroups" :key="group.kind" class="episode-asset-group">
-            <h3><component :is="group.icon" :size="15" aria-hidden="true" />{{ group.label }}<span>{{ group.assets.length }}</span></h3>
-            <ul v-if="group.assets.length" class="episode-asset-grid">
-              <li v-for="asset in group.assets" :key="asset.id">
-                <ImagePreview v-if="asset.imageUrl" :src="asset.imageUrl" :title="asset.name">
-                  <template #trigger>
-                    <button type="button" class="episode-asset-thumb" :aria-label="'预览资产 ' + asset.name"><img :src="asset.imageUrl" alt="" /></button>
-                  </template>
-                </ImagePreview>
-                <span v-else class="episode-asset-thumb">
-                  <component :is="group.icon" :size="22" :stroke-width="1.5" aria-hidden="true" />
-                </span>
-                <span class="episode-asset-name">{{ asset.name }}</span>
-              </li>
-            </ul>
-          </section>
-        </div>
-      </aside>
+      <EpisodeAssetsSidebar
+        v-if="storyboard"
+        :has-assets="!!storyboard?.assets.length"
+        :groups="assetGroups"
+      />
 
       <div v-if="storyboard" class="episode-editor">
         <section v-if="clip" class="episode-references" aria-labelledby="episode-clip-title">
@@ -1052,131 +994,28 @@ async function deleteClip() {
           <template #icon><Clapperboard :size="25" :stroke-width="1.5" /></template>
         </EmptyState>
 
-        <section class="episode-strip" aria-labelledby="episode-strip-title">
-          <div class="episode-section-head">
-            <div class="episode-strip-left">
-              <h2 id="episode-strip-title">片段列表</h2>
-              <span class="episode-meta">{{ clips.length }} 个片段（支持拖拽或左右按钮调序）</span>
-            </div>
-            <div v-if="clips.length" class="episode-strip-actions">
-              <template v-if="clips.length > 1 && selectedClipIndex >= 0">
-                <UiButton
-                  variant="outline"
-                  size="sm"
-                  :disabled="reorderingClips || selectedClipIndex <= 0"
-                  title="将当前选中片段向前移动一位"
-                  @click="moveClipOrder(selectedClipIndex, selectedClipIndex - 1)"
-                >
-                  <template #leading><ArrowLeft :size="13" aria-hidden="true" /></template>前移
-                </UiButton>
-                <UiButton
-                  variant="outline"
-                  size="sm"
-                  :disabled="reorderingClips || selectedClipIndex >= clips.length - 1"
-                  title="将当前选中片段向后移动一位"
-                  @click="moveClipOrder(selectedClipIndex, selectedClipIndex + 1)"
-                >
-                  <template #leading><ArrowRight :size="13" aria-hidden="true" /></template>后移
-                </UiButton>
-              </template>
-              <template v-if="project.persisted && selectMode">
-                <span class="episode-meta">已选 {{ checkedClipIds.length }} 段</span>
-                <UiButton variant="primary" size="sm" :disabled="!checkedClipIds.length" @click="openBatchFromSelection">
-                  <template #leading><Video :size="13" aria-hidden="true" /></template>
-                  生成 / 重生成已选 ({{ checkedClipIds.length }})
-                </UiButton>
-              </template>
-              <UiButton v-if="project.persisted" :variant="selectMode ? 'secondary' : 'outline'" size="sm" @click="toggleSelectMode">
-                <template #leading><CheckSquare :size="13" aria-hidden="true" /></template>
-                {{ selectMode ? '退出多选' : '多选' }}
-              </UiButton>
-            </div>
-          </div>
-          <ol ref="clipList" class="episode-clips">
-            <li
-              v-for="(item, idx) in clips"
-              :key="item.backendId || item.id"
-              :class="{ 'is-dragging': dragSourceIndex === idx, 'is-drop-target': dragOverIndex === idx && dragSourceIndex !== idx }"
-              :draggable="!selectMode && !reorderingClips && clips.length > 1"
-              @dragstart="handleClipDragStart(idx, $event)"
-              @dragover="handleClipDragOver(idx, $event)"
-              @drop="handleClipDrop(idx, $event)"
-              @dragend="handleClipDragEnd"
-            >
-              <button
-                type="button"
-                class="episode-clip"
-                :class="{
-                  'is-generating': isClipGenerating(item),
-                  'is-checked': selectMode && !!item.backendId && checkedSet.has(item.backendId),
-                }"
-                :aria-pressed="clip?.id === item.id"
-                @click="selectedId = item.id"
-              >
-                <span class="episode-clip-thumb">
-                  <img v-if="item.previewUrl" :src="item.previewUrl" alt="" />
-                  <video
-                    v-else-if="item.videoUrl"
-                    class="episode-clip-video-thumb"
-                    :src="`${item.videoUrl}#t=0.1`"
-                    muted
-                    playsinline
-                    preload="metadata"
-                  />
-                  <Clapperboard v-else :size="22" :stroke-width="1.5" aria-hidden="true" />
-                  <Check v-if="item.videoUrl && !isClipGenerating(item)" class="episode-clip-ready" :size="15" aria-label="已有视频" />
-                  <span
-                    v-if="!isClipGenerating(item) && (item.videoStatus === 'failed' || clipFailedReason(item))"
-                    class="episode-clip-failed"
-                    :title="clipFailedReason(item) || '视频生成失败'"
-                  >
-                    <AlertCircle :size="13" aria-hidden="true" />
-                  </span>
-                  <span v-if="isClipGenerating(item)" class="episode-clip-loading-mask">
-                    <Loader2 class="is-spin" :size="15" aria-hidden="true" />
-                    <span>{{ clipJobProgress(item) }}</span>
-                  </span>
-                </span>
-                <span class="episode-clip-caption"><strong>片段 {{ item.id }}</strong><span>{{ item.durationSeconds }} 秒</span></span>
-              </button>
-              <button
-                v-if="selectMode && item.backendId"
-                type="button"
-                class="episode-clip-check"
-                :class="{ 'is-checked': checkedSet.has(item.backendId) }"
-                :disabled="isClipGenerating(item)"
-                :aria-label="`选择片段 ${item.id}`"
-                @click.stop="toggleClipCheck(item)"
-              >
-                <Check v-if="checkedSet.has(item.backendId)" :size="11" :stroke-width="2.6" />
-              </button>
-              <button
-                v-if="item.videoUrl && !isClipGenerating(item)"
-                type="button"
-                class="episode-clip-play"
-                :aria-label="`播放片段 ${item.id}`"
-                :title="`播放片段 ${item.id}`"
-                @click.stop="openClipPreview(item)"
-              >
-                <Play :size="15" fill="currentColor" aria-hidden="true" />
-              </button>
-              <UiIconButton
-                v-if="!selectMode && !isClipGenerating(item)"
-                class="episode-clip-delete"
-                :label="`删除片段 ${item.id}`"
-                @click="confirmClipDeletion(item.id, $event)"
-              >
-                <Trash2 :size="14" aria-hidden="true" />
-              </UiIconButton>
-            </li>
-            <li>
-              <button type="button" class="episode-clip episode-clip-add" @click="addClip">
-                <Plus :size="22" aria-hidden="true" />
-                新增镜头
-              </button>
-            </li>
-          </ol>
-        </section>
+        <EpisodeClipStrip
+          ref="clipStrip"
+          :clips="clips"
+          :selected-clip-id="clip?.id"
+          :selected-clip-index="selectedClipIndex"
+          :persisted="!!project.persisted"
+          :select-mode="selectMode"
+          :checked-ids="checkedSet"
+          :checked-count="checkedClipIds.length"
+          :reordering="reorderingClips"
+          :is-clip-generating="isClipGenerating"
+          :clip-job-progress="clipJobProgress"
+          :clip-failed-reason="clipFailedReason"
+          @select="selectedId = $event"
+          @move="moveClipOrder"
+          @toggle-select-mode="toggleSelectMode"
+          @toggle-check="toggleClipCheck"
+          @open-batch-from-selection="openBatchFromSelection"
+          @preview="openClipPreview"
+          @delete="confirmClipDeletion"
+          @add="addClip"
+        />
       </div>
 
       <EmptyState v-else class="episode-empty" title="待拆分镜" :description="`单片段最长 ${cap} 秒`">
@@ -1343,24 +1182,20 @@ async function deleteClip() {
   font-weight: 600;
   line-height: 1.4;
 }
-.episode-assets > h2, .episode-section-head h2 svg { color: var(--color-gold-soft); }
-.episode-assets { min-width: 0; padding: 16px; border-right: 1px solid var(--border-subtle); }
-.episode-asset-groups { display: grid; gap: 16px; margin-top: 16px; }
-.episode-asset-group { min-width: 0; }
-.episode-asset-group h3 { margin-bottom: 8px; color: var(--color-muted); font-weight: 500; }
-.episode-asset-group h3 span { color: var(--color-muted); font-size: 12px; font-weight: 400; }
-.episode-asset-grid, .episode-reference-list, .episode-clips { margin: 0; padding: 0; list-style: none; }
-.episode-asset-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.episode-asset-thumb, .episode-clip-thumb {
+.episode-section-head h2 svg { color: var(--color-gold-soft); }
+.episode-reference-list { margin: 0; padding: 0; list-style: none; }
+.episode-asset-thumb {
   display: grid;
   place-items: center;
   overflow: hidden;
+  aspect-ratio: 4 / 3;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
   background: var(--surface-hover);
   color: var(--color-muted);
 }
-.episode-asset-thumb { aspect-ratio: 4 / 3; border: 1px solid var(--border-subtle); border-radius: 6px; }
 button.episode-asset-thumb { width: 100%; cursor: zoom-in; }
-.episode-asset-thumb img, .episode-clip-thumb img {
+.episode-asset-thumb img {
   width: 100%;
   height: 100%;
   min-height: 0;
@@ -1368,12 +1203,9 @@ button.episode-asset-thumb { width: 100%; cursor: zoom-in; }
 }
 .episode-asset-name { display: block; margin-top: 4px; font-size: 12px; overflow-wrap: anywhere; }
 .episode-editor { display: grid; grid-template-rows: auto minmax(min-content, 1fr) auto; min-width: 0; }
-.episode-references, .episode-prompt, .episode-strip { min-width: 0; padding: 12px 16px; }
+.episode-references, .episode-prompt { min-width: 0; padding: 12px 16px; }
 .episode-section-head { justify-content: space-between; flex-wrap: wrap; }
-.episode-strip-left, .episode-strip-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.episode-strip-actions .ui-button { min-height: 28px; padding-inline: 8px; font-size: 12px; }
 .episode-meta { margin: 0; color: var(--color-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-.episode-assets-empty { margin-top: 12px; }
 .episode-references { display: block; }
 .episode-reference-materials { min-width: 0; }
 .episode-reference-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
@@ -1494,131 +1326,6 @@ button.episode-asset-thumb { width: 100%; cursor: zoom-in; }
   border-radius: 9px;
 }
 .episode-clip-empty { grid-row: 1 / 3; align-self: center; }
-.episode-strip { grid-row: 3; border-top: 1px solid var(--border-subtle); }
-.episode-clips {
-  display: flex;
-  gap: 8px;
-  overflow-x: auto;
-  margin-top: 8px;
-  padding: 3px 3px 5px;
-}
-.episode-clips > li { position: relative; display: grid; flex: 0 0 132px; transition: opacity .15s, transform .15s; }
-.episode-clips > li.is-dragging { opacity: 0.45; }
-.episode-clips > li.is-drop-target .episode-clip { border-color: var(--color-gold); box-shadow: 0 0 0 2px rgb(240 184 75 / 45%); }
-.episode-clip {
-  width: 100%;
-  padding: 0;
-  overflow: hidden;
-  border: 1px solid var(--border-control);
-  border-radius: 7px;
-  color: var(--color-text);
-  background: var(--color-surface);
-  cursor: pointer;
-  transition: border-color .15s;
-}
-.episode-clip.is-generating { border-color: rgb(240 184 75 / 45%); }
-.episode-clip.is-checked { border-color: var(--color-gold); box-shadow: 0 0 0 1px var(--color-gold); }
-.episode-clip-thumb { position: relative; aspect-ratio: 16 / 9; }
-.episode-clip-video-thumb { width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
-.episode-clip-ready { position: absolute; inset: 5px auto auto 5px; color: var(--color-gold-soft); filter: drop-shadow(0 1px 2px rgb(0 0 0 / 70%)); }
-.episode-clip-failed {
-  position: absolute;
-  inset: 5px auto auto 5px;
-  display: grid;
-  place-items: center;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: rgb(9 10 13 / 82%);
-  color: var(--color-error);
-}
-.episode-clip-loading-mask {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  background: rgb(9 10 13 / 74%);
-  color: var(--color-gold-soft);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-.episode-clip-check {
-  position: absolute;
-  top: 5px;
-  right: 5px;
-  z-index: 2;
-  display: grid;
-  place-items: center;
-  width: 20px;
-  height: 20px;
-  border: 1px solid rgb(255 255 255 / 45%);
-  border-radius: 5px;
-  background: rgb(9 10 13 / 82%);
-  color: var(--color-ink);
-  cursor: pointer;
-}
-.episode-clip-check.is-checked {
-  border-color: var(--color-gold);
-  background: var(--color-gold);
-}
-.episode-clip-play {
-  position: absolute;
-  top: 22px;
-  left: 50%;
-  transform: translateX(-50%);
-  display: grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
-  padding-left: 2px;
-  border: 1px solid rgb(240 184 75 / 55%);
-  border-radius: 50%;
-  background: rgb(9 10 13 / 78%);
-  color: var(--color-gold-soft);
-  cursor: pointer;
-  transition: transform .15s, background-color .15s, border-color .15s, color .15s;
-}
-.episode-clip-play:is(:hover, :focus-visible) {
-  transform: translateX(-50%) scale(1.08);
-  border-color: var(--color-gold);
-  background: var(--color-gold);
-  color: var(--color-ink);
-}
-.episode-clips :deep(.episode-clip-delete) {
-  position: absolute;
-  inset: 5px 5px auto auto;
-  width: 28px;
-  height: 28px;
-  border-color: var(--border-control);
-  border-radius: 6px;
-  background: var(--color-surface);
-  color: var(--color-text);
-  cursor: pointer;
-}
-.episode-clips :deep(.episode-clip-delete:is(:hover, :focus-visible)) { border-color: var(--color-error); color: var(--color-error); }
-@media (hover: hover) and (pointer: fine) {
-  .episode-clips > li:not(:hover):not(:focus-within) :deep(.episode-clip-delete) { opacity: 0; pointer-events: none; }
-}
-.episode-clip-caption { display: flex; justify-content: space-between; gap: 4px; padding: 6px 8px; font-size: 12px; }
-.episode-clip-caption span { color: var(--color-muted); }
-.episode-clip:hover, .episode-clip[aria-pressed="true"] { border-color: var(--color-gold); }
-.episode-clip[aria-pressed="true"] .episode-clip-caption { color: var(--color-gold-soft); background: var(--gold-tint); }
-.episode-clip:focus-visible { outline: 2px solid var(--color-gold); outline-offset: 2px; }
-.episode-clip-add {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  border-style: dashed;
-  color: var(--color-muted);
-  font-size: 13px;
-}
-.episode-clip-add:is(:hover, :focus-visible) { color: var(--color-gold-soft); background: var(--gold-tint); }
 .episode-empty { align-self: center; }
 .picker-asset-grid {
   display: grid;
@@ -1665,9 +1372,6 @@ button.episode-asset-thumb { width: 100%; cursor: zoom-in; }
 }
 @container (max-width: 640px) {
   .episode-layout { grid-template: auto 1fr / minmax(0, 1fr); min-height: 0; }
-  .episode-assets { border-right: 0; border-bottom: 1px solid var(--border-subtle); }
-  .episode-asset-groups { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-  .episode-asset-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 80px), 1fr)); }
   .episode-empty { min-height: 280px; }
 }
 </style>
