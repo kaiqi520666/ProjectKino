@@ -87,12 +87,12 @@ const filters = reactive<{
 const jobColumns: DataTableColumn[] = [
   { key: 'createdAt', label: '创建时间', width: '164px' },
   { key: 'jobType', label: '任务类型', width: '172px' },
-  { key: 'status', label: '状态', width: '120px' },
-  { key: 'duration', label: '耗时', width: '88px', align: 'right' },
+  { key: 'status', label: '状态', width: '104px' },
+  { key: 'duration', label: '耗时', width: '78px', align: 'right' },
   { key: 'owner', label: '用户 / 项目' },
   { key: 'spec', label: '模型 / 规格' },
-  { key: 'reservation', label: '积分', width: '120px' },
-  { key: 'actions', label: '操作', width: '180px' },
+  { key: 'reservation', label: '积分', width: '146px' },
+  { key: 'actions', label: '操作', width: '196px' },
 ]
 
 const statusOptions = computed(() => [
@@ -640,25 +640,34 @@ onMounted(() => {
       </template>
 
       <template #cell-owner="{ row }">
-        <div class="admin-cell-primary">{{ row.userEmail }}</div>
-        <div v-if="row.projectName" class="admin-cell-sub">{{ row.projectName }}</div>
+        <div
+          class="admin-jobs-inline-cell"
+          :title="row.projectName ? `${row.userEmail} · ${row.projectName}` : row.userEmail"
+        >
+          <span class="admin-cell-primary">{{ row.userEmail }}</span>
+          <template v-if="row.projectName">
+            <span class="admin-jobs-sep" aria-hidden="true">·</span>
+            <span class="admin-jobs-project">{{ row.projectName }}</span>
+          </template>
+        </div>
       </template>
 
       <template #cell-spec="{ row }">
-        <template v-if="formatJobSpec(row, modelNameMap)">
-          <div class="admin-cell-primary admin-job-spec-title">
+        <div v-if="formatJobSpec(row, modelNameMap)" class="admin-jobs-inline-cell">
+          <span
+            class="admin-cell-primary admin-job-spec-title"
+            :title="formatJobSpec(row, modelNameMap)?.title"
+          >
             {{ formatJobSpec(row, modelNameMap)?.title }}
-          </div>
-          <div v-if="formatJobSpec(row, modelNameMap)?.meta.length" class="admin-job-spec-tags">
-            <span
-              v-for="tag in formatJobSpec(row, modelNameMap)?.meta"
-              :key="tag"
-              class="admin-spec-chip"
-            >
-              {{ tag }}
-            </span>
-          </div>
-        </template>
+          </span>
+          <span
+            v-for="tag in formatJobSpec(row, modelNameMap)?.meta"
+            :key="tag"
+            class="admin-spec-chip"
+          >
+            {{ tag }}
+          </span>
+        </div>
         <span v-else class="admin-cell-sub">-</span>
       </template>
 
@@ -681,7 +690,7 @@ onMounted(() => {
       </template>
 
       <template #cell-actions="{ row }">
-        <div class="admin-actions">
+        <div class="admin-actions admin-jobs-actions">
           <button
             v-if="getJobPreviewMedia(row)"
             type="button"
@@ -1013,25 +1022,44 @@ onMounted(() => {
   color: var(--color-gold);
 }
 
+.admin-jobs-inline-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.admin-jobs-sep {
+  color: var(--color-muted);
+  opacity: 0.6;
+}
+
+.admin-jobs-project {
+  font-size: 12px;
+  color: var(--color-muted);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .admin-jobs-credit {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.admin-jobs-actions {
+  flex-wrap: nowrap;
+  white-space: nowrap;
 }
 
 .admin-job-spec-title {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 240px;
-}
-
-.admin-job-spec-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 4px;
+  max-width: 200px;
 }
 
 .admin-spec-chip {
