@@ -63,10 +63,10 @@ function show(node: CanvasNode) {
 </template>
 
 <style scoped>
-.canvas-reference-list { display: flex; flex-wrap: wrap; gap: 7px; max-height: 128px; overflow: auto; padding: 1px 1px 8px; }
-.canvas-reference-item { position: relative; width: 50px; height: 50px; flex: none; border: 1px solid var(--border-control); border-radius: 5px; background: var(--color-elevated); }
-.canvas-reference-preview { display: grid; place-items: center; width: 100%; height: 100%; color: var(--color-muted); cursor: pointer; }
-.canvas-reference-preview :is(img, video) { width: 100%; height: 100%; object-fit: cover; border-radius: 4px; }
+.canvas-reference-list { display: flex; flex-wrap: wrap; gap: 7px; padding: 1px 1px 8px; }
+.canvas-reference-item { position: relative; width: 50px; height: 50px; flex: none; overflow: hidden; border: 1px solid var(--border-control); border-radius: 5px; background: var(--color-elevated); }
+.canvas-reference-preview { position: relative; display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; padding: 0; border: 0; overflow: hidden; background: transparent; color: var(--color-muted); cursor: pointer; }
+.canvas-reference-preview :is(img, video) { display: block; width: 100%; height: 100%; max-width: none; object-fit: cover; }
 .canvas-reference-index { position: absolute; left: 3px; bottom: 3px; padding: 0 3px; border-radius: 3px; background: var(--color-canvas); color: var(--color-gold-soft); font-size: var(--font-size-caption); }
 .canvas-reference-remove { position: absolute; top: 2px; right: 2px; display: grid; place-items: center; width: 17px; height: 17px; border-radius: 50%; background: var(--color-canvas); color: var(--color-muted); cursor: pointer; }
 .canvas-reference-remove:hover, .canvas-reference-preview:hover { color: var(--color-gold-soft); }
