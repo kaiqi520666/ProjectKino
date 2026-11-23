@@ -342,18 +342,28 @@ async def build_script_result_from_db(session: AsyncSession, project: Project) -
     )
 
 
-async def build_asset_result_from_db(session: AsyncSession, project: Project) -> AssetResult:
-    # 仅返回主资产供分镜提取/校验使用；后续 Phase 2B 引入自动变体绑定时再扩展契约。
-    assets = list(
-        await session.scalars(
-            select(ProjectAsset)
-            .where(
-                ProjectAsset.project_id == project.id,
-                ProjectAsset.parent_asset_id.is_(None),
-            )
-            .order_by(ProjectAsset.created_at, ProjectAsset.asset_code)
-        )
+async def build_asset_result_from_db(
+    session: AsyncSession,
+    project: Project,
+    *,
+    include_variants: bool = False,
+) -> AssetResult:
+    stmt = (
+        select(ProjectAsset)
+        .where(ProjectAsset.project_id == project.id)
+        .order_by(ProjectAsset.created_at, ProjectAsset.asset_code)
     )
+    if not include_variants:
+        stmt = stmt.where(ProjectAsset.parent_asset_id.is_(None))
+    rows = list(await session.scalars(stmt))
+    code_by_uuid = {row.id: row.asset_code for row in rows}
+    roots = [row for row in rows if row.parent_asset_id is None]
+    variants = [
+        row
+        for row in rows
+        if row.parent_asset_id is not None and row.parent_asset_id in code_by_uuid
+    ]
+    ordered_rows = [*roots, *variants] if include_variants else roots
     return AssetResult(
         settings=ProjectSettings.model_validate(project.settings),
         assets=[
@@ -365,8 +375,10 @@ async def build_asset_result_from_db(session: AsyncSession, project: Project) ->
                 prompt=a.prompt or a.name,
                 episodeNumbers=[n for n in (a.episode_numbers or []) if isinstance(n, int) and n >= 1],
                 voice=a.voice or "",
+                parentId=code_by_uuid.get(a.parent_asset_id) if a.parent_asset_id else None,
+                variantLabel=(a.variant_label or "") if a.parent_asset_id else "",
             )
-            for a in assets
+            for a in ordered_rows
         ],
     )
 
@@ -503,19 +515,22 @@ async def persist_extracted_assets(
         await session.scalars(select(ProjectAsset).where(ProjectAsset.project_id == project.id))
     )
     by_code = {row.asset_code: row for row in existing_rows}
-    result_codes = {item.id for item in result.assets}
+    root_items = [item for item in result.assets if not item.parentId]
+    variant_items = [item for item in result.assets if item.parentId]
+    result_root_codes = {item.id for item in root_items}
 
     # 删除已不在剧本中出现的旧脚本主资产（保留用户自定义资产与所有变体，并通过共享提拔逻辑防止孤儿变体）。
     for row in existing_rows:
         if (
             row.parent_asset_id is None
-            and row.asset_code not in result_codes
+            and row.asset_code not in result_root_codes
             and _SCRIPT_CODE_RE.match(row.asset_code)
         ):
             await _promote_children_and_delete_asset(session, project_id=project.id, asset=row)
 
     saved: list[ProjectAsset] = []
-    for item in result.assets:
+    root_by_code: dict[str, ProjectAsset] = {}
+    for item in root_items:
         row = by_code.get(item.id)
         if row is None:
             row = ProjectAsset(
@@ -538,6 +553,53 @@ async def persist_extracted_assets(
                 row.prompt = item.prompt
                 row.voice = item.voice if item.kind == "character" else ""
             # 无论全量还是增量，始终保留已上传/已生成的 image_key / image_url。
+        root_by_code[item.id] = row
+        saved.append(row)
+
+    # 先 flush 确保新建根资产拿到 UUID，供变体绑定 parent_asset_id。
+    await session.flush()
+
+    existing_by_parent_label: dict[tuple[UUID, str], ProjectAsset] = {
+        (row.parent_asset_id, (row.variant_label or "").strip().lower()): row
+        for row in existing_rows
+        if row.parent_asset_id is not None and (row.variant_label or "").strip()
+    }
+    for item in variant_items:
+        parent_row = root_by_code.get(item.parentId or "") or by_code.get(item.parentId or "")
+        if parent_row is None or parent_row.id is None:
+            continue
+        clean_label = (item.variantLabel or "").strip()[:60]
+        if not clean_label:
+            continue
+        row = by_code.get(item.id) or existing_by_parent_label.get(
+            (parent_row.id, clean_label.lower())
+        )
+        if row is None:
+            row = ProjectAsset(
+                project_id=project.id,
+                asset_code=item.id,
+                kind=item.kind,
+                name=item.name,
+                description=item.description,
+                prompt=item.prompt,
+                voice="",
+                episode_numbers=list(item.episodeNumbers),
+                parent_asset_id=parent_row.id,
+                variant_label=clean_label,
+            )
+            session.add(row)
+            by_code[row.asset_code] = row
+            existing_by_parent_label[(parent_row.id, clean_label.lower())] = row
+        else:
+            row.parent_asset_id = parent_row.id
+            row.episode_numbers = list(item.episodeNumbers)
+            if not preserve_edits:
+                row.kind = item.kind
+                row.name = item.name
+                row.description = item.description
+                row.prompt = item.prompt
+                row.variant_label = clean_label
+            # 始终保留变体已上传/已生成的 image_key / image_url。
         saved.append(row)
 
     await session.flush()
@@ -566,12 +628,17 @@ async def persist_storyboard_result(
             refs = []
             for ref in clip.references:
                 matched = assets_by_code.get(ref.assetId)
+                matched_name = (
+                    f"{matched.name} · {matched.variant_label}"
+                    if matched and matched.variant_label
+                    else (matched.name if matched else ref.name)
+                )
                 refs.append(
                     {
                         "index": ref.index,
                         "assetId": str(matched.id) if matched else ref.assetId,
                         "assetCode": ref.assetId,
-                        "name": matched.name if matched else ref.name,
+                        "name": matched_name,
                         "kind": ref.kind,
                     }
                 )

@@ -292,3 +292,150 @@ async def test_append_assets_and_storyboard_pipeline_works_with_shared_usage():
     assert len(board.episodes) == 1
     assert len(board.episodes[0].clips) > 0
     assert usage.input_tokens > 1500
+
+
+async def test_analyze_assets_auto_variants_and_storyboard_variant_binding():
+    settings = ProjectSettings(
+        name="雨夜调查",
+        ratio="16:9",
+        visualStyle="live-action",
+        episodeCount=1,
+        maxSegmentDuration=15,
+    )
+
+    def script_respond(messages, _info):
+        user = next(p for m in messages for p in m.parts if isinstance(p, UserPromptPart))
+        data = json.loads(user.content)
+        body = _valid_episode(int(data["episode"]["number"])) if "episode" in data else _valid_outline(1)
+        return ModelResponse(parts=[TextPart(json.dumps(body, ensure_ascii=False))])
+
+    script = await generate_script(
+        FunctionModel(script_respond),
+        settings,
+        Source.from_text("story", "雨夜变装测试"),
+    )
+
+    def asset_respond_with_variants(messages, _info):
+        user = next(p for m in messages for p in m.parts if isinstance(p, UserPromptPart))
+        data = json.loads(user.content)
+        kind = data["kind"]
+        designs = []
+        for entry in data["assets"]:
+            if kind == "character":
+                designs.append(
+                    {
+                        "id": entry["id"],
+                        "description": "白天默认造型",
+                        "prompt": "二十六岁女性，黑发低马尾，浅蓝色家居服，电影写实",
+                        "voice": "二十六岁女性；清冷女中音；语速稳；普通话",
+                        "variants": [
+                            {
+                                "label": "便装雨衣",
+                                "description": "深夜外出调查穿黑色风衣",
+                                "prompt": "黑色长款防水风衣，湿发微乱，电影写实",
+                                "episodes": [1],
+                            },
+                            {
+                                "label": "战损",
+                                "description": "肩头微破带尘土",
+                                "prompt": "深灰夹克肩部微破，脸颊带轻微尘土，电影写实",
+                                "episodes": [1],
+                            },
+                        ],
+                    }
+                )
+            elif kind == "scene":
+                designs.append(
+                    {
+                        "id": entry["id"],
+                        "description": "旧卧室白天",
+                        "prompt": "现代写实，无人空景，旧卧室白天自然光",
+                        "voice": "",
+                        "variants": [
+                            {
+                                "label": "深夜停电",
+                                "description": "深夜无灯光，月光斜照",
+                                "prompt": "现代写实，无人空景，深夜停电卧室，冷蓝月光斜照地面",
+                                "episodes": [1],
+                            }
+                        ],
+                    }
+                )
+            else:
+                designs.append(
+                    {
+                        "id": entry["id"],
+                        "description": "木质晾衣杆",
+                        "prompt": "现代写实，纯白背景，无手，手持级尺度，旧木质晾衣杆",
+                        "voice": "",
+                        "variants": [],
+                    }
+                )
+        return ModelResponse(parts=[TextPart(json.dumps({"assets": designs}, ensure_ascii=False))])
+
+    assets = await analyze_assets(FunctionModel(asset_respond_with_variants), script)
+    by_id = {a.id: a for a in assets.assets}
+    assert "C01_v1" in by_id and by_id["C01_v1"].parentId == "C01"
+    assert by_id["C01_v1"].variantLabel == "便装雨衣"
+    assert "严格参考参考图1" in by_id["C01_v1"].prompt
+    assert "C01_v2" in by_id and by_id["C01_v2"].variantLabel == "战损"
+    assert "S01_v1" in by_id and by_id["S01_v1"].parentId == "S01"
+    assert "严格参考参考图1" in by_id["S01_v1"].prompt
+
+    # 1b: Storyboard receives variant options, rejects root+variant conflict on 1st attempt,
+    # then binds C01_v1 + S01_v1 cleanly and inherits parent C01's voice.
+    batch1_calls = 0
+
+    def sb_respond_variants(messages, _info):
+        nonlocal batch1_calls
+        user = next(p for m in messages for p in m.parts if isinstance(p, UserPromptPart))
+        data = json.loads(user.content)
+        is_first_batch = data["segments"][0]["id"] == 1
+        if is_first_batch:
+            batch1_calls += 1
+        # Verify variant options were passed to the storyboard LLM
+        first_seg_asset_ids = {item["id"] for item in data["segments"][0]["assets"]}
+        assert "C01_v1" in first_seg_asset_ids
+        assert "S01_v1" in first_seg_asset_ids
+
+        segs = []
+        for seg in data["segments"]:
+            refs = (
+                ["S01_v1", "C01", "C01_v1"]
+                if is_first_batch and batch1_calls == 1
+                else ["S01_v1", "C01_v1"]
+            )
+            segs.append(
+                {
+                    "id": seg["id"],
+                    "references": refs,
+                    "blocking": "女性站在床边偏左，面向墙壁。",
+                    "soundscape": "雨夜风声",
+                    "music": "",
+                    "cuts": [
+                        {
+                            "index": cut["index"],
+                            "shotSize": "中景",
+                            "camera": "固定镜头",
+                            "lens": "35mm",
+                            "cameraPosition": "平视",
+                            "composition": "三分法",
+                            "shot": "穿黑色风衣的年轻女性侧耳贴近昏暗墙面。",
+                            "eyeline": "右侧墙面",
+                            "focus": "女性侧脸",
+                            "stability": "稳定",
+                            "framePrompt": "电影写实中景，深夜卧室，穿黑风衣女性贴墙倾听。",
+                        }
+                        for cut in seg["cuts"]
+                    ],
+                }
+            )
+        return ModelResponse(parts=[TextPart(json.dumps({"segments": segs}, ensure_ascii=False))])
+
+    board = await storyboard(FunctionModel(sb_respond_variants), script, assets, only_episode=1)
+    assert batch1_calls == 2  # 1st attempt rejected for root+variant conflict, 2nd succeeded
+    clip0 = board.episodes[0].clips[0]
+    assert clip0.assetIds == ["C01_v1", "S01_v1"]
+    assert "@[图片1] = 林晚（便装雨衣）" in clip0.prompt
+    assert "@[图片2] = 302室卧室（深夜停电）" in clip0.prompt
+    assert "@[图片1] 林晚：二十六岁女性；清冷女中音；语速稳；普通话" in clip0.prompt

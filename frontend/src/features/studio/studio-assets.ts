@@ -89,6 +89,80 @@ export function findParentAsset(
   return assets.find((item) => item.backendId === asset.parentAssetId)
 }
 
+export interface AssetImageWavePlan {
+  wave1Ids: string[]
+  wave2VariantIds: string[]
+  orphanVariantIds: string[]
+  missingParentIds: string[]
+}
+
+function hasHttpImage(asset?: StudioAsset): boolean {
+  return !!asset?.imageUrl && /^https?:\/\//i.test(asset.imageUrl.trim())
+}
+
+/**
+ * Partition selected asset backend IDs into two waves:
+ * - Wave 1: root assets + variants whose parent already has an http(s) image and isn't being redrawn.
+ * - Wave 2: variants whose parent IS in this batch (wait for Wave 1 so they inherit the fresh parent image).
+ * When `rootsOnly` is true, all variants are excluded so the user can review generated root images first.
+ */
+export function planAssetImageWaves(
+  allAssets: readonly StudioAsset[],
+  selectedIds: readonly string[],
+  options?: { rootsOnly?: boolean },
+): AssetImageWavePlan {
+  const rootsOnly = Boolean(options?.rootsOnly)
+  const byBackendId = new Map<string, StudioAsset>()
+  for (const asset of allAssets) {
+    if (asset.backendId) byBackendId.set(asset.backendId, asset)
+  }
+
+  const dedupedIds: string[] = []
+  const selectedSet = new Set<string>()
+  for (const id of selectedIds) {
+    if (!id || selectedSet.has(id) || !byBackendId.has(id)) continue
+    selectedSet.add(id)
+    dedupedIds.push(id)
+  }
+
+  const wave1Ids: string[] = []
+  const wave2VariantIds: string[] = []
+  const orphanVariantIds: string[] = []
+  const missingParentIdSet = new Set<string>()
+
+  for (const id of dedupedIds) {
+    const asset = byBackendId.get(id)!
+    if (!asset.parentAssetId) {
+      wave1Ids.push(id)
+      continue
+    }
+    if (rootsOnly) continue
+
+    const parentId = asset.parentAssetId
+    if (selectedSet.has(parentId)) {
+      wave2VariantIds.push(id)
+      continue
+    }
+    const parent = byBackendId.get(parentId)
+    if (hasHttpImage(parent)) {
+      wave1Ids.push(id)
+    } else {
+      orphanVariantIds.push(id)
+      wave1Ids.push(id)
+      if (parent?.backendId && parent.prompt.trim()) {
+        missingParentIdSet.add(parent.backendId)
+      }
+    }
+  }
+
+  return {
+    wave1Ids,
+    wave2VariantIds,
+    orphanVariantIds,
+    missingParentIds: [...missingParentIdSet],
+  }
+}
+
 export function findAssetSiblings(
   assets: readonly StudioAsset[],
   target: StudioAsset,

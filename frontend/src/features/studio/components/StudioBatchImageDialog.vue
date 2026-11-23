@@ -6,7 +6,7 @@ import UiButton from '@/components/ui/UiButton.vue'
 import UiDialog from '@/components/ui/UiDialog.vue'
 import type { ModelCatalogItemOut } from '../api-types'
 import { assetKindIcons } from '../asset-icons'
-import { assetDisplayName, assetKindOptions, findParentAsset } from '../studio-assets'
+import { assetDisplayName, assetKindOptions, findParentAsset, planAssetImageWaves } from '../studio-assets'
 import type { StudioAsset, StudioAssetKind } from '../studio-assets'
 import ImageModelPicker from './ImageModelPicker.vue'
 import ImageParamsPopover from './ImageParamsPopover.vue'
@@ -31,6 +31,7 @@ const open = defineModel<boolean>('open', { default: false })
 const emit = defineEmits<{
   submit: [payload: {
     assetIds: string[]
+    wave2VariantIds: string[]
     modelId: string
     tier: 'web' | '1k' | '2k' | '4k'
     ratio?: string
@@ -42,6 +43,7 @@ const selectedModelId = ref('')
 const selectedTier = ref<'web' | '1k' | '2k' | '4k'>('1k')
 const ratioMode = ref<'auto' | 'override'>('auto')
 const overrideRatio = ref('16:9')
+const rootsOnly = ref(false)
 
 const modelCatalogList = computed<ModelCatalogItemOut[]>(() => props.imageModels)
 
@@ -70,6 +72,9 @@ function disabledReason(asset: StudioAsset) {
 
 const selectableAssets = computed(() => props.assets.filter(isSelectable))
 const missingSelectableAssets = computed(() => selectableAssets.value.filter((a) => !a.imageUrl))
+const missingRootSelectableAssets = computed(() =>
+  missingSelectableAssets.value.filter((a) => !a.parentAssetId),
+)
 const currentCategorySelectable = computed(() =>
   selectableAssets.value.filter((a) => a.kind === props.activeCategory),
 )
@@ -90,8 +95,32 @@ const selectedAssets = computed(() =>
   props.assets.filter((a) => a.backendId && selectedSet.value.has(a.backendId) && isSelectable(a)),
 )
 
-const newCount = computed(() => selectedAssets.value.filter((a) => !a.imageUrl).length)
-const redrawCount = computed(() => selectedAssets.value.filter((a) => !!a.imageUrl).length)
+const selectedVariantCount = computed(() =>
+  selectedAssets.value.filter((a) => !!a.parentAssetId).length,
+)
+
+const selectedRootCount = computed(() =>
+  selectedAssets.value.filter((a) => !a.parentAssetId).length,
+)
+
+const wavePlan = computed(() =>
+  planAssetImageWaves(
+    props.assets,
+    selectedAssets.value.map((a) => a.backendId!),
+    { rootsOnly: rootsOnly.value },
+  ),
+)
+
+const effectiveIdSet = computed(
+  () => new Set([...wavePlan.value.wave1Ids, ...wavePlan.value.wave2VariantIds]),
+)
+
+const effectiveAssets = computed(() =>
+  selectedAssets.value.filter((a) => a.backendId && effectiveIdSet.value.has(a.backendId)),
+)
+
+const newCount = computed(() => effectiveAssets.value.filter((a) => !a.imageUrl).length)
+const redrawCount = computed(() => effectiveAssets.value.filter((a) => !!a.imageUrl).length)
 
 function hasReadyParentImage(asset: StudioAsset): boolean {
   if (!asset.parentAssetId) return false
@@ -99,9 +128,9 @@ function hasReadyParentImage(asset: StudioAsset): boolean {
   return !!parent?.imageUrl && /^https?:\/\//i.test(parent.imageUrl)
 }
 
-const variantsMissingParentCount = computed(() =>
-  selectedAssets.value.filter((a) => !!a.parentAssetId && !hasReadyParentImage(a)).length,
-)
+function isWave2Variant(asset: StudioAsset): boolean {
+  return !!asset.backendId && wavePlan.value.wave2VariantIds.includes(asset.backendId)
+}
 
 const unitPrice = computed(() => {
   const price = currentModel.value?.imagePrices.find((p) => p.tier === selectedTier.value)
@@ -111,8 +140,8 @@ const unitPrice = computed(() => {
 })
 
 const totalEstimatedAmount = computed(() => {
-  if (unitPrice.value === null || !selectedAssets.value.length) return ''
-  const total = unitPrice.value * selectedAssets.value.length
+  if (unitPrice.value === null || !effectiveAssets.value.length) return ''
+  const total = unitPrice.value * effectiveAssets.value.length
   return String(Number(total.toFixed(2)))
 })
 
@@ -122,6 +151,7 @@ watch(open, (isOpen) => {
   if (!isOpen) return
   ratioMode.value = 'auto'
   overrideRatio.value = '16:9'
+  rootsOnly.value = false
   const defaultModel = modelCatalogList.value.find((m) => m.isDefault)?.id || modelCatalogList.value[0]?.id || ''
   selectedModelId.value = defaultModel
   if (props.initialSelectedIds.length) {
@@ -147,6 +177,20 @@ function selectMissing() {
   selectedIds.value = missingSelectableAssets.value.map((a) => a.backendId!).slice(0, 30)
 }
 
+function selectMissingRoots() {
+  selectedIds.value = missingRootSelectableAssets.value.map((a) => a.backendId!).slice(0, 30)
+}
+
+function addMissingParents() {
+  const allowed = new Set(selectableAssets.value.map((a) => a.backendId!))
+  const next = [...selectedIds.value]
+  for (const pid of wavePlan.value.missingParentIds) {
+    if (next.length >= 30) break
+    if (allowed.has(pid) && !next.includes(pid)) next.unshift(pid)
+  }
+  selectedIds.value = next
+}
+
 function selectCurrentCategory() {
   selectedIds.value = currentCategorySelectable.value.map((a) => a.backendId!).slice(0, 30)
 }
@@ -160,10 +204,11 @@ function clearSelection() {
 }
 
 function confirmSubmit() {
-  const ids = selectedAssets.value.map((a) => a.backendId!)
-  if (!ids.length || !currentModel.value || props.submitting) return
+  const { wave1Ids, wave2VariantIds } = wavePlan.value
+  if (!wave1Ids.length || !currentModel.value || props.submitting) return
   emit('submit', {
-    assetIds: ids,
+    assetIds: wave1Ids,
+    wave2VariantIds,
     modelId: currentModel.value.id,
     tier: selectedTier.value,
     ratio: ratioMode.value === 'override' ? overrideRatio.value : undefined,
@@ -184,6 +229,15 @@ function confirmSubmit() {
           <UiButton variant="outline" size="sm" :disabled="!missingSelectableAssets.length" @click="selectMissing">
             全选缺图 ({{ missingSelectableAssets.length }})
           </UiButton>
+          <UiButton
+            v-if="missingRootSelectableAssets.length < missingSelectableAssets.length"
+            variant="outline"
+            size="sm"
+            :disabled="!missingRootSelectableAssets.length"
+            @click="selectMissingRoots"
+          >
+            仅选缺图主资产 ({{ missingRootSelectableAssets.length }})
+          </UiButton>
           <UiButton variant="outline" size="sm" :disabled="!currentCategorySelectable.length" @click="selectCurrentCategory">
             全选当前分类 ({{ currentCategorySelectable.length }})
           </UiButton>
@@ -198,11 +252,21 @@ function confirmSubmit() {
       </div>
 
       <UiAlert
-        v-if="variantsMissingParentCount > 0"
+        v-if="!rootsOnly && wavePlan.orphanVariantIds.length > 0"
         tone="warning"
-        :title="`有 ${variantsMissingParentCount} 项已选变体的主资产尚未出图`"
+        :title="`有 ${wavePlan.orphanVariantIds.length} 项已选变体的主资产尚未出图且未勾选`"
       >
-        建议先生成主资产图，再批量生成变体，系统将自动以主资产图垫图以保持五官、场景或道具外观一致。
+        <div class="batch-orphan-alert">
+          <span>建议连同对应主资产一起勾选，系统将自动先生成主图，再用主图垫图生成变体以锁住外观一致。</span>
+          <UiButton
+            v-if="wavePlan.missingParentIds.length"
+            variant="outline"
+            size="sm"
+            @click="addMissingParents"
+          >
+            补选主资产 (+{{ wavePlan.missingParentIds.length }})
+          </UiButton>
+        </div>
       </UiAlert>
 
       <div class="batch-groups">
@@ -241,7 +305,8 @@ function confirmSubmit() {
                     >
                       {{ effectiveAssetRatio(asset) === 'auto' ? '自动' : effectiveAssetRatio(asset) }}
                     </span>
-                    <span v-if="hasReadyParentImage(asset)" class="batch-badge is-ref">主图垫图</span>
+                    <span v-if="isWave2Variant(asset)" class="batch-badge is-ref">第2阶段 · 垫图</span>
+                    <span v-else-if="hasReadyParentImage(asset)" class="batch-badge is-ref">主图垫图</span>
                     <span v-if="disabledReason(asset)" class="batch-badge is-disabled">{{ disabledReason(asset) }}</span>
                     <span v-else-if="asset.imageUrl" class="batch-badge is-redraw">已有图 · 重绘</span>
                     <span v-else class="batch-badge is-missing">暂无图片</span>
@@ -251,6 +316,24 @@ function confirmSubmit() {
             </li>
           </ul>
         </section>
+      </div>
+
+      <div v-if="selectedVariantCount > 0" class="batch-phase-bar">
+        <label class="batch-phase-toggle">
+          <input v-model="rootsOnly" type="checkbox" :disabled="selectedRootCount === 0 && !rootsOnly" />
+          <span>仅先生成主图，确认后再生成变体</span>
+        </label>
+        <span class="batch-phase-desc">
+          <template v-if="rootsOnly">
+            本次仅生成 {{ wavePlan.wave1Ids.length }} 张主图（暂不生成 {{ selectedVariantCount }} 张变体）
+          </template>
+          <template v-else-if="wavePlan.wave2VariantIds.length > 0">
+            自动两阶段：先生成主图 {{ wavePlan.wave1Ids.length }} 张 → 完成后自动以主图垫图生变体 {{ wavePlan.wave2VariantIds.length }} 张
+          </template>
+          <template v-else>
+            所选变体的主图已就绪，将直接以主图垫图并发生成
+          </template>
+        </span>
       </div>
 
       <div class="batch-config-bar">
@@ -269,11 +352,18 @@ function confirmSubmit() {
           />
         </div>
         <div class="batch-summary">
-          <p v-if="selectedAssets.length" class="batch-summary-main">
-            已选 <strong>{{ selectedAssets.length }}</strong> 项（新生成 {{ newCount }} · 重绘 {{ redrawCount }}）<template v-if="totalEstimatedText">，预计预冻结 <strong>{{ totalEstimatedText }}</strong></template>
+          <p v-if="effectiveAssets.length" class="batch-summary-main">
+            本次执行 <strong>{{ effectiveAssets.length }}</strong> 项（新生成 {{ newCount }} · 重绘 {{ redrawCount }}）<template v-if="totalEstimatedText">，预计共需 <strong>{{ totalEstimatedText }}</strong></template>
           </p>
-          <p v-else class="batch-summary-main">请至少勾选 1 项资产</p>
-          <p class="batch-summary-note">每张独立核算：单张失败自动退还冻结积分，重绘失败保留原图。</p>
+          <p v-else class="batch-summary-main">请至少勾选 1 项可生成的资产</p>
+          <p class="batch-summary-note">
+            <template v-if="!rootsOnly && wavePlan.wave2VariantIds.length > 0">
+              分两阶段预冻结：若某张主图失败，其名下变体将自动跳过且不扣积分。
+            </template>
+            <template v-else>
+              每张独立核算：单张失败自动退还冻结积分，重绘失败保留原图。
+            </template>
+          </p>
         </div>
       </div>
     </div>
@@ -291,11 +381,17 @@ function confirmSubmit() {
           variant="primary"
           size="sm"
           :loading="submitting"
-          :disabled="!selectedAssets.length || !currentModel || submitting"
+          :disabled="!effectiveAssets.length || !currentModel || submitting"
           @click="confirmSubmit"
         >
           <template v-if="!submitting" #leading><Sparkles :size="14" aria-hidden="true" /></template>
-          开始批量生图 ({{ selectedAssets.length }})
+          {{
+            rootsOnly
+              ? `先生成主图 (${effectiveAssets.length})`
+              : wavePlan.wave2VariantIds.length > 0
+                ? `一键两阶段生图 (${effectiveAssets.length})`
+                : `开始批量生图 (${effectiveAssets.length})`
+          }}
         </UiButton>
       </div>
     </template>
@@ -464,6 +560,43 @@ function confirmSubmit() {
 .batch-badge.is-disabled {
   background: rgb(255 255 255 / 5%);
   color: var(--color-muted);
+}
+.batch-orphan-alert {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.batch-phase-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 14px;
+  padding: 8px 12px;
+  border: 1px solid rgb(240 184 75 / 26%);
+  border-radius: 8px;
+  background: rgb(240 184 75 / 6%);
+  font-size: 12px;
+}
+.batch-phase-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--color-text);
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+}
+.batch-phase-toggle input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--color-gold);
+  cursor: pointer;
+}
+.batch-phase-desc {
+  color: var(--color-gold-soft);
 }
 .batch-config-bar {
   display: flex;

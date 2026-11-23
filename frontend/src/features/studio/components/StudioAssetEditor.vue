@@ -24,8 +24,9 @@ import UiTextarea from '@/components/ui/UiTextarea.vue'
 import AssetLibraryDialog from '@/features/assets/AssetLibraryDialog.vue'
 import type { AssetLibraryItem } from '@/features/assets/asset-library-types'
 import { useUserAssetsStore } from '@/features/assets/user-assets-store'
+import { useAuthStore } from '@/stores/auth'
 import { useUiStore } from '@/stores/ui'
-import { apiErrorMessage, uploadFileToOss } from '../api'
+import { apiErrorMessage, suggestVariantPromptApi, uploadFileToOss } from '../api'
 import type { ModelCatalogItemOut } from '../api-types'
 import {
   assetDisplayName,
@@ -45,12 +46,14 @@ interface ReferenceImageItem {
 
 const props = withDefaults(
   defineProps<{
+    projectId?: string
     imageModels?: ModelCatalogItemOut[]
     projectAssets?: StudioAsset[]
     persisted?: boolean
     generatingImage?: boolean
   }>(),
   {
+    projectId: '',
     imageModels: () => [],
     projectAssets: () => [],
     persisted: false,
@@ -74,6 +77,7 @@ const emit = defineEmits<{
   openHistory: [asset: StudioAsset]
 }>()
 
+const auth = useAuthStore()
 const ui = useUiStore()
 const userAssets = useUserAssetsStore()
 const formId = useId()
@@ -86,6 +90,7 @@ const libraryOpen = ref(false)
 const pickingTarget = ref<'image' | 'ref'>('image')
 const loadingImage = ref(false)
 const collectingAsset = ref(false)
+const suggestingVariantPrompt = ref(false)
 const imageError = ref('')
 const imageNotice = ref('')
 const selectedModelId = ref('gpt-image-2')
@@ -122,6 +127,45 @@ const estimatedAmount = computed(() => {
   const num = Number(price.creditPrice)
   return Number.isFinite(num) ? String(Number(num.toFixed(2))) : ''
 })
+
+const canSuggestVariantPrompt = computed(
+  () =>
+    props.persisted
+    && !!props.projectId
+    && isVariant.value
+    && !!resolvedParent.value?.backendId
+    && !!(draft.value?.variantLabel ?? '').trim()
+    && !suggestingVariantPrompt.value,
+)
+
+async function suggestVariantPromptWithAi() {
+  const parent = resolvedParent.value
+  const label = (draft.value?.variantLabel ?? '').trim()
+  if (!props.projectId || !parent?.backendId || !label || !draft.value || suggestingVariantPrompt.value) return
+  suggestingVariantPrompt.value = true
+  try {
+    const customNote =
+      draft.value.description.trim() && draft.value.description.trim() !== parent.description.trim()
+        ? draft.value.description.trim()
+        : ''
+    const result = await suggestVariantPromptApi(props.projectId, parent.backendId, {
+      variantLabel: label,
+      note: customNote,
+    })
+    if (draft.value) {
+      draft.value.prompt = result.prompt
+      if (!customNote && result.description) {
+        draft.value.description = result.description
+      }
+    }
+    void auth.refreshBalance()
+    ui.notify(`已根据「${label}」生成锁脸/锁景变体提示词`, 'success')
+  } catch (error) {
+    ui.notify(apiErrorMessage(error), 'error')
+  } finally {
+    suggestingVariantPrompt.value = false
+  }
+}
 
 const canGenerateAiImage = computed(
   () =>
@@ -514,9 +558,25 @@ defineExpose({ create, createVariant, edit, close, syncAsset })
           <UiTextarea v-model="draft.voice" label="音色" :rows="2" />
         </div>
         <div class="asset-prompt-field">
+          <div class="asset-prompt-head">
+            <span class="ui-label">文生图提示词</span>
+            <UiButton
+              v-if="isVariant && persisted && resolvedParent?.backendId"
+              type="button"
+              variant="outline"
+              size="sm"
+              :loading="suggestingVariantPrompt"
+              :disabled="!canSuggestVariantPrompt"
+              title="根据状态标签自动改写参考图锁脸/锁景提示词"
+              @click="suggestVariantPromptWithAi"
+            >
+              <template v-if="!suggestingVariantPrompt" #leading><Sparkles :size="13" aria-hidden="true" /></template>
+              AI 生成变体提示词
+            </UiButton>
+          </div>
           <UiTextarea
             v-model="draft.prompt"
-            label="文生图提示词"
+            aria-label="文生图提示词"
             :rows="4"
           />
         </div>
@@ -699,6 +759,13 @@ defineExpose({ create, createVariant, edit, close, syncAsset })
   min-height: 100%;
 }
 .asset-edit-fields, .asset-edit-image { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.asset-prompt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
 .asset-variant-box {
   display: flex;
   flex-direction: column;

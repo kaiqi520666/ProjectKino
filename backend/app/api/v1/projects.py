@@ -2,6 +2,7 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Header
+from pydantic_ai import RunUsage
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import undefer
@@ -14,10 +15,16 @@ from app.modules.auth.models import User
 from app.modules.canvas.generation import find_removed_prompt_refs
 from app.modules.catalog.models import AiModel, AiProvider
 from app.modules.catalog.service import quote_image_price, quote_video_price
-from app.modules.credits.service import assert_llm_balance_positive, freeze_media_credits
+from app.modules.credits.service import (
+    assert_llm_balance_positive,
+    charge_llm_usage,
+    freeze_media_credits,
+)
 from app.modules.jobs.models import Job
 from app.modules.jobs.schemas import JobOut
 from app.modules.jobs.service import create_job
+from app.modules.llm_engine.asset_gen import suggest_variant_prompt
+from app.modules.llm_engine.provider import resolve_text_model
 from app.modules.media_providers.cangyuan_image import asset_aspect_ratio
 from app.modules.storage.oss import load_storage
 from app.modules.studio.models import Episode, Project, ProjectAsset, StoryboardClip
@@ -49,6 +56,8 @@ from app.modules.studio.schemas import (
     SelectMediaHistoryRequest,
     StoryboardClipOut,
     StructuredEpisodeSaveRequest,
+    SuggestVariantPromptOut,
+    SuggestVariantPromptRequest,
 )
 from app.modules.studio.service import (
     create_clip,
@@ -592,6 +601,75 @@ async def _validate_image_model_and_infra(
     # 预先校验阿里云 OSS 已配置，避免生图成功扣费后无法转存。
     await load_storage(session)
     return model
+
+
+@router.post(
+    "/{project_id}/assets/{asset_id}/suggest-variant-prompt",
+    response_model=ApiResponse[SuggestVariantPromptOut],
+)
+async def suggest_asset_variant_prompt_endpoint(
+    project_id: UUID,
+    asset_id: UUID,
+    body: SuggestVariantPromptRequest,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[SuggestVariantPromptOut]:
+    project = await get_owned_project(session, project_id=project_id, user_id=user.id)
+    target = await session.scalar(
+        select(ProjectAsset).where(
+            ProjectAsset.id == asset_id,
+            ProjectAsset.project_id == project.id,
+        )
+    )
+    if target is None:
+        raise AppError(404, "asset_not_found", "资产不存在")
+    parent = target
+    if target.parent_asset_id is not None:
+        root = await session.scalar(
+            select(ProjectAsset).where(
+                ProjectAsset.id == target.parent_asset_id,
+                ProjectAsset.project_id == project.id,
+            )
+        )
+        if root is not None:
+            parent = root
+
+    await assert_llm_balance_positive(session, user.id)
+    model, model_id = await resolve_text_model(session)
+    usage = RunUsage()
+    settings_payload = dict(project.settings or {})
+    if isinstance(project.outline, dict) and project.outline.get("world"):
+        settings_payload["world"] = project.outline["world"]
+
+    suggestion = await suggest_variant_prompt(
+        model,
+        kind=parent.kind,  # type: ignore[arg-type]
+        name=parent.name,
+        parent_description=parent.description or parent.name,
+        parent_prompt=parent.prompt or parent.name,
+        variant_label=body.variant_label,
+        note=body.note,
+        settings_payload=settings_payload,
+        usage=usage,
+    )
+    await charge_llm_usage(
+        session,
+        user_id=user.id,
+        model_id=model_id,
+        job_id=None,
+        input_tokens=usage.input_tokens or 0,
+        cache_read_tokens=usage.cache_read_tokens or 0,
+        output_tokens=usage.output_tokens or 0,
+        idempotency_key=f"suggest_variant:{uuid4().hex}",
+        reason=f"AI 生成变体提示词 ({parent.name} · {body.variant_label.strip()})",
+    )
+    await session.commit()
+    return ApiResponse(
+        data=SuggestVariantPromptOut(
+            description=suggestion.description,
+            prompt=suggestion.prompt,
+        )
+    )
 
 
 @router.post(

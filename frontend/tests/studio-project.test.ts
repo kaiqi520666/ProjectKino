@@ -515,3 +515,68 @@ test('groupStudioAssets and findAssetSiblings group root and variants across cha
   assert.equal(findAssetSiblings(assets, assets[1]).length, 3)
   assert.equal(findAssetSiblings(assets, assets[3]).length, 1)
 })
+
+test('planAssetImageWaves partitions roots and variants for two-phase and roots-only modes', async () => {
+  const { planAssetImageWaves } = await import('../src/features/studio/studio-assets.ts')
+  const assets = [
+    {
+      id: 'C01',
+      backendId: 'u-root-ready',
+      kind: 'character' as const,
+      name: '林晓',
+      description: '已有主图',
+      prompt: '默认',
+      imageUrl: 'https://cdn.example/c01.png',
+    },
+    {
+      id: 'C01_v1',
+      backendId: 'u-v1-ready-parent',
+      parentAssetId: 'u-root-ready',
+      variantLabel: '便装',
+      kind: 'character' as const,
+      name: '林晓',
+      description: '便装',
+      prompt: '便装提示词',
+    },
+    {
+      id: 'C02',
+      backendId: 'u-root-missing',
+      kind: 'character' as const,
+      name: '陈国栋',
+      description: '缺主图',
+      prompt: '默认',
+    },
+    {
+      id: 'C02_v1',
+      backendId: 'u-v1-missing-parent',
+      parentAssetId: 'u-root-missing',
+      variantLabel: '雨衣',
+      kind: 'character' as const,
+      name: '陈国栋',
+      description: '雨衣',
+      prompt: '雨衣提示词',
+    },
+  ]
+
+  // Default two-phase: C01_v1 runs in Wave 1 (parent already has image and isn't selected),
+  // C02 runs in Wave 1, C02_v1 waits for Wave 2.
+  const twoPhase = planAssetImageWaves(assets, ['u-v1-ready-parent', 'u-root-missing', 'u-v1-missing-parent'])
+  assert.deepEqual(twoPhase.wave1Ids, ['u-v1-ready-parent', 'u-root-missing'])
+  assert.deepEqual(twoPhase.wave2VariantIds, ['u-v1-missing-parent'])
+  assert.deepEqual(twoPhase.orphanVariantIds, [])
+
+  // Redrawing parent C01 together with C01_v1 defers C01_v1 to Wave 2
+  const redrawBoth = planAssetImageWaves(assets, ['u-root-ready', 'u-v1-ready-parent'])
+  assert.deepEqual(redrawBoth.wave1Ids, ['u-root-ready'])
+  assert.deepEqual(redrawBoth.wave2VariantIds, ['u-v1-ready-parent'])
+
+  // rootsOnly mode skips all variants
+  const rootsOnly = planAssetImageWaves(assets, ['u-root-ready', 'u-v1-ready-parent', 'u-root-missing', 'u-v1-missing-parent'], { rootsOnly: true })
+  assert.deepEqual(rootsOnly.wave1Ids, ['u-root-ready', 'u-root-missing'])
+  assert.deepEqual(rootsOnly.wave2VariantIds, [])
+
+  // Selecting only a variant whose parent has no image surfaces missingParentIds
+  const orphan = planAssetImageWaves(assets, ['u-v1-missing-parent'])
+  assert.deepEqual(orphan.orphanVariantIds, ['u-v1-missing-parent'])
+  assert.deepEqual(orphan.missingParentIds, ['u-root-missing'])
+})

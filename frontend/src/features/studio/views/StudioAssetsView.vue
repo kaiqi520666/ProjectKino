@@ -157,13 +157,87 @@ const hasActiveImageJobs = computed(() => activeImageJobs.value.length > 0 || ac
 
 const activeImageCount = computed(() => activeImageAssetIds.value.size)
 
+interface PendingVariantWave {
+  assetIds: string[]
+  modelId: string
+  tier: 'web' | '1k' | '2k' | '4k'
+  ratio?: string
+}
+
+const pendingVariantWave = ref<PendingVariantWave | null>(null)
+const batchPhase = ref<'single' | 'phase1-roots' | 'phase2-variants'>('single')
+
+function cancelPendingVariantWave() {
+  if (!pendingVariantWave.value) return
+  const count = pendingVariantWave.value.assetIds.length
+  pendingVariantWave.value = null
+  batchPhase.value = 'single'
+  ui.notify(`已取消后续 ${count} 项变体生图，仅保留当前主图任务`, 'info')
+}
+
+async function launchPendingVariantWave(wave: PendingVariantWave) {
+  const allAssets = props.project.assets ?? []
+  const byBackendId = new Map<string, StudioAsset>()
+  for (const item of allAssets) {
+    if (item.backendId) byBackendId.set(item.backendId, item)
+  }
+
+  const readyVariantIds: string[] = []
+  let skippedNoParentCount = 0
+  for (const vid of wave.assetIds) {
+    const variant = byBackendId.get(vid)
+    if (!variant?.parentAssetId) continue
+    const parent = byBackendId.get(variant.parentAssetId)
+    if (parent?.imageUrl && /^https?:\/\//i.test(parent.imageUrl.trim())) {
+      readyVariantIds.push(vid)
+    } else {
+      skippedNoParentCount += 1
+    }
+  }
+
+  if (!readyVariantIds.length) {
+    batchPhase.value = 'single'
+    ui.notify('第 1 阶段主图未成功出图，已自动跳过后续变体生图（未扣费）', 'info')
+    return
+  }
+
+  batchPhase.value = 'phase2-variants'
+  try {
+    const res = await startBatchGenerateAssetImages(props.project.id, {
+      assetIds: readyVariantIds,
+      modelId: wave.modelId,
+      tier: wave.tier,
+      ratio: wave.ratio,
+      useParentReference: true,
+    })
+    trackImageBatchJobs(res.jobs, {
+      modelId: wave.modelId,
+      tier: wave.tier,
+      ratio: wave.ratio,
+    })
+    const detail = await getProjectDetail(props.project.id)
+    studio.hydrateProjectDetail(detail)
+    void auth.refreshBalance()
+    startBatchPolling()
+
+    const skippedHint = skippedNoParentCount > 0 ? `（另有 ${skippedNoParentCount} 项因主图失败已跳过）` : ''
+    ui.notify(
+      `主图已完成，已自动以主图垫图启动第 2 阶段变体生图 ${res.acceptedCount} 张${skippedHint}`,
+      'success',
+    )
+  } catch (error) {
+    batchPhase.value = 'single'
+    ui.notify(`自动启动第 2 阶段变体生图失败：${apiErrorMessage(error)}`, 'error')
+  }
+}
+
 const {
   tracker: batchTracker,
   summary: batchSummary,
   trackJobs: trackImageBatchJobs,
   startPolling: startBatchPolling,
   failedReason: failedReasonForId,
-  dismiss: dismissBatchBanner,
+  dismiss: rawDismissBatchBanner,
 } = useBatchJobTracker<ImageBatchMeta>({
   jobType: 'asset_image',
   pollIntervalMs: 3000,
@@ -181,14 +255,28 @@ const {
     (detail.activeJobs ?? []).some((j) => j.jobType === 'asset_image')
     || detail.assets.some((a) => a.imageStatus === 'generating'),
   onBatchComplete: ({ okCount, failCount }) => {
+    if (pendingVariantWave.value) {
+      const nextWave = pendingVariantWave.value
+      pendingVariantWave.value = null
+      void launchPendingVariantWave(nextWave)
+      return
+    }
+    const phasePrefix = batchPhase.value === 'phase2-variants' ? '第 2 阶段变体' : '批量'
+    batchPhase.value = 'single'
     ui.notify(
       failCount > 0
-        ? `批量生图结束：成功 ${okCount} 张，失败 ${failCount} 张（失败已自动退还冻结积分）`
-        : `批量生图完成：共生成 ${okCount} 张资产图片`,
+        ? `${phasePrefix}生图结束：成功 ${okCount} 张，失败 ${failCount} 张（失败已自动退还冻结积分）`
+        : `${phasePrefix}生图完成：共生成 ${okCount} 张资产图片`,
       failCount > 0 ? 'info' : 'success',
     )
   },
 })
+
+function dismissBatchBanner() {
+  pendingVariantWave.value = null
+  batchPhase.value = 'single'
+  rawDismissBatchBanner()
+}
 
 function isAssetGenerating(asset: StudioAsset) {
   return !!asset.backendId && activeImageAssetIds.value.has(asset.backendId)
@@ -336,6 +424,7 @@ function openBatchFromSelection() {
 
 async function submitBatchImageGeneration(payload: {
   assetIds: string[]
+  wave2VariantIds?: string[]
   modelId: string
   tier: 'web' | '1k' | '2k' | '4k'
   ratio?: string
@@ -343,10 +432,30 @@ async function submitBatchImageGeneration(payload: {
   if (batchSubmitting.value) return
   batchSubmitting.value = true
   try {
-    const res = await startBatchGenerateAssetImages(props.project.id, payload)
+    const wave2Ids = payload.wave2VariantIds ?? []
+    const res = await startBatchGenerateAssetImages(props.project.id, {
+      assetIds: payload.assetIds,
+      modelId: payload.modelId,
+      tier: payload.tier,
+      ratio: payload.ratio,
+      useParentReference: true,
+    })
     batchOpen.value = false
     selectMode.value = false
     checkedAssetIds.value = []
+
+    if (wave2Ids.length > 0) {
+      pendingVariantWave.value = {
+        assetIds: wave2Ids,
+        modelId: payload.modelId,
+        tier: payload.tier,
+        ratio: payload.ratio,
+      }
+      batchPhase.value = 'phase1-roots'
+    } else {
+      pendingVariantWave.value = null
+      batchPhase.value = 'single'
+    }
 
     trackImageBatchJobs(res.jobs, {
       modelId: payload.modelId,
@@ -360,8 +469,11 @@ async function submitBatchImageGeneration(payload: {
     startBatchPolling()
 
     const skipHint = res.skipped.length ? `，已自动跳过 ${res.skipped.length} 项` : ''
+    const phaseHint = wave2Ids.length > 0
+      ? `（第 1/2 阶段主图，完成后将自动垫图生成 ${wave2Ids.length} 张变体）`
+      : ''
     ui.notify(
-      `已提交 ${res.acceptedCount} 项批量生图任务（预冻结 ${Number(Number(res.totalFrozenCredits).toFixed(2))} 积分${skipHint}），后台并发生成中`,
+      `已提交 ${res.acceptedCount} 项批量生图任务${phaseHint}（预冻结 ${Number(Number(res.totalFrozenCredits).toFixed(2))} 积分${skipHint}）`,
       'success',
     )
   } catch (error) {
@@ -672,7 +784,16 @@ async function deleteAsset() {
           <CheckCircle2 v-else-if="batchSummary.failed === 0" :size="15" aria-hidden="true" />
           <AlertCircle v-else :size="15" aria-hidden="true" />
           <template v-if="!batchSummary.finished">
-            后台批量生图中：已完成 {{ batchSummary.succeeded }} / {{ batchSummary.total }}
+            <template v-if="batchPhase === 'phase1-roots'">
+              第 1/2 阶段 · 主图生成中：已完成 {{ batchSummary.succeeded }} / {{ batchSummary.total }}
+              <template v-if="pendingVariantWave">（完成后自动垫图生 {{ pendingVariantWave.assetIds.length }} 张变体）</template>
+            </template>
+            <template v-else-if="batchPhase === 'phase2-variants'">
+              第 2/2 阶段 · 变体垫图生成中：已完成 {{ batchSummary.succeeded }} / {{ batchSummary.total }}
+            </template>
+            <template v-else>
+              后台批量生图中：已完成 {{ batchSummary.succeeded }} / {{ batchSummary.total }}
+            </template>
             <template v-if="batchSummary.running"> · 进行中 {{ batchSummary.running }}</template>
             <template v-if="batchSummary.failed"> · 失败 {{ batchSummary.failed }}</template>
           </template>
@@ -681,6 +802,14 @@ async function deleteAsset() {
           </template>
         </span>
         <div class="studio-batch-banner-actions">
+          <UiButton
+            v-if="!batchSummary.finished && pendingVariantWave"
+            variant="ghost"
+            size="sm"
+            @click="cancelPendingVariantWave"
+          >
+            取消后续变体 ({{ pendingVariantWave.assetIds.length }})
+          </UiButton>
           <UiButton
             v-if="batchSummary.finished && batchSummary.failedIds.length"
             variant="outline"
@@ -936,6 +1065,7 @@ async function deleteAsset() {
 
     <StudioAssetEditor
       ref="editor"
+      :project-id="project.id"
       :image-models="imageModels"
       :project-assets="project.assets ?? []"
       :persisted="project.persisted"

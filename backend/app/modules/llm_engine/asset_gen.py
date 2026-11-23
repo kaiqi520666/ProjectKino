@@ -3,6 +3,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from pydantic import Field
 from pydantic_ai import Agent, ModelRetry, PromptedOutput, RunContext, RunUsage
 from pydantic_ai.models import Model
 
@@ -11,8 +12,9 @@ from app.modules.llm_engine.provider import MODEL_SETTINGS
 from app.modules.llm_engine.schema import Asset, AssetKind, AssetResult, Record, ScriptResult, Text
 from app.modules.llm_engine.script_gen import ProgressCallback, _notify, prompt, skill_instructions
 
-MAX_CLUES_PER_ASSET = 4
+MAX_CLUES_PER_ASSET = 8
 MAX_CLUE_CHARS = 80
+MAX_VARIANTS_PER_ASSET = 3
 _SCENE_EMPTY = re.compile(
     r"(无人|空景|空无一人|没有人物|无人物|无任何人物|empty scene|no people)", re.IGNORECASE
 )
@@ -36,6 +38,37 @@ CHARACTER_SHEET_TEMPLATE = (
     "不要场景和道具。"
 )
 
+CHARACTER_VARIANT_SHEET_TEMPLATE = (
+    "严格参考参考图1中的同一人物（保持五官、脸型、年龄、肤色与面部识别锚点完全一致），"
+    "生成该人物的新造型角色三视图设定图，横版构图，纯白无缝背景，影棚柔光均匀照明。"
+    "画面左侧约五分之二宽度是该角色的大头照：正面平视，从头顶到肩膀，脸部清晰占满这一块，表情自然放松。"
+    "画面右侧约五分之三宽度是同一角色的三个身体视图，从左到右依次为正面、侧面（身体朝向画面左侧）、背面；"
+    "三个视图都只画脖子以下、头部不入画（类似服装展示的裁切构图），大小一致，肩线与脚底各自对齐，间距均匀，"
+    "脚完整入画，统一标准站姿：身体正直，双手自然下垂放在身体两侧，手里不拿任何东西，不做任何动作或手势，"
+    "脚下只有很淡的落地阴影。新造型设定：{subject}。"
+    "大头照和三个身体视图与参考图1是同一个人，仅按新造型设定替换服装、发型状态或表面痕迹；"
+    "人物描述里写到的动作、姿势和手持物品都不画出来，身体视图一律用上面的标准站姿。"
+    "画面里只有这一个角色，右侧三个身体视图都不画头部，不要任何文字、标注、姓名、编号、边框、分隔线、色块面板和水印，"
+    "不要场景和道具。"
+)
+
+
+def _format_variant_prompt(kind: AssetKind, raw_prompt: str) -> str:
+    cleaned = raw_prompt.strip().rstrip("。；;.")
+    if kind == "character":
+        return CHARACTER_VARIANT_SHEET_TEMPLATE.replace("{subject}", cleaned)
+    if "参考图" in cleaned:
+        return raw_prompt.strip()
+    if kind == "scene":
+        return (
+            "严格参考参考图1中的同一场景（保持建筑结构、空间布局、主要陈设与镜头视角一致），"
+            f"仅按以下状态调整时间、光影或表面变化：{raw_prompt.strip()}"
+        )
+    return (
+        "严格参考参考图1中的同一道具（保持主体造型、材质与比例一致），"
+        f"仅按以下状态调整外观或结构变化：{raw_prompt.strip()}"
+    )
+
 
 @dataclass(frozen=True)
 class InventoryItem:
@@ -54,11 +87,19 @@ class DesignContext:
     forbidden: tuple[str, ...]
 
 
+class VariantDesign(Record):
+    label: Text
+    description: Text
+    prompt: Text
+    episodes: list[int] = Field(default_factory=list)
+
+
 class AssetDesign(Record):
     id: Text
     description: Text
     prompt: Text
     voice: str = ""
+    variants: list[VariantDesign] = Field(default_factory=list)
 
 
 class DesignBatch(Record):
@@ -91,6 +132,7 @@ def inventory(script: ScriptResult) -> list[InventoryItem]:
         clues.setdefault(asset_id, [])
 
     for episode in script.episodes:
+        ep_prefix = f"第{episode.number}集"
         for scene in episode.scenes:
             touch(scene.sceneId, episode.number)
             for character in scene.characters:
@@ -99,21 +141,21 @@ def inventory(script: ScriptResult) -> list[InventoryItem]:
                 touch(prop, episode.number)
 
             if scene.lighting and scene.lighting.strip():
-                _add_clue(clues[scene.sceneId], f"光线：{scene.lighting.strip()}")
+                _add_clue(clues[scene.sceneId], f"{ep_prefix}·光线：{scene.lighting.strip()}")
             actions = [beat.action.strip() for beat in scene.flow if beat.action and beat.action.strip()]
             if actions:
-                _add_clue(clues[scene.sceneId], actions[0])
+                _add_clue(clues[scene.sceneId], f"{ep_prefix}：{actions[0]}")
             for action in actions:
                 for character in scene.characters:
                     card = characters.get(character)
                     if card and card.name in action:
-                        _add_clue(clues[character], action)
+                        _add_clue(clues[character], f"{ep_prefix}：{action}")
                 for prop in scene.props:
                     card = props.get(prop)
                     if card and card.name in action:
-                        _add_clue(clues[prop], action)
+                        _add_clue(clues[prop], f"{ep_prefix}：{action}")
                     else:
-                        _add_clue(prop_fallback_clues.setdefault(prop, []), action)
+                        _add_clue(prop_fallback_clues.setdefault(prop, []), f"{ep_prefix}：{action}")
 
     missing = [
         asset_id
@@ -179,6 +221,38 @@ def verify_designs(ctx: RunContext[DesignContext], batch: DesignBatch) -> Design
                 fail(f"道具 {design.id} 的生图提示词必须明确写出无手。")
             if not _PROP_SCALE.search(design.prompt):
                 fail(f"道具 {design.id} 的生图提示词必须写明尺度（手持级/桌面级/家具级尺度）。")
+        if len(design.variants) > MAX_VARIANTS_PER_ASSET:
+            fail(
+                f"资产 {design.id} 的变体数量超过了上限（最多 {MAX_VARIANTS_PER_ASSET} 个），"
+                "请只保留最核心的外观状态变化。"
+            )
+        seen_labels: set[str] = set()
+        for variant in design.variants:
+            label_key = variant.label.strip().lower()
+            if label_key in seen_labels:
+                fail(f"资产 {design.id} 的变体标签「{variant.label}」重复，请去重。")
+            seen_labels.add(label_key)
+            for name in ctx.deps.forbidden:
+                if name and name in variant.prompt:
+                    fail(
+                        f"资产 {design.id} 变体「{variant.label}」的生图提示词里出现了"
+                        f"角色名「{name}」，请删掉。"
+                    )
+            if ctx.deps.kind == "scene" and not _SCENE_EMPTY.search(variant.prompt):
+                fail(f"场景 {design.id} 变体「{variant.label}」的生图提示词必须明确写出无人空景。")
+            if ctx.deps.kind == "prop":
+                if not _PROP_WHITE_BG.search(variant.prompt):
+                    fail(
+                        f"道具 {design.id} 变体「{variant.label}」的生图提示词必须明确写出"
+                        "纯白背景或白底。"
+                    )
+                if not _PROP_NO_HANDS.search(variant.prompt):
+                    fail(f"道具 {design.id} 变体「{variant.label}」的生图提示词必须明确写出无手。")
+                if not _PROP_SCALE.search(variant.prompt):
+                    fail(
+                        f"道具 {design.id} 变体「{variant.label}」的生图提示词必须写明尺度"
+                        "（手持级/桌面级/家具级尺度）。"
+                    )
     record_gate("analyze-assets", True, meta=meta)
     return batch
 
@@ -226,6 +300,63 @@ async def design_kind(
     return {design.id: design for design in result.output.assets}
 
 
+class VariantPromptSuggestion(Record):
+    description: Text
+    prompt: Text
+
+
+_VARIANT_SUGGEST_INSTRUCTIONS = (
+    "你是 FrameDrama 影视短剧美术设定师。用户已有一个主资产（角色/场景/道具）设定，"
+    "现在需要为它创建一个特定状态的新变体（将在主图作为参考图1的基础上改图生成）。"
+    "请基于主资产设定、项目画风与用户指定的状态标签/补充说明，返回 JSON：\n"
+    "- description：1–2 句中文，说明该变体与主资产的外观差异及适用情景；\n"
+    "- prompt：高质量中文生图提示词，要求：\n"
+    "  * 若为角色：只写人物的新造型描述（服装、发型状态、表面痕迹与结尾画风句），"
+    "不写角色名，不写三视图/白底/站姿等版式词（程序会自动套模板并锁脸）；\n"
+    "  * 若为场景：必须包含「无人空景，画面中没有任何人物或剪影」，"
+    "重点写清变化后的时间、光影、气候或陈设状态，不写角色名；\n"
+    "  * 若为道具：必须包含「纯白背景」「无手」和尺度短语"
+    "（手持级尺度/桌面级尺度/家具级尺度），重点写清状态变化，不写角色名。"
+)
+
+
+async def suggest_variant_prompt(
+    model: Model,
+    *,
+    kind: AssetKind,
+    name: str,
+    parent_description: str,
+    parent_prompt: str,
+    variant_label: str,
+    note: str = "",
+    settings_payload: dict | None = None,
+    usage: RunUsage | None = None,
+) -> VariantPromptSuggestion:
+    agent = Agent(
+        model,
+        output_type=PromptedOutput(VariantPromptSuggestion),
+        instructions=_VARIANT_SUGGEST_INSTRUCTIONS,
+        model_settings=MODEL_SETTINGS,
+        retries=1,
+    )
+    payload: dict = {
+        "kind": kind,
+        "name": name,
+        "parentDescription": parent_description,
+        "parentPrompt": parent_prompt,
+        "variantLabel": variant_label.strip(),
+    }
+    if note.strip():
+        payload["note"] = note.strip()
+    if settings_payload:
+        payload["settings"] = settings_payload
+    result = await agent.run(prompt(payload), usage=usage)
+    return VariantPromptSuggestion(
+        description=result.output.description.strip(),
+        prompt=_format_variant_prompt(kind, result.output.prompt),
+    )
+
+
 async def analyze_assets(
     model: Model,
     script: ScriptResult,
@@ -239,7 +370,12 @@ async def analyze_assets(
     names = [card.name for card in script.outline.characters]
     world = script.outline.world
     settings_payload = {**script.settings.model_dump(), "world": world.model_dump() if world else None}
-    existing_by_id = {asset.id: asset for asset in existing}
+    existing_roots = [asset for asset in existing if not asset.parentId]
+    existing_by_id = {asset.id: asset for asset in existing_roots}
+    existing_variants_by_parent: dict[str, list[Asset]] = {}
+    for asset in existing:
+        if asset.parentId:
+            existing_variants_by_parent.setdefault(asset.parentId, []).append(asset)
     reused_ids = {
         item.id for item in items if item.id in existing_by_id and existing_by_id[item.id].kind == item.kind
     }
@@ -250,7 +386,7 @@ async def analyze_assets(
         label = (
             f"正在并发增量设计 {len(to_design)} 项新资产（保留已有 {len(reused_ids)} 项）"
             if reused_ids
-            else f"正在并发设计 {len(to_design)} 项角色、场景与道具设定"
+            else f"正在并发设计 {len(to_design)} 项角色、场景与道具设定（含自动变体识别）"
         )
         await _notify(on_progress, 2, 3, label, 45)
         batches = await asyncio.gather(
@@ -284,6 +420,20 @@ async def analyze_assets(
                     voice=prev.voice if item.kind == "character" else "",
                 )
             )
+            for prev_variant in existing_variants_by_parent.get(item.id, ()):
+                assets.append(
+                    Asset(
+                        id=prev_variant.id,
+                        kind=item.kind,
+                        name=prev_variant.name,
+                        description=prev_variant.description,
+                        prompt=prev_variant.prompt,
+                        episodeNumbers=list(prev_variant.episodeNumbers) or list(item.episodes),
+                        voice="",
+                        parentId=item.id,
+                        variantLabel=prev_variant.variantLabel,
+                    )
+                )
             continue
         design = designs[item.id]
         assets.append(
@@ -301,5 +451,37 @@ async def analyze_assets(
                 voice=design.voice.strip() if item.kind == "character" else "",
             )
         )
-    await _notify(on_progress, 3, 3, f"已完成 {len(assets)} 项资产识别", 98)
+        allowed_eps = set(item.episodes)
+        seen_variant_labels: set[str] = set()
+        variant_idx = 0
+        for variant in design.variants:
+            if variant_idx >= MAX_VARIANTS_PER_ASSET:
+                break
+            v_label = variant.label.strip()[:60]
+            if not v_label or v_label.lower() in seen_variant_labels:
+                continue
+            seen_variant_labels.add(v_label.lower())
+            variant_idx += 1
+            v_eps = sorted({ep for ep in variant.episodes if ep in allowed_eps}) or list(item.episodes)
+            assets.append(
+                Asset(
+                    id=f"{item.id}_v{variant_idx}",
+                    kind=item.kind,
+                    name=item.name,
+                    description=variant.description,
+                    prompt=_format_variant_prompt(item.kind, variant.prompt),
+                    episodeNumbers=v_eps,
+                    voice="",
+                    parentId=item.id,
+                    variantLabel=v_label,
+                )
+            )
+    root_count = sum(1 for a in assets if not a.parentId)
+    variant_count = len(assets) - root_count
+    done_label = (
+        f"已完成 {root_count} 项主资产与 {variant_count} 项自动变体识别"
+        if variant_count > 0
+        else f"已完成 {root_count} 项资产识别"
+    )
+    await _notify(on_progress, 3, 3, done_label, 98)
     return AssetResult(settings=script.settings, assets=assets)

@@ -181,6 +181,16 @@ export function startGenerateAssetImage(
   )
 }
 
+export function suggestVariantPromptApi(
+  projectId: string,
+  parentAssetId: string,
+  body: { variantLabel: string; note?: string },
+) {
+  return unwrap<{ description: string; prompt: string }>(
+    http.post(`/projects/${projectId}/assets/${parentAssetId}/suggest-variant-prompt`, body),
+  )
+}
+
 export function startBatchGenerateAssetImages(
   projectId: string,
   body: {

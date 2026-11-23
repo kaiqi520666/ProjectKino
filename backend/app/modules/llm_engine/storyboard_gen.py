@@ -9,6 +9,7 @@ from pydantic_ai.models import Model
 from app.modules.llm_engine.gates import record_gate
 from app.modules.llm_engine.provider import MODEL_SETTINGS
 from app.modules.llm_engine.schema import (
+    Asset,
     AssetResult,
     Beat,
     Episode,
@@ -73,6 +74,8 @@ class DesignContext:
     expected: dict[int, tuple[int, ...]]
     available: dict[int, frozenset[str]]
     forbidden_names: tuple[str, ...]
+    root_by_id: dict[str, str]
+    kind_by_id: dict[str, Literal["character", "scene", "prop"]]
     episode: int = 0
 
 
@@ -149,14 +152,38 @@ def _dialogue(cut: Cut, names: dict[str, str]) -> str:
     return "；".join(parts) if parts else "台词：{}"
 
 
-def _asset_kind(asset_id: str) -> Literal["character", "scene", "prop"]:
+def _asset_kind(
+    asset_id: str, catalog: dict[str, Asset] | None = None
+) -> Literal["character", "scene", "prop"]:
+    if catalog and asset_id in catalog:
+        return catalog[asset_id].kind
     kind = {"C": "character", "S": "scene", "P": "prop"}.get(asset_id[:1], "prop")
     return kind  # type: ignore[return-value]
 
 
-def _reference_order(ids: list[str]) -> list[str]:
-    order = {"C": 0, "S": 1, "P": 2}
-    return sorted(ids, key=lambda asset_id: (order.get(asset_id[:1], 3), ids.index(asset_id)))
+def _root_id(asset_id: str, catalog: dict[str, Asset]) -> str:
+    asset = catalog.get(asset_id)
+    if asset and asset.parentId:
+        return asset.parentId
+    return asset_id
+
+
+def _display_asset_name(
+    asset_id: str, catalog: dict[str, Asset], outline_names: dict[str, str]
+) -> str:
+    asset = catalog.get(asset_id)
+    root_id = _root_id(asset_id, catalog)
+    base_name = outline_names.get(root_id) or (asset.name if asset else asset_id)
+    label = (asset.variantLabel or "").strip() if asset else ""
+    return f"{base_name}（{label}）" if label else base_name
+
+
+def _reference_order(ids: list[str], catalog: dict[str, Asset] | None = None) -> list[str]:
+    order = {"character": 0, "scene": 1, "prop": 2}
+    return sorted(
+        ids,
+        key=lambda asset_id: (order.get(_asset_kind(asset_id, catalog), 3), ids.index(asset_id)),
+    )
 
 
 def compose_seedance(
@@ -166,13 +193,19 @@ def compose_seedance(
     character_names = {card.id: card.name for card in script.outline.characters}
     prop_names = {prop.id: prop.name for prop in script.outline.props}
     names = {**scene_names, **character_names, **prop_names}
+    catalog = {asset.id: asset for asset in assets.assets}
 
-    ordered = _reference_order(design.references)
+    ordered = _reference_order(design.references, catalog)
     blocks: list[str] = [
-        f"@[图片{number}] = {names.get(asset_id, asset_id)}" for number, asset_id in enumerate(ordered, 1)
+        f"@[图片{number}] = {_display_asset_name(asset_id, catalog, names)}"
+        for number, asset_id in enumerate(ordered, 1)
     ]
 
     voices = {asset.id: asset.voice for asset in assets.assets if asset.voice}
+    ordered_slot_by_root: dict[str, tuple[int, str]] = {}
+    for number, asset_id in enumerate(ordered, 1):
+        ordered_slot_by_root.setdefault(_root_id(asset_id, catalog), (number, asset_id))
+
     speaker_ids: list[str] = []
     for cut in segment.cuts:
         for beat in cut.beats:
@@ -184,12 +217,15 @@ def compose_seedance(
             ):
                 speaker_ids.append(beat.speaker)
     voiced: list[str] = []
-    for asset_id in speaker_ids:
-        if asset_id not in voices:
+    for speaker_id in speaker_ids:
+        slot = ordered_slot_by_root.get(speaker_id)
+        matched_asset_id = slot[1] if slot else speaker_id
+        voice_text = voices.get(matched_asset_id) or voices.get(speaker_id)
+        if not voice_text:
             continue
-        name = names.get(asset_id, asset_id)
-        prefix = f"@[图片{ordered.index(asset_id) + 1}] " if asset_id in ordered else ""
-        voiced.append(f"{prefix}{name}：{voices[asset_id]}")
+        name = names.get(speaker_id, speaker_id)
+        prefix = f"@[图片{slot[0]}] " if slot is not None else ""
+        voiced.append(f"{prefix}{name}：{voice_text}")
     if voiced:
         blocks.extend(["", "【角色音色】", *voiced])
 
@@ -256,7 +292,17 @@ def verify_designs(ctx: RunContext[DesignContext], design: StoryboardDesign) -> 
             _retry(f"第 {segment.id} 段引用了本段没有的资产：{unknown}，可选：{sorted(available)}", meta)
         if len(set(segment.references)) != len(segment.references):
             _retry(f"第 {segment.id} 段的 references 有重复。", meta)
-        if not any(asset_id.startswith("S") for asset_id in segment.references):
+        roots_picked = [ctx.deps.root_by_id.get(aid, aid) for aid in segment.references]
+        if len(set(roots_picked)) != len(roots_picked):
+            _retry(
+                f"第 {segment.id} 段的 references 同时选中了同一资产的多个版本（主图与变体），"
+                "同一角色/场景/道具在单段内只能选 1 个最匹配当前状态的版本。",
+                meta,
+            )
+        if not any(
+            ctx.deps.kind_by_id.get(asset_id, _asset_kind(asset_id)) == "scene"
+            for asset_id in segment.references
+        ):
             _retry(f"第 {segment.id} 段的 references 必须包含场景。", meta)
         for cut in segment.cuts:
             for name in ctx.deps.forbidden_names:
@@ -371,12 +417,61 @@ async def write_designs(
     segments: list[Segment],
     script: ScriptResult,
     *,
+    assets: AssetResult | None = None,
     usage: RunUsage | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> dict[int, SegmentDesign]:
     names = {card.id: card.name for card in script.outline.characters}
     scene_names = {card.id: card.name for card in script.outline.scenes}
     prop_names = {prop.id: prop.name for prop in script.outline.props}
+    outline_names = {**names, **scene_names, **prop_names}
+
+    catalog: dict[str, Asset] = {asset.id: asset for asset in assets.assets} if assets else {}
+    variants_by_parent: dict[str, list[Asset]] = {}
+    for asset in catalog.values():
+        if asset.parentId:
+            variants_by_parent.setdefault(asset.parentId, []).append(asset)
+    root_by_id: dict[str, str] = {aid: _root_id(aid, catalog) for aid in catalog}
+    kind_by_id: dict[str, Literal["character", "scene", "prop"]] = {
+        aid: _asset_kind(aid, catalog) for aid in catalog
+    }
+
+    def build_segment_asset_options(segment: Segment) -> tuple[list[dict], frozenset[str]]:
+        options: list[dict] = []
+        allowed: list[str] = []
+        for root_id in segment_asset_ids(segment):
+            root_asset = catalog.get(root_id)
+            root_kind = _asset_kind(root_id, catalog)
+            root_by_id.setdefault(root_id, root_id)
+            kind_by_id.setdefault(root_id, root_kind)
+            variants = variants_by_parent.get(root_id, [])
+            entry: dict = {
+                "id": root_id,
+                "name": outline_names.get(root_id, root_asset.name if root_asset else root_id),
+                "kind": root_kind,
+            }
+            if variants:
+                entry["state"] = "默认主造型"
+                if root_asset and root_asset.description:
+                    entry["description"] = root_asset.description
+            options.append(entry)
+            allowed.append(root_id)
+            for variant in variants:
+                root_by_id[variant.id] = root_id
+                kind_by_id[variant.id] = variant.kind
+                options.append(
+                    {
+                        "id": variant.id,
+                        "parentId": root_id,
+                        "name": variant.name,
+                        "variantLabel": variant.variantLabel,
+                        "kind": variant.kind,
+                        "description": variant.description,
+                    }
+                )
+                allowed.append(variant.id)
+        return options, frozenset(allowed)
+
     agent = Agent(
         model,
         deps_type=DesignContext,
@@ -400,6 +495,32 @@ async def write_designs(
             f"正在设计第 {episode.number} 集分镜第 {batch_idx}/{total_batches} 批",
             pct,
         )
+        batch_segments_payload: list[dict] = []
+        batch_available: dict[int, frozenset[str]] = {}
+        for segment in batch:
+            seg_assets, seg_allowed = build_segment_asset_options(segment)
+            batch_available[segment.index] = seg_allowed
+            seg_payload: dict = {
+                "id": segment.index,
+                "sceneId": segment.scene.sceneId,
+                "durationSeconds": segment.seconds,
+                "scene": scene_names.get(segment.scene.sceneId, segment.scene.sceneId),
+                "characters": [names.get(c, c) for c in segment.scene.characters],
+                "props": [prop_names.get(p, p) for p in segment.scene.props],
+                "assets": seg_assets,
+                "cuts": [
+                    {
+                        "index": cut.index,
+                        "seconds": cut.seconds,
+                        "beats": [_beat_payload(beat, names) for beat in cut.beats],
+                    }
+                    for cut in segment.cuts
+                ],
+            }
+            if segment.scene.lighting and segment.scene.lighting.strip():
+                seg_payload["lighting"] = segment.scene.lighting.strip()
+            batch_segments_payload.append(seg_payload)
+
         payload: dict = {
             "episode": episode.number,
             "settings": {
@@ -408,29 +529,7 @@ async def write_designs(
             },
             "maxSegmentDuration": script.settings.maxSegmentDuration,
             "cutSeconds": {"min": MIN_CUT_SECONDS, "max": MAX_CUT_SECONDS},
-            "segments": [
-                {
-                    "id": segment.index,
-                    "sceneId": segment.scene.sceneId,
-                    "durationSeconds": segment.seconds,
-                    "scene": scene_names.get(segment.scene.sceneId, segment.scene.sceneId),
-                    "characters": [names.get(c, c) for c in segment.scene.characters],
-                    "props": [prop_names.get(p, p) for p in segment.scene.props],
-                    "assets": [
-                        {"id": aid, "name": names.get(aid, aid), "kind": _asset_kind(aid)}
-                        for aid in segment_asset_ids(segment)
-                    ],
-                    "cuts": [
-                        {
-                            "index": cut.index,
-                            "seconds": cut.seconds,
-                            "beats": [_beat_payload(beat, names) for beat in cut.beats],
-                        }
-                        for cut in segment.cuts
-                    ],
-                }
-                for segment in batch
-            ],
+            "segments": batch_segments_payload,
         }
         if previous_blocking is not None:
             payload["previousBlocking"] = previous_blocking
@@ -438,8 +537,10 @@ async def write_designs(
             prompt(payload),
             deps=DesignContext(
                 {s.index: tuple(c.index for c in s.cuts) for s in batch},
-                {s.index: frozenset(segment_asset_ids(s)) for s in batch},
+                batch_available,
                 tuple(c.name for c in script.outline.characters),
+                root_by_id=root_by_id,
+                kind_by_id=kind_by_id,
                 episode=episode.number,
             ),
             usage=usage,
@@ -466,7 +567,9 @@ async def storyboard_episode(
 ) -> EpisodeStoryboard:
     cap = script.settings.maxSegmentDuration
     segments = split_episode(episode, cap)
-    designs = await write_designs(model, episode, segments, script, usage=usage, on_progress=on_progress)
+    designs = await write_designs(
+        model, episode, segments, script, assets=assets, usage=usage, on_progress=on_progress
+    )
 
     catalog = {asset.id: asset for asset in assets.assets}
     used = episode_asset_ids(episode)
@@ -480,10 +583,12 @@ async def storyboard_episode(
         **{card.id: card.name for card in script.outline.scenes},
         **{prop.id: prop.name for prop in script.outline.props},
     }
+    referenced_in_episode: list[str] = []
     for segment in segments:
         design = designs[segment.index]
         by_index = {cut.index: cut for cut in design.cuts}
-        ordered = _reference_order(design.references)
+        ordered = _reference_order(design.references, catalog)
+        referenced_in_episode.extend(ordered)
         clips.append(
             StoryboardClip(
                 id=segment.index,
@@ -494,8 +599,8 @@ async def storyboard_episode(
                     StoryboardReference(
                         index=position + 1,
                         assetId=asset_id,
-                        name=names.get(asset_id, asset_id),
-                        kind=_asset_kind(asset_id),
+                        name=_display_asset_name(asset_id, catalog, names),
+                        kind=_asset_kind(asset_id, catalog),
                     )
                     for position, asset_id in enumerate(ordered)
                 ],
@@ -515,9 +620,18 @@ async def storyboard_episode(
             )
         )
 
+    episode_asset_refs = list(dict.fromkeys([*used, *referenced_in_episode]))
     return EpisodeStoryboard(
         number=episode.number,
-        assets=[StoryboardAssetRef(id=aid, kind=catalog[aid].kind, name=catalog[aid].name) for aid in used],
+        assets=[
+            StoryboardAssetRef(
+                id=aid,
+                kind=_asset_kind(aid, catalog),
+                name=_display_asset_name(aid, catalog, names),
+            )
+            for aid in episode_asset_refs
+            if aid in catalog
+        ],
         clips=clips,
     )
 

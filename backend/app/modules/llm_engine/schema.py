@@ -132,6 +132,8 @@ class Asset(Record):
     prompt: Text
     episodeNumbers: list[PositiveInt]
     voice: str = ""
+    parentId: str | None = None
+    variantLabel: str = ""
 
 
 class AssetResult(Record):

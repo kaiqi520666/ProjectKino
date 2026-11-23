@@ -1559,11 +1559,18 @@ async def test_persist_extracted_assets_promotes_variants_and_catalog_excludes_v
 
     session = _ExtractSession()
 
-    # 1. build_asset_result_from_db 仅返回主资产，变体不进入分镜 catalog
+    # 1. build_asset_result_from_db 默认仅返回主资产，include_variants=True 返回主资产+变体
     catalog_result = await build_asset_result_from_db(session, project)  # type: ignore[arg-type]
     assert [item.id for item in catalog_result.assets] == ["C01", "C02"]
+    full_catalog = await build_asset_result_from_db(
+        session, project, include_variants=True
+    )  # type: ignore[arg-type]
+    assert {item.id for item in full_catalog.assets} == {"C01", "C02", "C_VAR1", "C_OLDV1", "C_OLDV2"}
+    c_var1_item = next(item for item in full_catalog.assets if item.id == "C_VAR1")
+    assert c_var1_item.parentId == "C01"
+    assert c_var1_item.variantLabel == "雨衣"
 
-    # 2. 重新提取资产移除了 C02：C02 被删时，其最早变体 c02_v1 提拔为新主资产，c02_v2 重挂到 c02_v1
+    # 2. 重新提取资产移除了 C02，并为 C01 新增自动变体（且不重复创建已有同标签变体「雨衣」）
     next_result = AssetResult(
         settings=ProjectSettings.model_validate(settings_dict),
         assets=[
@@ -1575,16 +1582,41 @@ async def test_persist_extracted_assets_promotes_variants_and_catalog_excludes_v
                 prompt="默认提示词更新",
                 episodeNumbers=[1],
                 voice="",
-            )
+            ),
+            Asset(
+                id="C01_v1",
+                kind="character",
+                name="主角",
+                description="雨衣造型更新",
+                prompt="雨衣提示词更新",
+                episodeNumbers=[1],
+                voice="",
+                parentId="C01",
+                variantLabel="雨衣",
+            ),
+            Asset(
+                id="C01_v2",
+                kind="character",
+                name="主角",
+                description="晚宴新变体",
+                prompt="晚宴新提示词",
+                episodeNumbers=[1],
+                voice="",
+                parentId="C01",
+                variantLabel="晚宴礼服",
+            ),
         ],
     )
     await persist_extracted_assets(session, project, next_result)  # type: ignore[arg-type]
     assert c02.id not in store
     assert c02_v1.parent_asset_id is None
     assert c02_v2.parent_asset_id == c02_v1.id
-    # 未被移除的主资产及其变体保持完整
+    # 未被移除的主资产及其变体保持完整，同标签变体复用不重复，新变体正确挂载到 C01
     assert c01.id in store
     assert c01_v1.parent_asset_id == c01.id
+    c01_children = [row for row in store.values() if row.parent_asset_id == c01.id]
+    assert {row.variant_label for row in c01_children} == {"雨衣", "晚宴礼服"}
+    assert len(c01_children) == 2
 
 
 async def _async_return(value):

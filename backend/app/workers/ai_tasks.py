@@ -277,7 +277,11 @@ async def run_llm_job_core(
                     mode = str(payload.get("mode", "incremental"))
                     script_result = await build_script_result_from_db(session, project)
                     existing_assets = (
-                        (await build_asset_result_from_db(session, project)).assets
+                        (
+                            await build_asset_result_from_db(
+                                session, project, include_variants=True
+                            )
+                        ).assets
                         if mode == "incremental"
                         else []
                     )
@@ -299,7 +303,9 @@ async def run_llm_job_core(
                 elif job.job_type == "storyboard_generate":
                     ep_num = payload.get("episodeNumber")
                     script_result = await build_script_result_from_db(session, project)
-                    asset_result = await build_asset_result_from_db(session, project)
+                    asset_result = await build_asset_result_from_db(
+                        session, project, include_variants=True
+                    )
                     if not asset_result.assets:
                         raise AppError(400, "assets_required", "请先识别并生成项目资产后再生成分镜")
                     board = await storyboard(
