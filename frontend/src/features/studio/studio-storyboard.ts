@@ -1,3 +1,4 @@
+import type { JobOut, MediaHistoryItemOut } from './api-types.ts'
 import { defaultSegmentDuration } from './components/drama-creation.ts'
 import type { DramaSettings } from './components/drama-creation.ts'
 import type { StudioEpisode } from './studio-project.ts'
@@ -37,7 +38,12 @@ export interface StoryboardClip {
   cuts?: StoryboardCut[]
   previewUrl?: string
   videoUrl?: string
+  videoModelId?: string
   videoStatus?: string
+  videoHistory?: MediaHistoryItemOut[]
+  lastJobId?: string
+  lastJobStatus?: JobOut['status']
+  lastJobError?: string
 }
 
 export interface EpisodeStoryboard {

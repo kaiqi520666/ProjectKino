@@ -7,8 +7,10 @@ import {
   CheckCircle2,
   ChevronRight,
   Clapperboard,
+  Clock,
   Download,
   Film,
+  History,
   Loader2,
   Play,
   Plus,
@@ -18,6 +20,8 @@ import {
   X,
 } from 'lucide-vue-next'
 import EmptyState from '@/components/business/EmptyState.vue'
+import MediaHistoryDialog from '@/components/business/MediaHistoryDialog.vue'
+import type { MediaHistoryItem } from '@/components/business/MediaHistoryDialog.vue'
 import ImagePreview from '@/components/ui/ImagePreview.vue'
 import UiButton from '@/components/ui/UiButton.vue'
 import UiDialog from '@/components/ui/UiDialog.vue'
@@ -30,10 +34,12 @@ import {
   apiErrorMessage,
   createClipApi,
   deleteClipApi,
+  deleteClipVideoHistoryApi,
   getJob,
   getProjectDetail,
   isRetryableApiError,
   reorderClipsApi,
+  selectClipVideoHistoryApi,
   startBatchGenerateClipVideos,
   startComposeEpisode,
   startGenerateClipVideo,
@@ -95,8 +101,18 @@ const selectedVideoModelId = ref('')
 const selectedResolution = ref<'480p' | '720p' | '1080p'>('720p')
 const selectedRatio = ref(props.project.creation.settings.ratio || '16:9')
 const selectedDuration = ref(10)
+const clipHistoryOpen = ref(false)
+const clipHistorySelecting = ref(false)
+const clipHistoryDeletingId = ref<string | null>(null)
+const dismissedClipJobIds = ref<Set<string>>(new Set())
 let deleteTrigger: HTMLButtonElement | undefined
 const clipStrip = useTemplateRef<InstanceType<typeof EpisodeClipStrip>>('clipStrip')
+
+const videoModelNames = computed<Record<string, string>>(() => {
+  const map: Record<string, string> = {}
+  for (const model of videoModels.value) map[model.id] = model.displayName
+  return map
+})
 
 onMounted(async () => {
   await ensureModelCatalog()
@@ -206,8 +222,69 @@ function clipJobProgress(item: StoryboardClip): string {
   return '生成中'
 }
 
+function clipJobAlert(
+  item?: StoryboardClip,
+): { status: 'failed' | 'review'; message: string; jobId?: string } | null {
+  if (!item || isClipGenerating(item)) return null
+  const transient = failedReasonForClipId(item.backendId)
+  if (transient) {
+    return { status: 'failed', message: transient, jobId: item.lastJobId }
+  }
+  if (item.lastJobStatus === 'review' || item.lastJobStatus === 'failed') {
+    if (item.lastJobId && dismissedClipJobIds.value.has(item.lastJobId)) return null
+    return {
+      status: item.lastJobStatus,
+      message:
+        item.lastJobError
+        || (item.lastJobStatus === 'review'
+          ? '上游状态待后台核对，积分冻结中'
+          : '最近一次生视频失败，请重试'),
+      jobId: item.lastJobId,
+    }
+  }
+  return null
+}
+
+function dismissClipJobAlert(jobId?: string) {
+  if (!jobId) return
+  const next = new Set(dismissedClipJobIds.value)
+  next.add(jobId)
+  dismissedClipJobIds.value = next
+}
+
 function clipFailedReason(item: StoryboardClip): string {
-  return failedReasonForClipId(item.backendId)
+  return clipJobAlert(item)?.message ?? ''
+}
+
+async function handleSelectClipHistory(item: MediaHistoryItem) {
+  const target = clip.value
+  if (!target?.backendId || clipHistorySelecting.value) return
+  clipHistorySelecting.value = true
+  try {
+    const updated = await selectClipVideoHistoryApi(props.project.id, number.value, target.backendId, item.id)
+    studio.applyPersistedClip(props.project.id, number.value, updated)
+    clipHistoryOpen.value = false
+    ui.notify(`已将片段 ${target.id} 切换为所选历史视频`, 'success')
+  } catch (error) {
+    ui.notify(apiErrorMessage(error), 'error')
+  } finally {
+    clipHistorySelecting.value = false
+  }
+}
+
+async function handleDeleteClipHistory(item: MediaHistoryItem) {
+  const target = clip.value
+  if (!target?.backendId || clipHistoryDeletingId.value) return
+  clipHistoryDeletingId.value = item.id
+  try {
+    const updated = await deleteClipVideoHistoryApi(props.project.id, number.value, target.backendId, item.id)
+    studio.applyPersistedClip(props.project.id, number.value, updated)
+    ui.notify('已移除该条历史记录', 'info')
+  } catch (error) {
+    ui.notify(apiErrorMessage(error), 'error')
+  } finally {
+    clipHistoryDeletingId.value = null
+  }
 }
 
 const canCompose = computed(
@@ -932,6 +1009,29 @@ async function deleteClip() {
         </section>
 
         <section v-if="clip" class="episode-prompt" aria-label="片段提示词编辑">
+          <div
+            v-if="clipJobAlert(clip)"
+            class="episode-clip-job-banner"
+            :class="clipJobAlert(clip)?.status === 'review' ? 'is-review' : 'is-failed'"
+            :title="clipJobAlert(clip)?.message"
+          >
+            <Clock v-if="clipJobAlert(clip)?.status === 'review'" :size="14" aria-hidden="true" />
+            <AlertCircle v-else :size="14" aria-hidden="true" />
+            <span class="episode-clip-job-banner-text">
+              <strong>{{ clipJobAlert(clip)?.status === 'review' ? '最近重绘待后台核对（积分冻结中）' : '最近生视频失败' }}：</strong>
+              {{ clipJobAlert(clip)?.message }}
+            </span>
+            <button
+              v-if="clipJobAlert(clip)?.jobId"
+              type="button"
+              class="episode-clip-job-close"
+              aria-label="忽略本次提示"
+              title="忽略本次提示"
+              @click="dismissClipJobAlert(clipJobAlert(clip)?.jobId)"
+            >
+              <X :size="13" aria-hidden="true" />
+            </button>
+          </div>
           <UiTextarea
             :key="clip.id"
             :model-value="clip.prompt"
@@ -962,6 +1062,16 @@ async function deleteClip() {
               />
             </div>
             <div class="episode-video-controls">
+              <UiButton
+                v-if="project.persisted && clip.backendId && (clip.videoHistory?.length ?? 0) >= 2"
+                variant="outline"
+                size="sm"
+                :disabled="isClipGenerating(clip)"
+                @click="clipHistoryOpen = true"
+              >
+                <template #leading><History :size="14" aria-hidden="true" /></template>
+                历史 · {{ clip.videoHistory?.length }}
+              </UiButton>
               <div
                 class="episode-cta-split"
                 :class="{ 'is-solo': !estimatedVideoQuote || isClipGenerating(clip) }"
@@ -1067,6 +1177,20 @@ async function deleteClip() {
       :poster="previewClip.poster"
       :title="`片段 ${previewClip.id}`"
       autoplay
+    />
+
+    <MediaHistoryDialog
+      v-model:open="clipHistoryOpen"
+      kind="video"
+      :title="clip ? `片段 ${clip.id} · 历史视频` : '历史视频'"
+      :items="clip?.videoHistory ?? []"
+      :current-url="clip?.videoUrl"
+      :selecting="clipHistorySelecting"
+      :deleting-id="clipHistoryDeletingId"
+      :model-names="videoModelNames"
+      deletable
+      @select="handleSelectClipHistory"
+      @delete="handleDeleteClipHistory"
     />
 
     <UiDialog v-model:open="deleteOpen" title="删除片段" :description="`确定删除本集的片段 ${clipToDelete} 吗？`">
@@ -1325,6 +1449,44 @@ button.episode-asset-thumb { width: 100%; cursor: zoom-in; }
 .episode-cta-split.is-solo .episode-generate-btn.ui-button {
   border-radius: 9px;
 }
+.episode-clip-job-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.episode-clip-job-banner svg { flex: none; margin-top: 2px; }
+.episode-clip-job-banner.is-failed {
+  border: 1px solid color-mix(in srgb, var(--color-error) 35%, transparent);
+  background: color-mix(in srgb, var(--color-error) 10%, transparent);
+  color: var(--color-error);
+}
+.episode-clip-job-banner.is-review {
+  border: 1px solid color-mix(in srgb, var(--color-gold) 40%, transparent);
+  background: color-mix(in srgb, var(--color-gold) 10%, transparent);
+  color: var(--color-gold-soft);
+}
+.episode-clip-job-banner-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.episode-clip-job-close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  color: inherit;
+  opacity: 0.72;
+  cursor: pointer;
+}
+.episode-clip-job-close:hover { opacity: 1; background: rgb(255 255 255 / 8%); }
 .episode-clip-empty { grid-row: 1 / 3; align-self: center; }
 .episode-empty { align-self: center; }
 .picker-asset-grid {

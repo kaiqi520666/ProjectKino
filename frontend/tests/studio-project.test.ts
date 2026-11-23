@@ -391,6 +391,31 @@ test('hydrateProjectDetail maps persisted episodes, assets, storyboard reference
         episodeNumbers: [1],
         imageUrl: 'https://oss.example/framedrama/c01.png',
         imageStatus: 'ready',
+        imageHistory: [
+          {
+            id: 'h-1',
+            url: 'https://oss.example/framedrama/c01-old.png',
+            key: 'framedrama/c01-old.png',
+            source: 'ai' as const,
+            modelId: 'gpt-image-2',
+            tier: '1k',
+            ratio: '16:9',
+            createdAt: '2026-11-21T00:00:00Z',
+          },
+          {
+            id: 'h-2',
+            url: 'https://oss.example/framedrama/c01.png',
+            key: 'framedrama/c01.png',
+            source: 'ai' as const,
+            modelId: 'gpt-image-2',
+            tier: '2k',
+            ratio: '16:9',
+            createdAt: '2026-11-21T00:05:00Z',
+          },
+        ],
+        lastJobId: 'job-review-1',
+        lastJobStatus: 'review' as const,
+        lastJobError: '[HTTP 503] 上游超时待核对',
       },
     ],
     storyboards: {
@@ -404,6 +429,7 @@ test('hydrateProjectDetail maps persisted episodes, assets, storyboard reference
           promptCustomized: false,
           references: [{ index: 1, assetId: 'asset-uuid-1', assetCode: 'C01', name: '林晚', kind: 'character' as const }],
           videoStatus: 'none',
+          videoHistory: [],
         },
       ],
     },
@@ -417,6 +443,17 @@ test('hydrateProjectDetail maps persisted episodes, assets, storyboard reference
   assert.equal(hydrated.loadedDetail, true)
   assert.equal(hydrated.assets?.[0]?.id, 'C01')
   assert.equal(hydrated.assets?.[0]?.backendId, 'asset-uuid-1')
+  assert.equal(hydrated.assets?.[0]?.imageHistory?.length, 2)
+  assert.equal(hydrated.assets?.[0]?.lastJobStatus, 'review')
+  assert.equal(hydrated.assets?.[0]?.lastJobError, '[HTTP 503] 上游超时待核对')
   assert.equal(hydrated.storyboards?.[1]?.clips[0]?.backendId, 'clip-uuid-1')
   assert.equal(hydrated.storyboards?.[1]?.assets[0]?.imageUrl, 'https://oss.example/framedrama/c01.png')
+
+  store.applyPersistedAsset(detail.id, {
+    ...detail.assets[0],
+    imageUrl: 'https://oss.example/framedrama/c01-old.png',
+    imageTier: '1k',
+  })
+  assert.equal(hydrated.assets?.[0]?.imageUrl, 'https://oss.example/framedrama/c01-old.png')
+  assert.equal(hydrated.storyboards?.[1]?.assets[0]?.imageUrl, 'https://oss.example/framedrama/c01-old.png')
 })

@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, useId, useTemplateRef, watch } from 'vue'
-import { ArrowLeft, Download, FolderOpen, ImageIcon, RefreshCw, Save, Sparkles, Trash2, Upload } from 'lucide-vue-next'
-import UiButton from '@/components/ui/UiButton.vue'
+import { ArrowLeft, Download, FolderOpen, History, ImageIcon, RefreshCw, Save, Sparkles, Trash2, Upload } from 'lucide-vue-next'
 import ImagePreview from '@/components/ui/ImagePreview.vue'
+import UiAlert from '@/components/ui/UiAlert.vue'
+import UiButton from '@/components/ui/UiButton.vue'
 import UiDialog from '@/components/ui/UiDialog.vue'
 import UiInput from '@/components/ui/UiInput.vue'
 import UiSelect from '@/components/ui/UiSelect.vue'
@@ -34,6 +35,7 @@ const emit = defineEmits<{
     asset: StudioAsset,
     options: { modelId: string; tier: 'web' | '1k' | '2k' | '4k'; ratio: string; draft: StudioAssetDraft },
   ]
+  openHistory: [asset: StudioAsset]
 }>()
 
 const formId = useId()
@@ -219,6 +221,42 @@ function triggerAiImage() {
   })
 }
 
+const historyCount = computed(() => asset.value?.imageHistory?.length ?? 0)
+const canOpenHistory = computed(
+  () =>
+    props.persisted
+    && !!asset.value?.backendId
+    && (historyCount.value >= 2 || (!draft.value?.imageUrl && historyCount.value >= 1)),
+)
+const lastJobAlert = computed<{ tone: 'error' | 'warning'; title: string; message: string } | null>(() => {
+  if (props.generatingImage || !asset.value) return null
+  if (asset.value.lastJobStatus === 'review') {
+    return {
+      tone: 'warning',
+      title: '最近一次重绘待后台核对（积分冻结中）',
+      message: asset.value.lastJobError || '系统核对完成后将自动入库或退还冻结积分。',
+    }
+  }
+  if (asset.value.lastJobStatus === 'failed') {
+    return {
+      tone: 'error',
+      title: '最近一次重绘失败',
+      message: asset.value.lastJobError || '请检查提示词或稍后重试。',
+    }
+  }
+  return null
+})
+
+function syncAsset(updated: StudioAsset) {
+  if (!asset.value) return
+  if (asset.value.backendId !== updated.backendId && asset.value.id !== updated.id) return
+  asset.value = updated
+  if (draft.value) {
+    draft.value.imageUrl = updated.imageUrl
+    draft.value.imageKey = updated.imageKey
+  }
+}
+
 function submit() {
   if (!draft.value?.name.trim() || loadingImage.value) return
 
@@ -226,7 +264,7 @@ function submit() {
   else emit('create', kind.value, draft.value)
 }
 
-defineExpose({ create, edit, close })
+defineExpose({ create, edit, close, syncAsset })
 </script>
 
 <template>
@@ -314,10 +352,28 @@ defineExpose({ create, edit, close })
               <UiButton variant="outline" size="sm" :disabled="loadingImage" @click="picking = true">
                 <template #leading><FolderOpen :size="14" aria-hidden="true" /></template>资产库选择
               </UiButton>
+              <UiButton
+                v-if="canOpenHistory && asset"
+                variant="outline"
+                size="sm"
+                :disabled="loadingImage"
+                @click="emit('openHistory', asset)"
+              >
+                <template #leading><History :size="14" aria-hidden="true" /></template>历史 · {{ historyCount }}
+              </UiButton>
             </div>
           </div>
         </div>
         <div v-if="draft.imageUrl" class="asset-image-actions asset-image-actions--filled">
+          <UiButton
+            v-if="canOpenHistory && asset"
+            variant="outline"
+            size="sm"
+            :disabled="loadingImage || generatingImage"
+            @click="emit('openHistory', asset)"
+          >
+            <template #leading><History :size="14" aria-hidden="true" /></template>历史 · {{ historyCount }}
+          </UiButton>
           <UiButton variant="outline" size="sm" :disabled="loadingImage" @click="removeImage">
             <template #leading><Trash2 :size="14" aria-hidden="true" /></template>删除
           </UiButton>
@@ -328,6 +384,9 @@ defineExpose({ create, edit, close })
             <Download :size="14" aria-hidden="true" />下载
           </a>
         </div>
+        <UiAlert v-if="lastJobAlert" :tone="lastJobAlert.tone" :title="lastJobAlert.title">
+          {{ lastJobAlert.message }}
+        </UiAlert>
         <p v-if="imageError" class="ui-field-message is-error" role="alert">{{ imageError }}</p>
         <p v-else-if="imageNotice" class="asset-image-notice">{{ imageNotice }}</p>
       </div>

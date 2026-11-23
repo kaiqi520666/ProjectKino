@@ -113,6 +113,18 @@ export function deleteAssetApi(projectId: string, assetId: string) {
   return unwrap<{ deleted: boolean }>(http.delete(`/projects/${projectId}/assets/${assetId}`))
 }
 
+export function selectAssetImageHistoryApi(projectId: string, assetId: string, historyId: string) {
+  return unwrap<PersistedAssetOut>(
+    http.post(`/projects/${projectId}/assets/${assetId}/history/select`, { historyId }),
+  )
+}
+
+export function deleteAssetImageHistoryApi(projectId: string, assetId: string, historyId: string) {
+  return unwrap<PersistedAssetOut>(
+    http.delete(`/projects/${projectId}/assets/${assetId}/history/${encodeURIComponent(historyId)}`),
+  )
+}
+
 export function getModelCatalog() {
   return unwrap<ModelCatalogOut>(http.get('/models'))
 }
@@ -241,6 +253,32 @@ export function deleteClipApi(projectId: string, clipId: string) {
 export function reorderClipsApi(projectId: string, episodeNumber: number, clipIds: string[]) {
   return unwrap<PersistedClipOut[]>(
     http.put(`/projects/${projectId}/episodes/${episodeNumber}/clips/reorder`, { clipIds }),
+  )
+}
+
+export function selectClipVideoHistoryApi(
+  projectId: string,
+  episodeNumber: number,
+  clipId: string,
+  historyId: string,
+) {
+  return unwrap<PersistedClipOut>(
+    http.post(`/projects/${projectId}/episodes/${episodeNumber}/clips/${clipId}/history/select`, {
+      historyId,
+    }),
+  )
+}
+
+export function deleteClipVideoHistoryApi(
+  projectId: string,
+  episodeNumber: number,
+  clipId: string,
+  historyId: string,
+) {
+  return unwrap<PersistedClipOut>(
+    http.delete(
+      `/projects/${projectId}/episodes/${episodeNumber}/clips/${clipId}/history/${encodeURIComponent(historyId)}`,
+    ),
   )
 }
 

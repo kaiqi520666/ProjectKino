@@ -1,3 +1,5 @@
+import type { JobOut, MediaHistoryItemOut } from './api-types.ts'
+
 export const assetKindOptions = [
   { value: 'character', label: '角色' },
   { value: 'scene', label: '场景' },
@@ -19,6 +21,10 @@ export interface StudioAsset {
   imageModelId?: string
   imageTier?: string
   imageStatus?: string
+  imageHistory?: MediaHistoryItemOut[]
+  lastJobId?: string
+  lastJobStatus?: JobOut['status']
+  lastJobError?: string
 }
 
 export type StudioAssetDraft = Pick<StudioAsset, 'name' | 'description' | 'prompt' | 'imageUrl' | 'imageKey' | 'voice'>

@@ -7,6 +7,8 @@ import type {
   BackendEpisode,
   BackendScene,
   BackendSettings,
+  PersistedAssetOut,
+  PersistedClipOut,
   ProjectDetailOut,
   ProjectSummaryOut,
   ScriptResult,
@@ -153,6 +155,10 @@ export const useStudioStore = defineStore('studio', () => {
       ...(item.imageModelId ? { imageModelId: item.imageModelId } : {}),
       ...(item.imageTier ? { imageTier: item.imageTier } : {}),
       imageStatus: item.imageStatus,
+      imageHistory: item.imageHistory ?? [],
+      ...(item.lastJobId ? { lastJobId: item.lastJobId } : {}),
+      ...(item.lastJobStatus ? { lastJobStatus: item.lastJobStatus } : {}),
+      ...(item.lastJobError ? { lastJobError: item.lastJobError } : {}),
     }))
 
     const assetResult: AssetResult | undefined = detail.assets.length
@@ -207,7 +213,12 @@ export const useStudioStore = defineStore('studio', () => {
           cuts: clip.cuts ?? undefined,
           previewUrl: clip.previewUrl ?? undefined,
           videoUrl: clip.videoUrl ?? undefined,
+          videoModelId: clip.videoModelId ?? undefined,
           videoStatus: clip.videoStatus,
+          videoHistory: clip.videoHistory ?? [],
+          lastJobId: clip.lastJobId ?? undefined,
+          lastJobStatus: clip.lastJobStatus ?? undefined,
+          lastJobError: clip.lastJobError ?? undefined,
         }
       })
 
@@ -636,9 +647,61 @@ export const useStudioStore = defineStore('studio', () => {
     return true
   }
 
+  function applyPersistedAsset(projectId: string, persisted: PersistedAssetOut) {
+    const project = getProject(projectId)
+    if (!project?.assets) return
+    const idx = project.assets.findIndex(
+      (item) => item.backendId === persisted.id || item.id === persisted.assetCode,
+    )
+    if (idx < 0) return
+    const nextAsset: StudioAsset = {
+      id: persisted.assetCode,
+      backendId: persisted.id,
+      kind: persisted.kind,
+      name: persisted.name,
+      description: persisted.description,
+      prompt: persisted.prompt,
+      ...(persisted.voice ? { voice: persisted.voice } : {}),
+      ...(persisted.imageUrl ? { imageUrl: persisted.imageUrl } : {}),
+      ...(persisted.imageModelId ? { imageModelId: persisted.imageModelId } : {}),
+      ...(persisted.imageTier ? { imageTier: persisted.imageTier } : {}),
+      imageStatus: persisted.imageStatus,
+      imageHistory: persisted.imageHistory ?? [],
+      ...(persisted.lastJobId ? { lastJobId: persisted.lastJobId } : {}),
+      ...(persisted.lastJobStatus ? { lastJobStatus: persisted.lastJobStatus } : {}),
+      ...(persisted.lastJobError ? { lastJobError: persisted.lastJobError } : {}),
+    }
+    project.assets[idx] = nextAsset
+    if (project.storyboards) {
+      for (const board of Object.values(project.storyboards)) {
+        if (!board) continue
+        for (const sbAsset of board.assets) {
+          if (sbAsset.id === nextAsset.id) {
+            sbAsset.name = nextAsset.name
+            sbAsset.imageUrl = nextAsset.imageUrl
+          }
+        }
+      }
+    }
+  }
+
+  function applyPersistedClip(projectId: string, episodeNumber: number, persisted: PersistedClipOut) {
+    const clips = getProject(projectId)?.storyboards?.[episodeNumber]?.clips
+    if (!clips) return
+    const clip = clips.find((item) => item.backendId === persisted.id || item.id === persisted.clipIndex)
+    if (!clip) return
+    clip.videoUrl = persisted.videoUrl ?? undefined
+    clip.videoModelId = persisted.videoModelId ?? undefined
+    clip.videoStatus = persisted.videoStatus
+    clip.videoHistory = persisted.videoHistory ?? []
+    clip.lastJobId = persisted.lastJobId ?? undefined
+    clip.lastJobStatus = persisted.lastJobStatus ?? undefined
+    clip.lastJobError = persisted.lastJobError ?? undefined
+  }
+
   return {
     projects, createProject, createProjectFromScript, syncProjectSummaries, hydrateProjectDetail, clearProjects, removeProject, replaceScript, replaceEpisode, applyAppendedEpisode, getProject, renameProject, appendEpisode, saveEpisode, saveStructuredEpisode, confirmScript,
-    applyAssets, applyStoryboard,
+    applyAssets, applyStoryboard, applyPersistedAsset, applyPersistedClip,
     loadExampleAssets, createAsset, saveAsset, removeAsset, generateExampleStoryboard, saveClipPrompt, saveClipDuration, reorderClips, appendClip, removeClip,
   }
 })

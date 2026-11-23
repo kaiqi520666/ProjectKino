@@ -222,6 +222,20 @@ export interface PersistedEpisodeOut {
   composedDuration?: number | null
 }
 
+export interface MediaHistoryItemOut {
+  id: string
+  url: string
+  key?: string | null
+  source: 'ai' | 'upload' | 'rescue'
+  jobId?: string | null
+  modelId?: string | null
+  tier?: string | null
+  resolution?: string | null
+  ratio?: string | null
+  duration?: number | null
+  createdAt: string
+}
+
 export interface PersistedAssetOut {
   id: string
   assetCode: string
@@ -235,7 +249,10 @@ export interface PersistedAssetOut {
   imageModelId?: string | null
   imageTier?: string | null
   imageStatus: string
+  imageHistory: MediaHistoryItemOut[]
   lastJobId?: string | null
+  lastJobStatus?: JobOut['status'] | null
+  lastJobError?: string | null
 }
 
 export interface PersistedClipOut {
@@ -259,7 +276,10 @@ export interface PersistedClipOut {
   videoUrl?: string | null
   videoModelId?: string | null
   videoStatus: string
+  videoHistory: MediaHistoryItemOut[]
   lastJobId?: string | null
+  lastJobStatus?: JobOut['status'] | null
+  lastJobError?: string | null
 }
 
 export interface ProjectDetailOut {

@@ -6,6 +6,8 @@ import {
   Check,
   CheckCircle2,
   CheckSquare,
+  Clock,
+  History,
   ImageIcon,
   ImageOff,
   Loader2,
@@ -18,6 +20,8 @@ import {
   X,
 } from 'lucide-vue-next'
 import EmptyState from '@/components/business/EmptyState.vue'
+import MediaHistoryDialog from '@/components/business/MediaHistoryDialog.vue'
+import type { MediaHistoryItem } from '@/components/business/MediaHistoryDialog.vue'
 import ImagePreview from '@/components/ui/ImagePreview.vue'
 import UiAlert from '@/components/ui/UiAlert.vue'
 import UiButton from '@/components/ui/UiButton.vue'
@@ -30,9 +34,11 @@ import {
   apiErrorMessage,
   createAssetApi,
   deleteAssetApi,
+  deleteAssetImageHistoryApi,
   getJob,
   getProjectDetail,
   isRetryableApiError,
+  selectAssetImageHistoryApi,
   startBatchGenerateAssetImages,
   startExtractAssets,
   startGenerateAssetImage,
@@ -74,6 +80,29 @@ const selectMode = ref(false)
 const checkedAssetIds = ref<string[]>([])
 const assetToDelete = ref<StudioAsset>()
 const generating = ref(false)
+const historyAssetId = ref<string | null>(null)
+const historySelecting = ref(false)
+const historyDeletingId = ref<string | null>(null)
+const dismissedJobIds = ref<Set<string>>(new Set())
+
+const imageModelNames = computed<Record<string, string>>(() => {
+  const map: Record<string, string> = {}
+  for (const model of imageModels.value) map[model.id] = model.displayName
+  return map
+})
+
+const historyAsset = computed(() =>
+  historyAssetId.value
+    ? (props.project.assets ?? []).find((item) => item.backendId === historyAssetId.value) ?? null
+    : null,
+)
+
+const historyOpen = computed({
+  get: () => historyAsset.value !== null,
+  set: (value: boolean) => {
+    if (!value) historyAssetId.value = null
+  },
+})
 
 onMounted(() => {
   void ensureModelCatalog()
@@ -139,6 +168,76 @@ function isAssetGenerating(asset: StudioAsset) {
 
 function failedReasonForAsset(asset: StudioAsset) {
   return failedReasonForId(asset.backendId)
+}
+
+function assetJobAlert(
+  asset: StudioAsset,
+): { status: 'failed' | 'review'; message: string; jobId?: string } | null {
+  if (isAssetGenerating(asset)) return null
+  const transient = failedReasonForAsset(asset)
+  if (transient) {
+    return { status: 'failed', message: transient, jobId: asset.lastJobId }
+  }
+  if (asset.lastJobStatus === 'review' || asset.lastJobStatus === 'failed') {
+    if (asset.lastJobId && dismissedJobIds.value.has(asset.lastJobId)) return null
+    return {
+      status: asset.lastJobStatus,
+      message:
+        asset.lastJobError
+        || (asset.lastJobStatus === 'review'
+          ? '上游状态待后台核对，积分冻结中'
+          : '最近一次生图失败，请重试'),
+      jobId: asset.lastJobId,
+    }
+  }
+  return null
+}
+
+function dismissAssetJobAlert(jobId?: string) {
+  if (!jobId) return
+  const next = new Set(dismissedJobIds.value)
+  next.add(jobId)
+  dismissedJobIds.value = next
+}
+
+function openAssetHistory(asset: StudioAsset) {
+  if (!asset.backendId) return
+  historyAssetId.value = asset.backendId
+}
+
+async function handleSelectAssetHistory(item: MediaHistoryItem) {
+  const target = historyAsset.value
+  if (!target?.backendId || historySelecting.value) return
+  historySelecting.value = true
+  try {
+    const updated = await selectAssetImageHistoryApi(props.project.id, target.backendId, item.id)
+    studio.applyPersistedAsset(props.project.id, updated)
+    const synced = (props.project.assets ?? []).find((a) => a.backendId === updated.id)
+    if (synced) editor.value?.syncAsset(synced)
+    historyAssetId.value = null
+    ui.notify(`已将「${target.name}」切换为所选历史图片`, 'success')
+  } catch (error) {
+    ui.notify(apiErrorMessage(error), 'error')
+  } finally {
+    historySelecting.value = false
+  }
+}
+
+async function handleDeleteAssetHistory(item: MediaHistoryItem) {
+  const target = historyAsset.value
+  if (!target?.backendId || historyDeletingId.value) return
+  historyDeletingId.value = item.id
+  try {
+    const updated = await deleteAssetImageHistoryApi(props.project.id, target.backendId, item.id)
+    studio.applyPersistedAsset(props.project.id, updated)
+    const synced = (props.project.assets ?? []).find((a) => a.backendId === updated.id)
+    if (synced) editor.value?.syncAsset(synced)
+    ui.notify('已移除该条历史记录', 'info')
+  } catch (error) {
+    ui.notify(apiErrorMessage(error), 'error')
+  } finally {
+    historyDeletingId.value = null
+  }
 }
 
 const missingImageCount = computed(() =>
@@ -626,29 +725,66 @@ async function deleteAsset() {
                     <p v-if="asset.description">{{ asset.description }}</p>
                   </div>
                 </div>
+                <div
+                  v-if="assetJobAlert(asset)"
+                  class="studio-asset-job-banner"
+                  :class="assetJobAlert(asset)?.status === 'review' ? 'is-review' : 'is-failed'"
+                  :title="assetJobAlert(asset)?.message"
+                >
+                  <Clock v-if="assetJobAlert(asset)?.status === 'review'" :size="13" aria-hidden="true" />
+                  <AlertCircle v-else :size="13" aria-hidden="true" />
+                  <span class="studio-asset-job-banner-text">
+                    <strong>{{ assetJobAlert(asset)?.status === 'review' ? '最近重绘待核对（积分冻结中）' : '最近重绘失败' }}：</strong>
+                    {{ assetJobAlert(asset)?.message }}
+                  </span>
+                  <button
+                    v-if="assetJobAlert(asset)?.jobId"
+                    type="button"
+                    class="studio-asset-job-close"
+                    aria-label="忽略本次提示"
+                    title="忽略本次提示"
+                    @click.stop="dismissAssetJobAlert(assetJobAlert(asset)?.jobId)"
+                  >
+                    <X :size="12" aria-hidden="true" />
+                  </button>
+                </div>
                 <div class="studio-asset-actions">
                   <span
                     class="studio-asset-status"
                     :class="{
                       'is-generating': isAssetGenerating(asset),
-                      'is-failed': !isAssetGenerating(asset) && (asset.imageStatus === 'failed' || !!failedReasonForAsset(asset)),
-                      'has-image': !isAssetGenerating(asset) && !failedReasonForAsset(asset) && !!asset.imageUrl,
+                      'is-review': !isAssetGenerating(asset) && assetJobAlert(asset)?.status === 'review',
+                      'is-failed': !isAssetGenerating(asset) && (asset.imageStatus === 'failed' || assetJobAlert(asset)?.status === 'failed'),
+                      'has-image': !isAssetGenerating(asset) && !assetJobAlert(asset) && !!asset.imageUrl,
                     }"
-                    :title="failedReasonForAsset(asset)"
+                    :title="assetJobAlert(asset)?.message"
                   >
                     <Loader2 v-if="isAssetGenerating(asset)" class="is-spin" :size="14" aria-hidden="true" />
+                    <Clock v-else-if="assetJobAlert(asset)?.status === 'review'" :size="14" aria-hidden="true" />
                     <AlertCircle
-                      v-else-if="asset.imageStatus === 'failed' || failedReasonForAsset(asset)"
+                      v-else-if="asset.imageStatus === 'failed' || assetJobAlert(asset)?.status === 'failed'"
                       :size="14"
                       aria-hidden="true"
                     />
                     <component :is="asset.imageUrl ? ImageIcon : ImageOff" v-else :size="14" aria-hidden="true" />
                     <template v-if="isAssetGenerating(asset)">生图中…</template>
-                    <template v-else-if="failedReasonForAsset(asset)">重绘失败</template>
+                    <template v-else-if="assetJobAlert(asset)?.status === 'review'">待核对</template>
+                    <template v-else-if="assetJobAlert(asset)?.status === 'failed'">{{ asset.imageUrl ? '重绘失败' : '生成失败' }}</template>
                     <template v-else-if="asset.imageStatus === 'failed'">生成失败</template>
                     <template v-else>{{ asset.imageUrl ? '已有图片' : '暂无图片' }}</template>
                   </span>
                   <div class="studio-asset-buttons">
+                    <UiButton
+                      v-if="project.persisted && asset.backendId && (asset.imageHistory?.length ?? 0) >= 2"
+                      variant="outline"
+                      size="sm"
+                      :disabled="isAssetGenerating(asset)"
+                      :aria-label="`查看${asset.name}历史图片`"
+                      @click="openAssetHistory(asset)"
+                    >
+                      <template #leading><History :size="14" aria-hidden="true" /></template>
+                      历史 · {{ asset.imageHistory?.length }}
+                    </UiButton>
                     <UiButton
                       v-if="project.persisted && asset.backendId"
                       variant="outline"
@@ -695,6 +831,21 @@ async function deleteAsset() {
       @create="createAsset"
       @save="saveAsset"
       @generate-image="generateAssetImage"
+      @open-history="openAssetHistory"
+    />
+
+    <MediaHistoryDialog
+      v-model:open="historyOpen"
+      kind="image"
+      :title="historyAsset ? `${historyAsset.name} · 历史图片` : '历史图片'"
+      :items="historyAsset?.imageHistory ?? []"
+      :current-url="historyAsset?.imageUrl"
+      :selecting="historySelecting"
+      :deleting-id="historyDeletingId"
+      :model-names="imageModelNames"
+      deletable
+      @select="handleSelectAssetHistory"
+      @delete="handleDeleteAssetHistory"
     />
 
     <StudioBatchImageDialog
@@ -866,7 +1017,51 @@ button.studio-asset-thumb { cursor: zoom-in; }
 .studio-asset-status { display: inline-flex; align-items: center; gap: 6px; color: var(--color-muted); font-size: var(--font-size-caption); }
 .studio-asset-status.has-image { color: var(--color-success); }
 .studio-asset-status.is-generating { color: var(--color-gold-soft); }
+.studio-asset-status.is-review { color: var(--color-gold-soft); }
 .studio-asset-status.is-failed { color: var(--color-error); }
+.studio-asset-job-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-bottom: 10px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.studio-asset-job-banner svg { flex: none; margin-top: 2px; }
+.studio-asset-job-banner.is-failed {
+  border: 1px solid color-mix(in srgb, var(--color-error) 35%, transparent);
+  background: color-mix(in srgb, var(--color-error) 10%, transparent);
+  color: var(--color-error);
+}
+.studio-asset-job-banner.is-review {
+  border: 1px solid color-mix(in srgb, var(--color-gold) 40%, transparent);
+  background: color-mix(in srgb, var(--color-gold) 10%, transparent);
+  color: var(--color-gold-soft);
+}
+.studio-asset-job-banner-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.studio-asset-job-close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  color: inherit;
+  opacity: 0.72;
+  cursor: pointer;
+}
+.studio-asset-job-close:hover { opacity: 1; background: rgb(255 255 255 / 8%); }
 .is-spin { animation: spin 1s linear infinite; }
 @keyframes spin {
   from { transform: rotate(0deg); }

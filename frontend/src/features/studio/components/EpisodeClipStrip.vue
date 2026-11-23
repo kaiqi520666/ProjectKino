@@ -7,6 +7,7 @@ import {
   Check,
   CheckSquare,
   Clapperboard,
+  Clock,
   Loader2,
   Play,
   Plus,
@@ -169,14 +170,16 @@ defineExpose({ scrollToEnd, focusSelectedOrAdd })
               preload="metadata"
             />
             <Clapperboard v-else :size="22" :stroke-width="1.5" aria-hidden="true" />
-            <Check v-if="item.videoUrl && !isClipGenerating(item)" class="episode-clip-ready" :size="15" aria-label="已有视频" />
             <span
               v-if="!isClipGenerating(item) && (item.videoStatus === 'failed' || clipFailedReason(item))"
               class="episode-clip-failed"
+              :class="{ 'is-review': item.lastJobStatus === 'review' }"
               :title="clipFailedReason(item) || '视频生成失败'"
             >
-              <AlertCircle :size="13" aria-hidden="true" />
+              <Clock v-if="item.lastJobStatus === 'review'" :size="13" aria-hidden="true" />
+              <AlertCircle v-else :size="13" aria-hidden="true" />
             </span>
+            <Check v-else-if="item.videoUrl && !isClipGenerating(item)" class="episode-clip-ready" :size="15" aria-label="已有视频" />
             <span v-if="isClipGenerating(item)" class="episode-clip-loading-mask">
               <Loader2 class="is-spin" :size="15" aria-hidden="true" />
               <span>{{ clipJobProgress(item) }}</span>
@@ -332,6 +335,9 @@ defineExpose({ scrollToEnd, focusSelectedOrAdd })
   border-radius: 50%;
   background: rgb(9 10 13 / 82%);
   color: var(--color-error);
+}
+.episode-clip-failed.is-review {
+  color: var(--color-gold-soft);
 }
 .episode-clip-loading-mask {
   position: absolute;
