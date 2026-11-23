@@ -240,6 +240,74 @@ def test_cangyuan_and_cc_adapters_payload_and_parse():
     assert cc.parse({"id": "vid-1", "status": "FAILED:NSFW"}).status == "failed"
 
 
+def test_provider_http_error_classification_and_status_prefix():
+    from app.modules.media_providers.cangyuan_image import build_provider_http_error
+
+    # 1. Submit 503 with cpu overloaded & no task_id -> definitive reject (auto-refund)
+    err_503 = build_provider_http_error(
+        {"error": {"message": "system cpu overloaded (current: 92.9%, threshold: 90%)"}},
+        503,
+        is_submit=True,
+        provider_label="图片供应商",
+    )
+    assert err_503.code == "providerRejected"
+    assert err_503.rejected is True
+    assert err_503.uncertain is False
+    assert err_503.message == "[HTTP 503] system cpu overloaded (current: 92.9%, threshold: 90%)"
+
+    # 2. Submit 500 with explicit cpu overloaded message & no task_id -> definitive reject
+    err_500_overload = build_provider_http_error(
+        {"message": "system cpu overloaded (current: 92.9%, threshold: 90%)"},
+        500,
+        is_submit=True,
+        provider_label="视频供应商",
+    )
+    assert err_500_overload.code == "providerRejected"
+    assert err_500_overload.rejected is True
+    assert err_500_overload.uncertain is False
+    assert err_500_overload.message.startswith("[HTTP 500] ")
+
+    # 3. Submit 503 WITH task_id -> must stay uncertain (review) to protect against double refund
+    err_503_with_task = build_provider_http_error(
+        {"task_id": "task_abc", "message": "service unavailable"},
+        503,
+        is_submit=True,
+        provider_label="图片供应商",
+    )
+    assert err_503_with_task.code == "submissionUnknown"
+    assert err_503_with_task.rejected is False
+    assert err_503_with_task.uncertain is True
+
+    # 4. Submit opaque 500 / 502 / 504 -> stays uncertain (review) with HTTP status code logged
+    err_502 = build_provider_http_error(
+        {"message": "bad gateway"},
+        502,
+        is_submit=True,
+        provider_label="视频供应商",
+    )
+    assert err_502.code == "submissionUnknown"
+    assert err_502.rejected is False
+    assert err_502.uncertain is True
+    assert err_502.message == "[HTTP 502] bad gateway"
+
+    # 5. Polling (query) 503 / 429 -> transient (rejected=False), so worker retries instead of refunding
+    err_poll_503 = build_provider_http_error(
+        {"message": "system cpu overloaded"},
+        503,
+        is_submit=False,
+        provider_label="图片供应商",
+    )
+    assert err_poll_503.code == "queryFailed"
+    assert err_poll_503.rejected is False
+    assert err_poll_503.uncertain is False
+    assert err_poll_503.message == "[HTTP 503] system cpu overloaded"
+
+    # 6. Empty body fallback keeps clean Chinese error with HTTP status code
+    err_empty = build_provider_http_error({}, 503, is_submit=True, provider_label="图片供应商")
+    assert err_empty.rejected is True
+    assert err_empty.message == "图片供应商返回错误（HTTP 503）"
+
+
 def _seed_image_fixture(db: InMemoryMediaDB, *, existing_url: str | None = None) -> tuple[UUID, UUID, UUID]:
     user = User(
         id=1,

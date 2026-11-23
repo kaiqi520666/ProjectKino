@@ -31,7 +31,25 @@ class ImageProviderResult:
     message: str = "图片生成失败"
 
 
-def _extract_error(value: Any, fallback_status: int | None = None) -> str:
+_SUBMIT_REJECT_STATUS_CODES = frozenset({400, 401, 403, 404, 405, 413, 415, 422, 429})
+_QUERY_REJECT_STATUS_CODES = frozenset({400, 401, 403, 404, 405, 413, 415, 422})
+
+_DEFINITIVE_SUBMIT_REJECT_NEEDLES = (
+    "no available channel",
+    "model_not_found",
+    "invalid model",
+    "unsupported model",
+    "insufficient_quota",
+    "cpu overloaded",
+    "system overloaded",
+    "server overloaded",
+    "service unavailable",
+    "too many requests",
+    "rate limit",
+)
+
+
+def _extract_raw_error(value: Any) -> str | None:
     if isinstance(value, dict):
         for key in ("message", "msg", "detail"):
             val = value.get(key)
@@ -44,9 +62,71 @@ def _extract_error(value: Any, fallback_status: int | None = None) -> str:
                 return msg.strip()[:400]
         elif isinstance(err, str) and err.strip():
             return err.strip()[:400]
+    return None
+
+
+def _extract_error(value: Any, fallback_status: int | None = None) -> str:
+    raw = _extract_raw_error(value)
+    if raw:
+        return raw
     if fallback_status:
         return f"图片供应商返回错误（HTTP {fallback_status}）"
     return "图片供应商生成失败"
+
+
+def _response_has_task_id(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    inner = value.get("data")
+    candidates = (value, inner) if isinstance(inner, dict) else (value,)
+    for obj in candidates:
+        for key in ("task_id", "id"):
+            val = obj.get(key)
+            if isinstance(val, str) and val.strip():
+                return True
+    return False
+
+
+def format_provider_http_error(value: Any, status_code: int, *, provider_label: str) -> str:
+    raw = _extract_raw_error(value)
+    if raw:
+        if f"HTTP {status_code}" in raw:
+            return raw[:400]
+        return f"[HTTP {status_code}] {raw}"[:400]
+    return f"{provider_label}返回错误（HTTP {status_code}）"
+
+
+def build_provider_http_error(
+    value: Any,
+    status_code: int,
+    *,
+    is_submit: bool,
+    provider_label: str,
+) -> MediaProviderError:
+    err_msg = format_provider_http_error(value, status_code, provider_label=provider_label)
+    if is_submit:
+        has_task_id = _response_has_task_id(value)
+        err_lower = err_msg.lower()
+        definitive_overload_or_reject = not has_task_id and (
+            status_code == 503
+            or any(needle in err_lower for needle in _DEFINITIVE_SUBMIT_REJECT_NEEDLES)
+        )
+        rejected = status_code in _SUBMIT_REJECT_STATUS_CODES or definitive_overload_or_reject
+        return MediaProviderError(
+            "providerRejected" if rejected else "submissionUnknown",
+            err_msg,
+            rejected=rejected,
+            uncertain=not rejected,
+        )
+
+    # 轮询阶段（任务已提交）收到 503/429/5xx 属于瞬时异常，交由上层重试，绝不直接拒单退费。
+    rejected = status_code in _QUERY_REJECT_STATUS_CODES
+    return MediaProviderError(
+        "providerRejected" if rejected else "queryFailed",
+        err_msg,
+        rejected=rejected,
+        uncertain=False,
+    )
 
 
 def asset_aspect_ratio(kind: str) -> str:
@@ -152,12 +232,11 @@ class CangyuanImageAdapter:
             value = {}
 
         if not 200 <= response.status_code < 300:
-            rejected = response.status_code in (400, 401, 403, 404, 405, 413, 415, 422, 429)
-            raise MediaProviderError(
-                "providerRejected" if rejected else "submissionUnknown",
-                _extract_error(value, response.status_code),
-                rejected=rejected,
-                uncertain=not rejected,
+            raise build_provider_http_error(
+                value,
+                response.status_code,
+                is_submit=payload is not None,
+                provider_label="图片供应商",
             )
         return self.parse(value)
 

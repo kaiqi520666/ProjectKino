@@ -6,7 +6,11 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
-from app.modules.media_providers.cangyuan_image import MediaProviderError, _extract_error
+from app.modules.media_providers.cangyuan_image import (
+    MediaProviderError,
+    _extract_error,
+    build_provider_http_error,
+)
 
 
 @dataclass(frozen=True)
@@ -142,27 +146,11 @@ class CcVideoAdapter:
             value = {}
 
         if not 200 <= response.status_code < 300:
-            err_msg = _extract_error(value, response.status_code)
-            err_lower = err_msg.lower()
-            definitive_distributor_reject = any(
-                needle in err_lower
-                for needle in (
-                    "no available channel",
-                    "model_not_found",
-                    "invalid model",
-                    "unsupported model",
-                    "insufficient_quota",
-                )
-            )
-            rejected = (
-                response.status_code in (400, 401, 403, 404, 413, 422, 429)
-                or definitive_distributor_reject
-            )
-            raise MediaProviderError(
-                "providerRejected" if rejected else "submissionUnknown",
-                err_msg,
-                rejected=rejected,
-                uncertain=not rejected,
+            raise build_provider_http_error(
+                value,
+                response.status_code,
+                is_submit=payload is not None,
+                provider_label="视频供应商",
             )
         return self.parse(value)
 
