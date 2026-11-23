@@ -10,18 +10,22 @@ import { useUiStore } from '@/stores/ui'
 import { apiErrorMessage, getProjectDetail, isRetryableApiError, renameProjectApi, watchJob } from '../api'
 import { artStyles } from '../components/art-styles'
 import { contentLanguages, formatDurationLabel } from '../components/drama-creation'
+import { isScriptJobType } from '../script-job-helpers'
+import { useScriptJobStore } from '../script-job-store'
 import { useStudioStore } from '../studio-store'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const studio = useStudioStore()
+const scriptJobs = useScriptJobStore()
 const generation = useGenerationStore()
 const ui = useUiStore()
 const loadingProject = ref(false)
 const loadError = ref('')
 const projectId = computed(() => String(route.params.projectId))
 const project = computed(() => studio.getProject(projectId.value))
+const scriptJobRunning = computed(() => Boolean(project.value && scriptJobs.isRunning(project.value.id)))
 const settings = computed(() => project.value?.creation.settings)
 const draftName = ref<string>()
 const nameInput = useTemplateRef<HTMLInputElement>('nameInput')
@@ -39,14 +43,24 @@ const fillHeight = computed(() => active.value === 'studio-script' || active.val
 
 async function ensureProjectLoaded(id: string) {
   const existing = studio.getProject(id)
-  if (existing && (!existing.persisted || existing.loadedDetail)) return
+  if (existing && (!existing.persisted || existing.loadedDetail)) {
+    const existingScriptJob = existing.activeJobs?.find((item) => isScriptJobType(item.jobType))
+    if (existingScriptJob) {
+      scriptJobs.trackScriptJob(existing.id, existingScriptJob)
+    }
+    return
+  }
   loadingProject.value = true
   loadError.value = ''
   try {
     const detail = await getProjectDetail(id)
     const hydrated = studio.hydrateProjectDetail(detail)
+    const activeScriptJob = hydrated.activeJobs?.find((item) => isScriptJobType(item.jobType))
+    if (activeScriptJob) {
+      scriptJobs.trackScriptJob(detail.id, activeScriptJob)
+    }
     const runningJob = hydrated.activeJobs?.find(
-      (item) => item.jobType !== 'asset_image' && item.jobType !== 'clip_video',
+      (item) => !isScriptJobType(item.jobType) && item.jobType !== 'asset_image' && item.jobType !== 'clip_video',
     )
     if (runningJob && !generation.isRunning) {
       void generation.runTask(
@@ -91,11 +105,18 @@ watch([() => project.value?.id, () => route.name === 'studio-episode'], () => {
   draftName.value = undefined
 })
 
-watch([project, active], ([value, step]) => {
-  if (value && value.loadedDetail !== false && !value.scriptConfirmed && step !== 'studio-script') {
+watch([project, active, scriptJobRunning], ([value, step, running]) => {
+  if (value && value.loadedDetail !== false && step !== 'studio-script' && (!value.scriptConfirmed || running)) {
     void router.replace({ name: 'studio-script', params: { projectId: value.id } })
   }
 }, { immediate: true })
+
+function handleStepClick(event: MouseEvent, stepName: (typeof steps)[number]['name']) {
+  if (stepName !== 'studio-script' && scriptJobRunning.value) {
+    event.preventDefault()
+    ui.notify('剧本正在后台生成中，请等本轮完成后再进入下一步', 'info')
+  }
+}
 
 async function startRename() {
   if (!settings.value) return
@@ -160,8 +181,16 @@ function handleNameEscape(event: KeyboardEvent) {
         <nav class="studio-project-nav" aria-label="项目制作步骤">
           <ol class="studio-steps">
             <li v-for="(step, index) in steps" :key="step.name">
-              <RouterLink class="studio-step" :to="{ name: step.name, params: { projectId: project.id } }" aria-current-value="step" :aria-current="active === step.name ? 'step' : undefined">
-                <span class="studio-step-number" aria-hidden="true"><Check v-if="index === 0 && project.scriptConfirmed && active !== step.name" :size="14" /><template v-else>{{ index + 1 }}</template></span>
+              <RouterLink
+                class="studio-step"
+                :class="{ 'is-locked': step.name !== 'studio-script' && scriptJobRunning }"
+                :to="{ name: step.name, params: { projectId: project.id } }"
+                aria-current-value="step"
+                :aria-current="active === step.name ? 'step' : undefined"
+                :aria-disabled="step.name !== 'studio-script' && scriptJobRunning ? 'true' : undefined"
+                @click="handleStepClick($event, step.name)"
+              >
+                <span class="studio-step-number" aria-hidden="true"><Check v-if="index === 0 && project.scriptConfirmed && active !== step.name && !scriptJobRunning" :size="14" /><template v-else>{{ index + 1 }}</template></span>
                 {{ step.label }}
               </RouterLink>
             </li>
@@ -242,6 +271,8 @@ function handleNameEscape(event: KeyboardEvent) {
 .studio-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0; padding: 0; list-style: none; }
 .studio-step { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; height: 100%; padding: 6px 8px; border: 1px solid var(--border-control); border-radius: var(--radius-control); background: var(--color-surface); color: var(--color-text); font-size: 13px; font-weight: 600; line-height: 1.35; text-align: center; word-break: keep-all; }
 .studio-step:hover { border-color: var(--color-gold); color: var(--color-gold-soft); }
+.studio-step.is-locked { opacity: .48; cursor: not-allowed; }
+.studio-step.is-locked:hover { border-color: var(--border-control); color: var(--color-text); }
 .studio-step:focus-visible { outline: 2px solid var(--color-gold); outline-offset: 2px; }
 .studio-step[aria-current="step"] { border-color: var(--color-gold); background: var(--gold-tint); color: var(--color-gold-soft); }
 .studio-step-number { display: grid; flex: 0 0 22px; place-items: center; width: 22px; height: 22px; border: 1px solid var(--border-control); border-radius: 50%; color: var(--color-muted); font-size: 12px; font-variant-numeric: tabular-nums; }

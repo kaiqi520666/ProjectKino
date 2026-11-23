@@ -10,29 +10,23 @@ import PromoCarousel from '../components/PromoCarousel.vue'
 import ToolEntryCard from '../components/ToolEntryCard.vue'
 import ScriptCreationPanel from '@/features/studio/components/ScriptCreationPanel.vue'
 import { artStyles } from '@/features/studio/components/art-styles'
-import { defaultEpisodeDuration, formatDurationLabel } from '@/features/studio/components/drama-creation'
 import type { DramaCreation } from '@/features/studio/components/drama-creation'
-import type { ProjectDetailOut } from '@/features/studio/api-types'
 import {
   apiErrorMessage,
   archiveProjectApi,
   getProjectDetail,
-  isRetryableApiError,
   listProjects,
   startGenerateProject,
-  watchJob,
 } from '@/features/studio/api'
+import { useScriptJobStore } from '@/features/studio/script-job-store'
 import type { StudioProject } from '@/features/studio/studio-project'
 import { useStudioStore } from '@/features/studio/studio-store'
-import { useAuthStore } from '@/stores/auth'
-import { useGenerationStore } from '@/stores/generation'
 import { useUiStore } from '@/stores/ui'
 import type { PromoSlide } from '../components/promo-types'
 
 const router = useRouter()
-const auth = useAuthStore()
 const studio = useStudioStore()
-const generation = useGenerationStore()
+const scriptJobs = useScriptJobStore()
 const ui = useUiStore()
 const creating = ref(false)
 const deleteOpen = ref(false)
@@ -83,64 +77,27 @@ async function deleteProject() {
 }
 
 async function createDrama(input: DramaCreation) {
-  if (creating.value || generation.isRunning) return
-  const style = artStyles.find(({ value }) => value === input.settings.visualStyle)
-  const subtitle = [
-    input.settings.name,
-    `${input.settings.episodeCount} 集`,
-    `约 ${formatDurationLabel(input.settings.secondsPerEpisode ?? defaultEpisodeDuration)}/集`,
-    style?.label || input.settings.visualStyle,
-  ].filter(Boolean).join(' · ')
-
-  await generation.runTask(
-    {
-      title: '正在创建短剧剧本',
-      subtitle,
-      description: input.mode === 'upload'
-        ? '正在解析上传文本并规划分集大纲、世界观与逐集剧本'
-        : '正在规划分集大纲、世界观并逐集撰写结构化剧本',
-      steps: [
-        input.mode === 'upload' ? '解析原稿内容与项目设置' : '解析故事梗概与项目设置',
-        '规划全剧大纲、角色与世界基准',
-        '逐集撰写结构化剧本并执行质量门校验',
-      ],
-      hint: '任务已在后台队列运行，完成后自动进入剧本确认页',
-      formatError: apiErrorMessage,
-      canRetryError: isRetryableApiError,
-      successMessage: (detail: ProjectDetailOut) => `《${detail.name}》已生成 ${detail.episodes.length} 集剧本`,
-    },
-    async (controls) => {
-      creating.value = true
-      try {
-        const text = input.mode === 'story' ? input.story : await input.file.text()
-        const stylePrompt = style?.prompt
-        const accepted = await startGenerateProject({
-          settings: stylePrompt ? { ...input.settings, visualStyleLabel: stylePrompt } : input.settings,
-          mode: input.mode,
-          text,
-        })
-        controls.setJobId(accepted.job.id)
-        controls.setDescription(accepted.job.stepLabel)
-        controls.setProgress(accepted.job.progress)
-
-        await watchJob(accepted.job.id, (job) => {
-          controls.setProgress(job.progress)
-          if (job.stepLabel) controls.setDescription(job.stepLabel)
-          controls.setStep(job.stepIndex <= 1 ? 1 : 2)
-        })
-
-        const detail = await getProjectDetail(accepted.projectId)
-        studio.hydrateProjectDetail(detail)
-        await router.push({ name: 'studio-script', params: { projectId: detail.id } })
-        ui.notify(`《${detail.name}》已生成 ${detail.episodes.length} 集剧本`, 'success')
-        return detail
-      } finally {
-        creating.value = false
-        void auth.refreshBalance()
-        void listProjects().then((summaries) => studio.syncProjectSummaries(summaries)).catch(() => {})
-      }
-    },
-  )
+  if (creating.value) return
+  creating.value = true
+  try {
+    const text = input.mode === 'story' ? input.story : await input.file.text()
+    const style = artStyles.find(({ value }) => value === input.settings.visualStyle)
+    const stylePrompt = style?.prompt
+    const accepted = await startGenerateProject({
+      settings: stylePrompt ? { ...input.settings, visualStyleLabel: stylePrompt } : input.settings,
+      mode: input.mode,
+      text,
+    })
+    const detail = await getProjectDetail(accepted.projectId)
+    studio.hydrateProjectDetail(detail)
+    scriptJobs.trackScriptJob(accepted.projectId, accepted.job)
+    void listProjects().then((summaries) => studio.syncProjectSummaries(summaries)).catch(() => {})
+    await router.push({ name: 'studio-script', params: { projectId: accepted.projectId } })
+  } catch (error) {
+    ui.notify(apiErrorMessage(error), 'error')
+  } finally {
+    creating.value = false
+  }
 }
 </script>
 

@@ -251,6 +251,12 @@ async def run_llm_job_core(
                                     reset_downstream=reset_downstream,
                                 )
                                 await write_db.commit()
+                        await on_progress(
+                            1,
+                            proj_settings.episodeCount + 2,
+                            f"全剧 {len(outline_obj.episodes)} 集大纲已保存，开始逐集撰写正文",
+                            18,
+                        )
 
                     async def _save_episode(ep_obj) -> None:
                         async with sessions() as write_db:
@@ -260,6 +266,14 @@ async def run_llm_job_core(
                             if proj_row is not None:
                                 await persist_single_episode(write_db, proj_row, ep_obj)
                                 await write_db.commit()
+                        total_eps = max(1, proj_settings.episodeCount)
+                        saved_pct = 20 + int(ep_obj.number / total_eps * 75)
+                        await on_progress(
+                            ep_obj.number + 1,
+                            total_eps + 2,
+                            f"第 {ep_obj.number}/{total_eps} 集《{ep_obj.title}》已保存",
+                            min(96, saved_pct),
+                        )
 
                     generated = await generate_script(
                         model,

@@ -66,11 +66,31 @@ export interface BackendOutlineScene {
   note?: string
 }
 
+export interface BackendOutlineProp {
+  id: string
+  name: string
+  role?: string
+}
+
+export interface BackendOutlineEpisode {
+  number: number
+  title?: string
+  summary?: string
+  hook?: string
+  suspense?: string
+  ending?: string
+  characterIds?: string[]
+  sceneIds?: string[]
+  propIds?: string[]
+}
+
 export interface BackendOutline {
+  continuity?: string
   world?: BackendWorld
   characters?: BackendOutlineCharacter[]
   scenes?: BackendOutlineScene[]
-  episodes?: Array<{ number: number; title?: string }>
+  props?: BackendOutlineProp[]
+  episodes?: BackendOutlineEpisode[]
   [key: string]: unknown
 }
 
