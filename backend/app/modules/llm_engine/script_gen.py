@@ -434,6 +434,48 @@ def _episode_payload(
     return payload
 
 
+def _outline_scale_guide(settings: ProjectSettings, mode: Literal["story", "upload"]) -> dict:
+    total_seconds = settings.episodeCount * settings.secondsPerEpisode
+    total_minutes = round(total_seconds / 60, 1)
+    if total_seconds <= 900:
+        guide: dict = {
+            "tier": "compact",
+            "totalMinutes": total_minutes,
+            "recommendedCounts": {"characters": "2–5", "scenes": "3–6", "props": "2–5"},
+            "note": (
+                "短体量紧凑聚焦，严禁为凑数塞入无关配角或日常杂物；"
+                "但每个实际换场的独立物理空间仍须单独建场景。"
+            ),
+        }
+    elif total_seconds <= 2100:
+        guide = {
+            "tier": "medium",
+            "totalMinutes": total_minutes,
+            "recommendedCounts": {"characters": "4–8", "scenes": "5–10", "props": "4–8"},
+            "note": "中等体量适度展开支线与空间转换，确保每集有清晰的场景推进与核心线索道具。",
+        }
+    else:
+        guide = {
+            "tier": "long",
+            "totalMinutes": total_minutes,
+            "recommendedCounts": {"characters": "5–12", "scenes": "7–14", "props": "5–12"},
+            "note": (
+                "长体量需足够的人物关系网、独立拍摄空间与关键道具支撑戏量；"
+                + (
+                    "当前为简短梗概扩写，请围绕主线合理补足功能配角（如同事、邻里、知情人）"
+                    "与不同拍摄地点，避免多集困在少数房间干聊。"
+                    if mode == "story"
+                    else "请忠实拆出原稿中实际出场的功能配角、独立场景与关键线索道具，不要过度合并。"
+                )
+            ),
+        }
+    if settings.secondsPerEpisode >= 300:
+        guide["scenesPerEpisodeHint"] = (
+            "单集达到 5 分钟以上，每集建议安排 3–6 个独立场次切换与多轮冲突递进，避免整集困在单一房间纯对话。"
+        )
+    return guide
+
+
 async def generate_script(
     model: Model,
     settings: ProjectSettings,
@@ -466,6 +508,7 @@ async def generate_script(
         "settings": settings.model_dump(),
         "mode": source.mode,
         "episodeSeconds": target,
+        "scaleGuide": _outline_scale_guide(settings, source.mode),
         "source": source.excerpt(1, len(source.lines)) if digest is None else None,
         "digest": digest,
     }

@@ -9,8 +9,15 @@ from pydantic_ai.messages import ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.usage import RequestUsage
 
-from app.modules.llm_engine.asset_gen import analyze_assets
-from app.modules.llm_engine.schema import Asset, AssetResult, ProjectSettings
+from app.modules.llm_engine.asset_gen import MAX_CLUES_PER_ASSET, analyze_assets, inventory
+from app.modules.llm_engine.schema import (
+    Asset,
+    AssetResult,
+    Outline,
+    ProjectSettings,
+    ScriptResult,
+)
+from app.modules.llm_engine.schema import Episode as SchemaEpisode
 from app.modules.llm_engine.script_gen import (
     CHUNK_CHARS,
     MAX_SOURCE_EXCERPT_CHARS_PER_EPISODE,
@@ -18,6 +25,7 @@ from app.modules.llm_engine.script_gen import (
     Source,
     _bounded_source_excerpts,
     _episode_budget,
+    _outline_scale_guide,
     append_episode,
     chunk_ranges,
     generate_script,
@@ -1025,3 +1033,79 @@ def test_source_soft_wraps_long_lines_chunks_at_20k_and_bounds_excerpts():
     assert "600 秒" in budget_600["reference"]
     assert "120 秒" not in budget_600["reference"]
     assert budget_600["recommended"]["lineBeats"] > 60
+
+
+def test_outline_scale_guide_tiers_and_round_robin_asset_clues():
+    short_s = ProjectSettings(
+        name="紧凑短剧",
+        ratio="16:9",
+        visualStyle="live-action",
+        episodeCount=5,
+        maxSegmentDuration=15,
+        secondsPerEpisode=120,
+    )
+    mid_s = ProjectSettings(
+        name="中等短剧",
+        ratio="16:9",
+        visualStyle="live-action",
+        episodeCount=10,
+        maxSegmentDuration=15,
+        secondsPerEpisode=180,
+    )
+    long_s = ProjectSettings(
+        name="长剧",
+        ratio="16:9",
+        visualStyle="live-action",
+        episodeCount=6,
+        maxSegmentDuration=30,
+        secondsPerEpisode=600,
+    )
+
+    g_short = _outline_scale_guide(short_s, "story")
+    g_mid = _outline_scale_guide(mid_s, "story")
+    g_long = _outline_scale_guide(long_s, "story")
+    assert g_short["tier"] == "compact"
+    assert g_short["recommendedCounts"] == {"characters": "2–5", "scenes": "3–6", "props": "2–5"}
+    assert "scenesPerEpisodeHint" not in g_short
+    assert g_mid["tier"] == "medium"
+    assert g_long["tier"] == "long"
+    assert g_long["recommendedCounts"] == {"characters": "5–12", "scenes": "7–14", "props": "5–12"}
+    assert "scenesPerEpisodeHint" in g_long
+
+    # 验证跨集轮询采样：前 2 集各有 12 条线索，但第 5、6 集的关键换装线索依然能入选
+    outline = Outline.model_validate(_valid_outline(6))
+    episodes = []
+    for ep_num in range(1, 7):
+        if ep_num <= 2:
+            flow = [{"action": f"林晚在第{ep_num}集巡查第{i}处角落。"} for i in range(1, 13)]
+        elif ep_num == 5:
+            flow = [{"action": "林晚换上沾雨的黑色风衣站在楼道口。"}]
+        elif ep_num == 6:
+            flow = [{"action": "林晚身穿米色毛衣推开天台铁门。"}]
+        else:
+            flow = [{"action": f"林晚在第{ep_num}集查看值班表。"}]
+        episodes.append(
+            SchemaEpisode.model_validate(
+                {
+                    **_valid_episode(ep_num, short=True),
+                    "scenes": [
+                        {
+                            "sceneId": "S01",
+                            "lighting": "深夜微光",
+                            "characters": ["C01"],
+                            "props": ["P01"],
+                            "flow": flow,
+                        }
+                    ],
+                    "targetSeconds": 600,
+                    "seconds": 30.0,
+                    "script": "正文",
+                }
+            )
+        )
+    script = ScriptResult(settings=long_s, outline=outline, episodes=episodes)
+    items = {item.id: item for item in inventory(script)}
+    c01_clues = items["C01"].clues
+    assert len(c01_clues) <= MAX_CLUES_PER_ASSET
+    assert any("第5集" in c and "黑色风衣" in c for c in c01_clues)
+    assert any("第6集" in c and "米色毛衣" in c for c in c01_clues)

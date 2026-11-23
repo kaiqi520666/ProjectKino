@@ -12,7 +12,7 @@ from app.modules.llm_engine.provider import MODEL_SETTINGS
 from app.modules.llm_engine.schema import Asset, AssetKind, AssetResult, Record, ScriptResult, Text
 from app.modules.llm_engine.script_gen import ProgressCallback, _notify, prompt, skill_instructions
 
-MAX_CLUES_PER_ASSET = 8
+MAX_CLUES_PER_ASSET = 16
 MAX_CLUE_CHARS = 80
 MAX_VARIANTS_PER_ASSET = 3
 _SCENE_EMPTY = re.compile(
@@ -111,10 +111,40 @@ def _clip_clue(text: str) -> str:
     return cleaned if len(cleaned) <= MAX_CLUE_CHARS else cleaned[: MAX_CLUE_CHARS - 1] + "…"
 
 
-def _add_clue(bucket: list[str], clue: str) -> None:
+def _add_clue_for_ep(by_ep: dict[int, list[str]], ep_number: int, clue: str) -> None:
     text = _clip_clue(clue)
-    if text and text not in bucket and len(bucket) < MAX_CLUES_PER_ASSET:
+    if not text:
+        return
+    bucket = by_ep.setdefault(ep_number, [])
+    if text not in bucket and len(bucket) < MAX_CLUES_PER_ASSET:
         bucket.append(text)
+
+
+def _sample_clues_round_robin(by_ep: dict[int, list[str]], limit: int = MAX_CLUES_PER_ASSET) -> list[str]:
+    """跨集轮询抽取线索，避免长剧中前 1–2 集占满名额而漏掉后半程换装/场景状态变化。"""
+    if not by_ep:
+        return []
+    ordered_eps = sorted(by_ep.keys())
+    sampled: list[str] = []
+    seen: set[str] = set()
+    round_idx = 0
+    while len(sampled) < limit:
+        added_this_round = False
+        for ep_num in ordered_eps:
+            ep_clues = by_ep[ep_num]
+            if round_idx >= len(ep_clues):
+                continue
+            added_this_round = True
+            clue = ep_clues[round_idx]
+            if clue not in seen:
+                seen.add(clue)
+                sampled.append(clue)
+                if len(sampled) >= limit:
+                    break
+        if not added_this_round:
+            break
+        round_idx += 1
+    return sampled
 
 
 def inventory(script: ScriptResult) -> list[InventoryItem]:
@@ -123,39 +153,42 @@ def inventory(script: ScriptResult) -> list[InventoryItem]:
     props = {prop.id: prop for prop in script.outline.props}
     used: dict[str, set[int]] = {}
     order: dict[str, int] = {}
-    clues: dict[str, list[str]] = {}
-    prop_fallback_clues: dict[str, list[str]] = {}
+    clues: dict[str, dict[int, list[str]]] = {}
+    prop_fallback_clues: dict[str, dict[int, list[str]]] = {}
 
     def touch(asset_id: str, number: int) -> None:
         order.setdefault(asset_id, len(order))
         used.setdefault(asset_id, set()).add(number)
-        clues.setdefault(asset_id, [])
+        clues.setdefault(asset_id, {})
 
     for episode in script.episodes:
-        ep_prefix = f"第{episode.number}集"
+        ep_num = episode.number
+        ep_prefix = f"第{ep_num}集"
         for scene in episode.scenes:
-            touch(scene.sceneId, episode.number)
+            touch(scene.sceneId, ep_num)
             for character in scene.characters:
-                touch(character, episode.number)
+                touch(character, ep_num)
             for prop in scene.props:
-                touch(prop, episode.number)
+                touch(prop, ep_num)
 
             if scene.lighting and scene.lighting.strip():
-                _add_clue(clues[scene.sceneId], f"{ep_prefix}·光线：{scene.lighting.strip()}")
+                _add_clue_for_ep(clues[scene.sceneId], ep_num, f"{ep_prefix}·光线：{scene.lighting.strip()}")
             actions = [beat.action.strip() for beat in scene.flow if beat.action and beat.action.strip()]
             if actions:
-                _add_clue(clues[scene.sceneId], f"{ep_prefix}：{actions[0]}")
+                _add_clue_for_ep(clues[scene.sceneId], ep_num, f"{ep_prefix}：{actions[0]}")
             for action in actions:
                 for character in scene.characters:
                     card = characters.get(character)
                     if card and card.name in action:
-                        _add_clue(clues[character], f"{ep_prefix}：{action}")
+                        _add_clue_for_ep(clues[character], ep_num, f"{ep_prefix}：{action}")
                 for prop in scene.props:
                     card = props.get(prop)
                     if card and card.name in action:
-                        _add_clue(clues[prop], f"{ep_prefix}：{action}")
+                        _add_clue_for_ep(clues[prop], ep_num, f"{ep_prefix}：{action}")
                     else:
-                        _add_clue(prop_fallback_clues.setdefault(prop, []), f"{ep_prefix}：{action}")
+                        _add_clue_for_ep(
+                            prop_fallback_clues.setdefault(prop, {}), ep_num, f"{ep_prefix}：{action}"
+                        )
 
     missing = [
         asset_id
@@ -169,7 +202,7 @@ def inventory(script: ScriptResult) -> list[InventoryItem]:
 
     def build_item(asset_id: str) -> InventoryItem:
         numbers = tuple(sorted(used[asset_id]))
-        asset_clues = clues.get(asset_id, [])
+        asset_clues = _sample_clues_round_robin(clues.get(asset_id, {}))
         if asset_id.startswith("C"):
             card = characters[asset_id]
             profile = f"{card.role}；说话方式：{card.voice}" if card.voice else card.role
@@ -180,7 +213,9 @@ def inventory(script: ScriptResult) -> list[InventoryItem]:
             profile = f"{head}；{card.note}" if card.note else head
             return InventoryItem(card.id, "scene", card.name, profile, numbers, tuple(asset_clues))
         card = props[asset_id]
-        prop_clues = asset_clues or prop_fallback_clues.get(asset_id, [])[:2]
+        prop_clues = asset_clues or _sample_clues_round_robin(
+            prop_fallback_clues.get(asset_id, {}), limit=4
+        )
         return InventoryItem(card.id, "prop", card.name, card.role, numbers, tuple(prop_clues))
 
     items = [build_item(asset_id) for asset_id in used]
