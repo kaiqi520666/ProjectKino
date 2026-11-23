@@ -84,6 +84,9 @@ const dirty = computed(() => {
 const wordCount = computed(() => [...previewScript.value].filter(char => !/\s/u.test(char)).length)
 
 const hasBackendScript = computed(() => !!props.project.scriptResult)
+const canRegenerateStory = computed(
+  () => Boolean(props.project.persisted && (props.project.scriptResult || props.project.sourceText?.trim())),
+)
 const canRewriteEpisode = computed(() => {
   const outlineEpisodes = props.project.scriptResult?.outline?.episodes
   if (!Array.isArray(outlineEpisodes)) return false
@@ -440,8 +443,8 @@ onBeforeRouteUpdate(canLeave)
           <UiButton class="script-add-episode" variant="outline" size="sm" :disabled="total === Number.MAX_SAFE_INTEGER || generation.isRunning" @click="addEpisode">
             <template #leading><Plus :size="15" aria-hidden="true" /></template>新增一集
           </UiButton>
-          <UiButton v-if="hasBackendScript" class="script-regen-all" variant="secondary" size="sm" :disabled="generation.isRunning" @click="openRegen('story')">
-            <template #leading><RotateCcw :size="14" aria-hidden="true" /></template>重生成全剧
+          <UiButton v-if="canRegenerateStory" class="script-regen-all" variant="secondary" size="sm" :disabled="generation.isRunning" @click="openRegen('story')">
+            <template #leading><RotateCcw :size="14" aria-hidden="true" /></template>{{ hasBackendScript ? '重生成全剧' : '生成全剧剧本' }}
           </UiButton>
         </div>
       </aside>
@@ -479,7 +482,13 @@ onBeforeRouteUpdate(canLeave)
           </div>
         </header>
 
-        <div v-if="!draft && (missingEpisodeCount > 0 || episodeWarnings.length > 0)" class="script-banners">
+        <div v-if="!draft && (missingEpisodeCount > 0 || episodeWarnings.length > 0 || (!hasBackendScript && canRegenerateStory))" class="script-banners">
+          <UiAlert
+            v-if="!hasBackendScript && canRegenerateStory"
+            tone="info"
+            title="该项目尚未生成剧本正文"
+            description="上次创建任务可能在大纲阶段中断；点击左侧「生成全剧剧本」即可直接重新生成。"
+          />
           <UiAlert
             v-if="missingEpisodeCount > 0"
             tone="warning"

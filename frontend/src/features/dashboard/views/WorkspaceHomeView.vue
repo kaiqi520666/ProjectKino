@@ -137,6 +137,7 @@ async function createDrama(input: DramaCreation) {
       } finally {
         creating.value = false
         void auth.refreshBalance()
+        void listProjects().then((summaries) => studio.syncProjectSummaries(summaries)).catch(() => {})
       }
     },
   )
