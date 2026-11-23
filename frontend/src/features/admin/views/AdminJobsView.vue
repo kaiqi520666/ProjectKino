@@ -340,7 +340,11 @@ async function submitRefund() {
 
 function openRescue(job: AdminJobItem) {
   rescueJob.value = job
-  rescueForm.mediaUrl = ''
+  const savedUpstream =
+    job.resultPayload && typeof job.resultPayload.upstreamUrl === 'string'
+      ? job.resultPayload.upstreamUrl
+      : ''
+  rescueForm.mediaUrl = savedUpstream
   rescueForm.note = ''
   rescueDialogOpen.value = true
 }

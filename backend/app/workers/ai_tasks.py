@@ -56,6 +56,7 @@ from app.modules.storage.media import (
     detect_image_format,
     download_public_media,
     download_to_file,
+    format_exception_detail,
     probe_video_duration,
 )
 from app.modules.storage.oss import OssStorage, load_storage
@@ -642,9 +643,17 @@ async def _execute_asset_image_under_slot(
             await asyncio.to_thread(storage.put_bytes, key, image_bytes, mime_type)
             public_url = storage.public_url(key)
         except Exception as transfer_exc:
+            async with sessions() as session:
+                db_job = await session.scalar(select(Job).where(Job.id == job_id))
+                if db_job is not None:
+                    db_job.result_payload = {
+                        **(db_job.result_payload or {}),
+                        "upstreamUrl": result.url,
+                    }
+                    await session.commit()
             raise MediaProviderError(
                 "oss_transfer_failed",
-                f"供应商已出图，但转存阿里云 OSS 失败：{transfer_exc}",
+                f"供应商已出图，但转存阿里云 OSS 失败：{format_exception_detail(transfer_exc)}",
                 uncertain=True,
             ) from None
 
@@ -1070,9 +1079,17 @@ async def _execute_clip_video_under_slot(
                 await asyncio.to_thread(storage.put_file, key, str(local_path), "video/mp4")
                 public_url = storage.public_url(key)
         except Exception as transfer_exc:
+            async with sessions() as session:
+                db_job = await session.scalar(select(Job).where(Job.id == job_id))
+                if db_job is not None:
+                    db_job.result_payload = {
+                        **(db_job.result_payload or {}),
+                        "upstreamUrl": result.url,
+                    }
+                    await session.commit()
             raise MediaProviderError(
                 "oss_transfer_failed",
-                f"视频已生成，但校验或转存阿里云 OSS 失败：{transfer_exc}",
+                f"视频已生成，但校验或转存阿里云 OSS 失败：{format_exception_detail(transfer_exc)}",
                 uncertain=True,
             ) from None
 

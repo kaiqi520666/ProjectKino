@@ -76,6 +76,7 @@ from app.modules.storage.media import (
     detect_image_format,
     download_public_media,
     download_to_file,
+    format_exception_detail,
     probe_video_duration,
 )
 from app.modules.storage.oss import load_storage
@@ -585,7 +586,9 @@ async def admin_rescue_job_media(
             await asyncio.to_thread(storage.put_bytes, key, image_bytes, mime_type)
             public_url = storage.public_url(key)
         except Exception as exc:
-            raise AppError(400, "rescue_download_failed", f"下载或转存图片失败：{exc}") from None
+            raise AppError(
+                400, "rescue_download_failed", f"下载或转存图片失败：{format_exception_detail(exc)}"
+            ) from None
 
         input_payload = job.input_payload or {}
         asset.image_key = key
@@ -618,7 +621,9 @@ async def admin_rescue_job_media(
                 await asyncio.to_thread(storage.put_file, key, str(local_path), "video/mp4")
                 public_url = storage.public_url(key)
         except Exception as exc:
-            raise AppError(400, "rescue_download_failed", f"下载校验或转存视频失败：{exc}") from None
+            raise AppError(
+                400, "rescue_download_failed", f"下载校验或转存视频失败：{format_exception_detail(exc)}"
+            ) from None
 
         input_payload = job.input_payload or {}
         clip.video_key = key
@@ -648,7 +653,9 @@ async def admin_rescue_job_media(
             await asyncio.to_thread(storage.put_bytes, key, image_bytes, mime_type)
             public_url = storage.public_url(key)
         except Exception as exc:
-            raise AppError(400, "rescue_download_failed", f"下载或转存图片失败：{exc}") from None
+            raise AppError(
+                400, "rescue_download_failed", f"下载或转存图片失败：{format_exception_detail(exc)}"
+            ) from None
 
         model_id = str((job.input_payload or {}).get("modelId") or "canvas-image")
         await patch_canvas_node_media(
@@ -678,7 +685,9 @@ async def admin_rescue_job_media(
                 await asyncio.to_thread(storage.put_file, key, str(local_path), "video/mp4")
                 public_url = storage.public_url(key)
         except Exception as exc:
-            raise AppError(400, "rescue_download_failed", f"下载校验或转存视频失败：{exc}") from None
+            raise AppError(
+                400, "rescue_download_failed", f"下载校验或转存视频失败：{format_exception_detail(exc)}"
+            ) from None
 
         model_id = str((job.input_payload or {}).get("modelId") or "canvas-video")
         await patch_canvas_node_media(

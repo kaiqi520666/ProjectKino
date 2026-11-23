@@ -1,24 +1,26 @@
 import asyncio
+import subprocess
 from pathlib import Path
 
 from app.modules.storage.media import probe_video_duration
 
 
 async def _run_ffmpeg(args: list[str], timeout_seconds: float = 600.0) -> None:
-    proc = await asyncio.create_subprocess_exec(
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
     try:
-        _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
-    except TimeoutError:
-        proc.kill()
-        await proc.wait()
+        completed = await asyncio.to_thread(
+            subprocess.run,
+            args,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
         raise ValueError("FFmpeg 合成视频超时") from None
+    except FileNotFoundError:
+        raise ValueError(f"未找到 ffmpeg 可执行文件（{args[0]}）") from None
 
-    if proc.returncode != 0:
-        detail = stderr.decode("utf-8", errors="ignore")[-400:]
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", errors="ignore")[-400:]
         raise ValueError(f"FFmpeg 合成失败：{detail}")
 
 

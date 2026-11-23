@@ -198,6 +198,32 @@ def test_detect_image_format_and_aspect_ratio_rules():
     assert asset_aspect_ratio("prop") == "1:1"
 
 
+def test_format_exception_detail_and_probe_video_works_on_selector_event_loop(monkeypatch):
+    import asyncio
+    import subprocess
+
+    from app.modules.storage.media import format_exception_detail, probe_video_duration
+
+    assert format_exception_detail(NotImplementedError()) == "NotImplementedError"
+    assert format_exception_detail(TimeoutError()) == "TimeoutError"
+    assert format_exception_detail(ValueError("bad file")) == "ValueError: bad file"
+
+    fake_stdout = json.dumps(
+        {"format": {"duration": "12.345"}, "streams": [{"codec_type": "video", "duration": "12.345"}]}
+    ).encode("utf-8")
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout=fake_stdout, stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    loop = asyncio.SelectorEventLoop()
+    try:
+        duration = loop.run_until_complete(probe_video_duration(Path("dummy.mp4")))
+        assert duration == 12.35
+    finally:
+        loop.close()
+
+
 def test_cangyuan_and_cc_adapters_payload_and_parse():
     cy = CangyuanImageAdapter()
     payload_web, ep = cy.build_payload(
