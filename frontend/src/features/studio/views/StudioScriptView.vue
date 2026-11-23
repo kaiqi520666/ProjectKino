@@ -915,6 +915,8 @@ onBeforeRouteUpdate(canLeave)
 .script-editor { display: grid; flex: 1; min-height: 0; overflow: hidden; grid-template-columns: minmax(180px, 236px) minmax(0, 1fr); align-items: stretch; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--color-surface); }
 .script-episodes { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; border-right: 1px solid var(--border-subtle); padding: 16px 12px; background: rgb(255 255 255 / 1.5%); }
 .script-episodes-list { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: rgb(255 255 255 / 16%) transparent; }
+.script-episodes-list :deep(.studio-episode-list ul) { display: grid; gap: 6px; }
+.script-episodes-list :deep(.studio-episode-list ul li + li) { border-top: 0; }
 .script-episodes-footer { display: grid; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-subtle); }
 .script-add-episode, .script-regen-all { width: 100%; min-height: 36px; }
 .script-regen-all { color: #c5c7d0; }
@@ -922,11 +924,11 @@ onBeforeRouteUpdate(canLeave)
 .script-episodes-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin: 0 4px 14px; }
 .script-episodes-heading h2 { margin: 0; color: var(--color-text); font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
 .script-episodes-heading > span { color: var(--color-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-.script-episode { position: relative; display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 8px; width: 100%; min-height: 42px; padding: 8px 10px; border: 1px solid transparent; border-radius: 7px; color: var(--color-muted); text-align: left; transition: background .15s, border-color .15s, color .15s; }
+.script-episode { position: relative; display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 8px; width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid transparent; border-radius: 7px; color: var(--color-muted); text-align: left; transition: background .15s, border-color .15s, color .15s; }
 .script-episode:hover { border-color: rgb(255 255 255 / 8%); background: var(--surface-hover); color: var(--color-text); }
-.script-episode.is-writing { border-color: rgb(240 184 75 / 22%); background: rgb(240 184 75 / 6%); color: var(--color-text); }
+.script-episode.is-writing:not([aria-current="true"]) { border-color: rgb(240 184 75 / 18%); border-style: dashed; background: rgb(240 184 75 / 4.5%); color: var(--color-text); }
 .script-episode.is-pending:not([aria-current="true"]) { opacity: .72; }
-.script-episode[aria-current="true"] { border-color: rgb(240 184 75 / 22%); background: linear-gradient(90deg, rgb(240 184 75 / 14%), rgb(240 184 75 / 6%)); color: var(--color-gold-soft); opacity: 1; }
+.script-episode[aria-current="true"] { border-color: rgb(240 184 75 / 26%); background: linear-gradient(90deg, rgb(240 184 75 / 14%), rgb(240 184 75 / 6%)); color: var(--color-gold-soft); opacity: 1; }
 .script-episode[aria-current="true"]::before { position: absolute; top: 8px; bottom: 8px; left: -1px; width: 2px; border-radius: 2px; background: var(--color-gold); content: ''; }
 .script-episode-index { color: inherit; text-align: center; font-variant-numeric: tabular-nums; font-size: 12px; }
 .script-episode-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
