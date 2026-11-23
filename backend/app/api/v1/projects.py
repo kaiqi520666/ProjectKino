@@ -538,7 +538,7 @@ async def generate_new_episode_clip(
             **({"feedback": feedback} if feedback else {}),
         },
         step_total=2,
-        step_label=f"第 {episode_number} 集新增镜头任务已排队",
+        step_label=f"第 {episode_number} 集新增片段任务已排队",
     )
     await session.commit()
     await execute_llm_job.kiq(str(job.id))

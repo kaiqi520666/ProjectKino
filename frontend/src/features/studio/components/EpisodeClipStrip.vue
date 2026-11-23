@@ -223,7 +223,7 @@ defineExpose({ scrollToEnd, focusSelectedOrAdd })
       <li>
         <button type="button" class="episode-clip episode-clip-add" @click="emit('add')">
           <Plus :size="22" aria-hidden="true" />
-          新增镜头
+          新增片段
         </button>
       </li>
     </ol>

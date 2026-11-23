@@ -436,7 +436,7 @@ async def run_llm_job_core(
                         )
                         if not asset_result.assets:
                             raise AppError(
-                                400, "assets_required", "请先识别并生成项目资产后再新增镜头"
+                                400, "assets_required", "请先识别并生成项目资产后再新增片段"
                             )
 
                         ep_clips = list(

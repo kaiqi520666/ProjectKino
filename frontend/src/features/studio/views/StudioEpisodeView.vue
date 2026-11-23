@@ -1157,7 +1157,7 @@ async function createBlankClipFromDialog() {
 async function submitAiAddClip() {
   if (generating.value || generation.isRunning || addClipBusy.value) return
   if (!props.project.assetResult) {
-    ui.notify('请先在资产生成页生成资产后再使用 AI 新增镜头', 'info')
+    ui.notify('请先在资产生成页生成资产后再使用 AI 新增片段', 'info')
     return
   }
   const episodeNumber = number.value
@@ -1169,17 +1169,17 @@ async function submitAiAddClip() {
 
   await generation.runTask(
     {
-      title: `正在为第 ${episodeNumber} 集新增镜头`,
+      title: `正在为第 ${episodeNumber} 集新增片段`,
       subtitle: `${props.project.creation.settings.name} · 目标时长 ${durationSeconds} 秒`,
-      description: '正在结合前后片段上下文与项目资产设计新镜头并拼装视频提示词',
+      description: '正在结合前后片段上下文与项目资产设计新片段并拼装视频提示词',
       steps: [
         '读取前后片段站位与项目资产/变体列表',
         '按目标时长规划镜次并生成标准视频提示词',
       ],
-      hint: '完成后将自动插入并切换到新镜头',
+      hint: '完成后将自动插入并切换到新片段',
       formatError: apiErrorMessage,
       canRetryError: isRetryableApiError,
-      successMessage: () => '新镜头已生成并插入分镜列表',
+      successMessage: () => '新片段已生成并插入分镜列表',
     },
     async (controls) => {
       generating.value = true
@@ -1208,8 +1208,8 @@ async function submitAiAddClip() {
         }
         ui.notify(
           Number.isInteger(createdIndex) && createdIndex >= 1
-            ? `已生成新镜头（片段 ${createdIndex}）`
-            : '新镜头已生成',
+            ? `已生成新片段（片段 ${createdIndex}）`
+            : '新片段已生成',
           'success',
         )
         return detail
@@ -1714,16 +1714,16 @@ async function deleteClip() {
 
     <UiDialog
       v-model:open="addClipOpen"
-      title="新增镜头"
-      :description="`单片段时长支持 4–${addClipMaxDuration} 秒（跟随当前项目上限）。可用 AI 结合上下文生成，或直接创建空白镜头。`"
+      title="新增片段"
+      :description="`单片段时长支持 4–${addClipMaxDuration} 秒（跟随当前项目上限）。可用 AI 结合上下文生成，或直接创建空白片段。`"
     >
       <form :id="addClipFormId" class="episode-modal-form" @submit.prevent="submitAiAddClip">
         <UiTextarea
           v-model="addClipFeedback"
-          label="镜头内容 / 导演要求（可选）"
+          label="片段内容 / 导演要求（可选）"
           :rows="4"
           :maxlength="500"
-          placeholder="可留空由 AI 承接上一片段自然续写；或写一句画面意图，例如：补一个 6 秒悬念特写，林晓推开档案室门，手电光扫过墙上的旧照片"
+          placeholder="可留空由 AI 承接上一片段自然续写；或写一句剧情/画面意图，例如：补一段 6 秒悬念过渡，林晓推开档案室门，手电光扫过墙上的旧照片"
         />
 
         <div class="episode-add-grid">
@@ -1789,7 +1789,7 @@ async function deleteClip() {
             @click="createBlankClipFromDialog"
           >
             <template #leading><Plus :size="14" aria-hidden="true" /></template>
-            创建空白镜头
+            创建空白片段
           </UiButton>
           <div class="episode-add-footer-right">
             <UiButton variant="ghost" size="sm" :disabled="addClipBusy || generating" @click="addClipOpen = false">取消</UiButton>
@@ -1801,7 +1801,7 @@ async function deleteClip() {
               :disabled="addClipBusy || generating || generation.isRunning"
             >
               <template #leading><Sparkles :size="14" aria-hidden="true" /></template>
-              AI 生成新镜头
+              AI 生成新片段
             </UiButton>
           </div>
         </div>

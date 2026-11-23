@@ -1142,7 +1142,7 @@ async def generate_new_clip_storyboard(
     usage: RunUsage | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> GeneratedClipSpec:
-    await _notify(on_progress, 1, 2, "正在结合上下文与资产设计新镜头", 35)
+    await _notify(on_progress, 1, 2, "正在结合上下文与资产设计新片段", 35)
     spec = await _run_freeform_clip_agent(
         model,
         script=script,
@@ -1155,5 +1155,5 @@ async def generate_new_clip_storyboard(
         next_clip=next_clip,
         usage=usage,
     )
-    await _notify(on_progress, 2, 2, "新镜头分镜设计已完成", 95)
+    await _notify(on_progress, 2, 2, "新片段分镜设计已完成", 95)
     return spec
