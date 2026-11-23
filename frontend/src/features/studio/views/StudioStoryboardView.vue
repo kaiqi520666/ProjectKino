@@ -9,7 +9,16 @@ const props = defineProps<{ project: StudioProject }>()
 const total = computed(() => props.project.creation.settings.episodeCount)
 
 function cardPreview(number: number) {
-  return readEpisode(props.project, number).script.replace(/\s+/gu, ' ').trim() || '暂无剧本正文'
+  const ep = readEpisode(props.project, number)
+  const summary = ep.summary.replace(/\s+/gu, ' ').trim()
+  if (summary) return summary
+  const outlineSummary = props.project.scriptResult?.outline?.episodes
+    ?.find((item) => item.number === number)
+    ?.summary
+    ?.replace(/\s+/gu, ' ')
+    .trim()
+  if (outlineSummary) return outlineSummary
+  return ep.script.replace(/\s+/gu, ' ').trim() || '暂无本集简介'
 }
 
 function cardStatus(number: number) {
