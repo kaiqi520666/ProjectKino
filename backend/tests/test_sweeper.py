@@ -221,3 +221,84 @@ async def test_reorder_episode_clips_uses_positive_two_step_offset():
     assert [c.id for c in ordered] == [c3.id, c1.id, c2.id]
     assert [c.clip_index for c in ordered] == [1, 2, 3]
     assert len(db.flushed_indices_history) == 2
+
+
+async def test_resilient_broker_listen_survives_redis_connection_error(monkeypatch):
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    from app.workers import broker as broker_mod
+
+    observed_timeouts: list[int] = []
+    outcomes: list[object] = [
+        RedisConnectionError("[WinError 10054] connection reset"),
+        None,
+        (b"q:ai", b"hello-job"),
+    ]
+
+    class FakeRedisConn:
+        def __init__(self, *, connection_pool):
+            self.connection_pool = connection_pool
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def brpop(self, queue_name: str, timeout: int = 0):  # noqa: ASYNC109
+            observed_timeouts.append(timeout)
+            item = outcomes.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+    monkeypatch.setattr(broker_mod, "Redis", FakeRedisConn)
+    b = broker_mod.ResilientListQueueBroker(url="redis://127.0.0.1:6379/0", queue_name="q:ai")
+    b.reconnect_backoff_seconds = 0.01
+
+    gen = b.listen()
+    payload = await gen.__anext__()
+    await gen.aclose()
+
+    assert payload == b"hello-job"
+    assert observed_timeouts == [30, 30, 30]
+
+
+async def test_heartbeat_job_lease_survives_transient_db_error():
+    import asyncio
+    from contextlib import asynccontextmanager
+
+    from app.modules.jobs.service import heartbeat_job_lease
+
+    attempts = 0
+    succeeded = asyncio.Event()
+
+    class FakeSession:
+        async def execute(self, stmt):
+            return None
+
+        async def commit(self):
+            succeeded.set()
+
+    @asynccontextmanager
+    async def flaky_sessions():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("transient db error")
+        yield FakeSession()
+
+    task = asyncio.create_task(
+        heartbeat_job_lease(flaky_sessions, uuid4(), "tok", interval_seconds=0, lease_seconds=300)
+    )
+    try:
+        await asyncio.wait_for(succeeded.wait(), timeout=2.0)
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    assert attempts >= 2
+

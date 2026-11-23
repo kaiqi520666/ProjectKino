@@ -132,13 +132,18 @@ async def heartbeat_job_lease(
     while True:
         await asyncio.sleep(interval_seconds)
         now = datetime.now(UTC)
-        async with sessions() as session:
-            await session.execute(
-                update(Job)
-                .where(Job.id == job_id, Job.lease_token == token)
-                .values(lease_until=now + timedelta(seconds=lease_seconds))
-            )
-            await session.commit()
+        try:
+            async with sessions() as session:
+                await session.execute(
+                    update(Job)
+                    .where(Job.id == job_id, Job.lease_token == token)
+                    .values(lease_until=now + timedelta(seconds=lease_seconds))
+                )
+                await session.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("job_lease_heartbeat_failed", job_id=str(job_id), error=str(exc))
 
 
 async def update_job_progress(

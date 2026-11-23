@@ -1,9 +1,11 @@
 import asyncio
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 
 import httpx
 import structlog
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from taskiq import TaskiqEvents, TaskiqState
 from taskiq_redis import ListQueueBroker
@@ -16,20 +18,59 @@ from app.workers.sweeper import sweeper_loop
 
 settings = Settings()
 
-ai_broker = ListQueueBroker(
+
+class ResilientListQueueBroker(ListQueueBroker):
+    """
+    兜底修复上游 taskiq_redis.ListQueueBroker.listen() 的两个隐患：
+    1. 上游只捕获内置 ConnectionError，漏掉 redis.exceptions.ConnectionError（不继承自内置 ConnectionError），
+       导致 Windows/Docker 下 TCP 断连（WinError 10054）直接打崩整个 worker 并杀死正在运行的任务；
+    2. 上游默认 brpop(..., timeout=0) 永久静默阻塞，容易被中间网络/NAT 掐断；
+       改为每 30s 唤醒一次，并在遇到 Redis/网络异常时退避重连，绝不拖垮同进程中的运行任务。
+    """
+
+    brpop_timeout_seconds: int = 30
+    reconnect_backoff_seconds: float = 1.0
+
+    async def listen(self) -> AsyncGenerator[bytes, None]:
+        redis_brpop_data_position = 1
+        while True:
+            try:
+                async with Redis(connection_pool=self.connection_pool) as redis_conn:
+                    brpop_result = await redis_conn.brpop(
+                        self.queue_name,
+                        timeout=self.brpop_timeout_seconds,
+                    )
+                    if brpop_result is None:
+                        continue
+                    yield brpop_result[redis_brpop_data_position]  # type: ignore[misc]
+            except asyncio.CancelledError:
+                raise
+            except (RedisError, ConnectionError, OSError) as exc:
+                structlog.get_logger(__name__).warning(
+                    "redis_broker_listen_reconnecting",
+                    queue=self.queue_name,
+                    error=str(exc),
+                )
+                await asyncio.sleep(self.reconnect_backoff_seconds)
+                continue
+
+
+ai_broker = ResilientListQueueBroker(
     url=settings.redis_url.get_secret_value(),
     queue_name=f"{settings.redis_key_prefix}queue:ai_io",
     socket_timeout=None,
     socket_connect_timeout=5,
     socket_keepalive=True,
+    health_check_interval=30,
 )
 
-media_broker = ListQueueBroker(
+media_broker = ResilientListQueueBroker(
     url=settings.redis_url.get_secret_value(),
     queue_name=f"{settings.redis_key_prefix}queue:media_cpu",
     socket_timeout=None,
     socket_connect_timeout=5,
     socket_keepalive=True,
+    health_check_interval=30,
 )
 
 
@@ -52,6 +93,7 @@ async def _init_runtime(state: TaskiqState) -> None:
         socket_connect_timeout=cfg.dependency_timeout_seconds,
         socket_timeout=None,
         socket_keepalive=True,
+        health_check_interval=30,
     )
     http = httpx.AsyncClient(timeout=30.0, follow_redirects=False)
     state.runtime = WorkerRuntime(
