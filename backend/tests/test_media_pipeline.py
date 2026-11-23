@@ -1076,5 +1076,171 @@ async def test_select_and_delete_asset_image_history_service():
         assert after_delete.image_history[0]["id"] == e1["id"]
 
 
+def test_cangyuan_build_payload_switches_to_edits_with_images_array():
+    adapter = CangyuanImageAdapter()
+
+    gen_payload, gen_ep = adapter.build_payload(
+        upstream_model_id="gpt-image-2.6-x",
+        prompt="现代都市夜景",
+        tier="2k",
+        ratio="16:9",
+        quality="high",
+        series="sunburst",
+    )
+    assert gen_ep == "generations"
+    assert "images" not in gen_payload
+    assert gen_payload["series"] == "sunburst"
+    assert gen_payload["quality"] == "high"
+
+    edit_payload, edit_ep = adapter.build_payload(
+        upstream_model_id="gpt-image-2.6-x",
+        prompt="把参考图人物换成深蓝色晚礼服",
+        tier="web",
+        ratio="16:9",
+        quality="high",
+        series="sunburst",
+        reference_urls=[
+            " https://img.example/ref1.png ",
+            "https://img.example/ref2.png",
+            "",
+        ],
+    )
+    assert edit_ep == "edits"
+    assert edit_payload["images"] == ["https://img.example/ref1.png", "https://img.example/ref2.png"]
+    assert "image" not in edit_payload
+    assert "aspect_ratio" not in edit_payload
+    # web 档不得传 quality
+    assert "quality" not in edit_payload
+
+
+async def test_image_worker_uses_edits_for_submit_and_generations_for_poll():
+    db = InMemoryMediaDB()
+    storage = FakeOssStorage()
+    redis = FakePubSubRedis()
+    project_id = uuid4()
+    asset_id = uuid4()
+    job_id = uuid4()
+    res_id = uuid4()
+
+    db.users[1] = User(
+        id=1,
+        email="edit@test.local",
+        password_hash="scrypt:a:b",
+        nickname="edit",
+        role="user",
+        status="active",
+        balance=Decimal("10.0000"),
+        frozen=Decimal("2.0000"),
+        usage_multiplier=Decimal("1.0000"),
+    )
+    db.providers[10] = AiProvider(
+        id=10,
+        key="cangyuan",
+        display_name="沧元图片",
+        base_url="https://img.example/v1",
+        api_key="secret-key",
+        adapter="cangyuanImageV1",
+        auth_type="bearer",
+        enabled=True,
+        configuration={"timeoutMs": 15000},
+    )
+    db.models["gpt-image-2.6-sunburst"] = AiModel(
+        id="gpt-image-2.6-sunburst",
+        provider_id=10,
+        media_type="image",
+        display_name="GPT Image 2.6 精修",
+        upstream_model_id="gpt-image-2.6-x",
+        enabled=True,
+        is_default=False,
+        sort=5,
+        capabilities={"tiers": ["web", "1k", "2k", "4k"], "maxReferenceImages": 9},
+        defaults={"tier": "1k"},
+        parameter_bindings={},
+        configuration={"series": "sunburst", "quality": "high"},
+    )
+    db.assets[asset_id] = ProjectAsset(
+        id=asset_id,
+        project_id=project_id,
+        asset_code="C01_2",
+        kind="character",
+        name="林薇·晚宴装",
+        description="",
+        prompt="严格保留人物五官，更换深蓝色晚礼服",
+        voice="",
+        episode_numbers=[1],
+        image_status="generating",
+    )
+    db.jobs[job_id] = Job(
+        id=job_id,
+        user_id=1,
+        project_id=project_id,
+        job_type="asset_image",
+        target_id=str(asset_id),
+        status="queued",
+        step_index=0,
+        step_total=4,
+        step_label="排队",
+        progress=0,
+        input_payload={
+            "assetId": str(asset_id),
+            "modelId": "gpt-image-2.6-sunburst",
+            "tier": "1k",
+            "ratio": "16:9",
+            "prompt": "严格保留人物五官，更换深蓝色晚礼服",
+            "referenceUrls": ["https://img.example/base-face.png"],
+        },
+    )
+    db.reservations[res_id] = CreditReservation(
+        id=res_id,
+        user_id=1,
+        business_type="image",
+        business_id=job_id,
+        model_id="gpt-image-2.6-sunburst",
+        amount=Decimal("2.0000"),
+        consumed=None,
+        status="frozen",
+        rate_snapshot={"tier": "1k"},
+    )
+
+    recorded_submit: list[tuple[str, dict]] = []
+    recorded_query: list[str] = []
+
+    class RecordingEditAdapter(CangyuanImageAdapter):
+        async def submit(self, **kwargs) -> ImageProviderResult:
+            recorded_submit.append((kwargs["endpoint"], kwargs["payload"]))
+            return ImageProviderResult(task_id="task_edit_001", status="pending")
+
+        async def query(self, **kwargs) -> ImageProviderResult:
+            recorded_query.append(kwargs["endpoint"])
+            return ImageProviderResult(
+                task_id="task_edit_001",
+                status="completed",
+                url="https://upstream.example/edited.png",
+            )
+
+    async def fake_download(_url: str) -> bytes:
+        return _PNG_BYTES
+
+    await run_asset_image_job_core(
+        sessions=db.session_factory,
+        redis=redis,
+        settings=Settings(environment="test"),
+        job_id=job_id,
+        adapter=RecordingEditAdapter(),
+        storage_loader=lambda _s: _async_return(storage),
+        downloader=fake_download,
+        poll_interval_seconds=0.0,
+    )
+
+    assert len(recorded_submit) == 1
+    assert recorded_submit[0][0] == "edits"
+    assert recorded_submit[0][1]["images"] == ["https://img.example/base-face.png"]
+    assert recorded_submit[0][1]["series"] == "sunburst"
+    assert recorded_query == ["generations"]
+    assert db.jobs[job_id].status == "succeeded"
+    assert db.assets[asset_id].image_status == "ready"
+    assert len(db.assets[asset_id].image_history) == 1
+
+
 async def _async_return(value):
     return value

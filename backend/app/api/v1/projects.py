@@ -769,6 +769,21 @@ async def generate_asset_image(
     model = await _validate_image_model_and_infra(
         session, model_id=body.model_id, tier=body.tier, ratio=override_ratio
     )
+    cleaned_ref_urls: list[str] = []
+    for raw_url in body.reference_urls:
+        u = raw_url.strip()
+        if not u:
+            continue
+        if not u.startswith(("http://", "https://")):
+            raise AppError(400, "invalid_reference_url", "参考图地址必须为可访问的 HTTP/HTTPS 链接")
+        cleaned_ref_urls.append(u)
+    max_ref_images = int(model.capabilities.get("maxReferenceImages") or 9)
+    if len(cleaned_ref_urls) > max_ref_images:
+        raise AppError(
+            400,
+            "reference_images_exceed_limit",
+            f"{model.display_name} 最多支持 {max_ref_images} 张参考图，当前传入了 {len(cleaned_ref_urls)} 张",
+        )
 
     ratio = override_ratio or asset_aspect_ratio(asset.kind)
     amount, rate_snapshot = await quote_image_price(
@@ -789,6 +804,7 @@ async def generate_asset_image(
             "tier": body.tier,
             "ratio": ratio,
             "prompt": prompt,
+            **({"referenceUrls": cleaned_ref_urls} if cleaned_ref_urls else {}),
         },
         step_total=4,
         step_label=f"资产「{asset.name}」生图任务已排队",

@@ -93,6 +93,7 @@ class GenerateAssetImageRequest(CamelModel):
     model_id: str = Field(default="gpt-image-2", min_length=1, max_length=48)
     tier: Literal["web", "1k", "2k", "4k"] = "1k"
     ratio: str | None = Field(default=None, max_length=16)
+    reference_urls: list[str] = Field(default_factory=list, max_length=16)
 
 
 class BatchGenerateAssetImagesRequest(CamelModel):

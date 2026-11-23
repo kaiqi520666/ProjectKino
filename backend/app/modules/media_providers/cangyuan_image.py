@@ -146,7 +146,11 @@ class CangyuanImageAdapter:
         ratio: str,
         quality: str = "high",
         series: str | None = None,
+        reference_urls: list[str] | None = None,
     ) -> tuple[dict[str, Any], str]:
+        cleaned_refs = [
+            url.strip() for url in (reference_urls or []) if isinstance(url, str) and url.strip()
+        ]
         payload: dict[str, Any] = {
             "model": upstream_model_id,
             "tier": tier,
@@ -160,6 +164,9 @@ class CangyuanImageAdapter:
             payload["series"] = series
         if tier != "web" and quality:
             payload["quality"] = quality
+        if cleaned_refs:
+            payload["images"] = cleaned_refs
+            return payload, "edits"
         return payload, "generations"
 
     def parse(self, response: Any) -> ImageProviderResult:
@@ -268,16 +275,19 @@ class CangyuanImageAdapter:
         api_key: str,
         auth_type: str,
         auth_header: str | None,
-        endpoint: str,
+        endpoint: str = "generations",
         task_id: str,
         timeout_seconds: float = 30.0,
     ) -> ImageProviderResult:
+        # 沧元官方文档约定：无论提交走 /v1/images/generations 还是 /v1/images/edits，
+        # 异步轮询端点统一为 GET /v1/images/generations/{id}。
+        poll_endpoint = "generations" if endpoint == "edits" else endpoint
         return await self._request(
             base_url=base_url,
             api_key=api_key,
             auth_type=auth_type,
             auth_header=auth_header,
-            endpoint=f"{endpoint}/{quote(task_id, safe='')}",
+            endpoint=f"{poll_endpoint}/{quote(task_id, safe='')}",
             payload=None,
             timeout_seconds=timeout_seconds,
         )

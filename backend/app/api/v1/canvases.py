@@ -199,6 +199,16 @@ async def generate_canvas_node_endpoint(
         model = await _validate_image_model_and_infra(
             session, model_id=chosen_model_id, tier=tier, ratio=ratio
         )
+        max_ref_images = int(model.capabilities.get("maxReferenceImages") or 9)
+        if len(resolved.reference_urls) > max_ref_images:
+            raise AppError(
+                400,
+                "reference_images_exceed_limit",
+                (
+                    f"{model.display_name} 最多支持 {max_ref_images} 张参考图，"
+                    f"当前连接了 {len(resolved.reference_urls)} 张"
+                ),
+            )
         amount, rate_snapshot = await quote_image_price(
             session,
             model_id=model.id,

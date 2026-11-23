@@ -490,10 +490,23 @@ async def _execute_asset_image_under_slot(
                 prompt = str(payload_in.get("prompt") or asset.prompt or "").strip()
             if not prompt:
                 raise MediaProviderError("prompt_missing", "提示词为空，无法生图", rejected=True)
+            reference_urls = [
+                str(u).strip() for u in (payload_in.get("referenceUrls") or []) if str(u).strip()
+            ]
 
             model = await session.scalar(select(AiModel).where(AiModel.id == model_id))
             if model is None:
                 raise MediaProviderError("model_not_found", f"图片模型 {model_id} 不存在", rejected=True)
+            max_ref_images = int(model.capabilities.get("maxReferenceImages") or 9)
+            if len(reference_urls) > max_ref_images:
+                raise MediaProviderError(
+                    "reference_images_exceed_limit",
+                    (
+                        f"{model.display_name} 最多支持 {max_ref_images} 张参考图，"
+                        f"当前为 {len(reference_urls)} 张"
+                    ),
+                    rejected=True,
+                )
             provider = await session.scalar(
                 select(AiProvider)
                 .options(undefer(AiProvider.api_key))
@@ -511,24 +524,31 @@ async def _execute_asset_image_under_slot(
             provider_auth_header = provider.auth_header
             timeout_ms = int(provider.configuration.get("timeoutMs", 30000))
             timeout_seconds = max(5.0, min(timeout_ms / 1000.0, 120.0))
-            req_payload, endpoint = client_adapter.build_payload(
+            req_payload, submit_endpoint = client_adapter.build_payload(
                 upstream_model_id=model.upstream_model_id,
                 prompt=prompt,
                 tier=tier,
                 ratio=ratio,
                 quality=str(model.configuration.get("quality") or "high"),
                 series=model.configuration.get("series"),
+                reference_urls=reference_urls,
             )
+            poll_endpoint = "generations"
             existing_task_id = job.provider_task_id
 
         if not existing_task_id:
-            await set_progress(1, f"正在向图片引擎提交任务（{model_id} · {tier} · {ratio}）...", 15)
+            submit_label = (
+                f"正在提交图生图任务（{model_id} · {tier} · {ratio} · {len(reference_urls)} 张参考图）..."
+                if reference_urls
+                else f"正在向图片引擎提交任务（{model_id} · {tier} · {ratio}）..."
+            )
+            await set_progress(1, submit_label, 15)
             submit_result = await client_adapter.submit(
                 base_url=provider_base_url,
                 api_key=provider_api_key,
                 auth_type=provider_auth_type,
                 auth_header=provider_auth_header,
-                endpoint=endpoint,
+                endpoint=submit_endpoint,
                 payload=req_payload,
                 timeout_seconds=timeout_seconds,
             )
@@ -556,7 +576,7 @@ async def _execute_asset_image_under_slot(
                 api_key=provider_api_key,
                 auth_type=provider_auth_type,
                 auth_header=provider_auth_header,
-                endpoint=endpoint,
+                endpoint=poll_endpoint,
                 task_id=existing_task_id,
                 timeout_seconds=timeout_seconds,
             )
@@ -589,7 +609,7 @@ async def _execute_asset_image_under_slot(
                     api_key=provider_api_key,
                     auth_type=provider_auth_type,
                     auth_header=provider_auth_header,
-                    endpoint=endpoint,
+                    endpoint=poll_endpoint,
                     task_id=existing_task_id,
                     timeout_seconds=timeout_seconds,
                 )

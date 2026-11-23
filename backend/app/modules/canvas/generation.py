@@ -48,12 +48,6 @@ def resolve_canvas_generation_inputs(body: CanvasGenerateRequest) -> ResolvedCan
                 reference_texts.append(
                     {"title": ref.title or "参考文本", "text": (ref.text or "").strip()}
                 )
-        if image_refs:
-            raise AppError(
-                400,
-                "image_reference_not_supported",
-                "当前生图模型暂仅支持文生图，请先断开上游图片连线或用文本描述画面",
-            )
     elif body.kind == "video":
         for ref in body.references:
             if ref.kind in ("video", "audio"):
@@ -107,6 +101,8 @@ def resolve_canvas_generation_inputs(body: CanvasGenerateRequest) -> ResolvedCan
             prefix = "\n".join(unreferenced_texts)
             resolved = f"{prefix}\n{resolved}".strip() if resolved else prefix
 
+    if body.kind in ("image", "video") and not resolved:
+        raise AppError(400, "prompt_missing", "请输入提示词或连接包含文本内容的参考节点")
     if not resolved and not reference_texts and not image_refs:
         raise AppError(400, "prompt_missing", "请输入提示词或连接包含内容的参考节点")
 

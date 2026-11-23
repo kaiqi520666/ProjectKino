@@ -149,10 +149,35 @@ def test_resolve_canvas_generation_inputs_handles_refs_and_rejects_unsupported_m
         resolve_canvas_generation_inputs(bad_video_req)
     assert err.value.code == "unsupported_video_reference"
 
-    bad_img_req = CanvasGenerateRequest.model_validate(
+    img_edit_req = CanvasGenerateRequest.model_validate(
         {
             "kind": "image",
-            "prompt": "参考图",
+            "prompt": "把 {{ref:img-1}} 的服装换成深蓝色晚礼服，结合 {{ref:txt-1}}",
+            "references": [
+                {
+                    "nodeId": "img-1",
+                    "kind": "image",
+                    "title": "主角参考图",
+                    "mediaUrl": "https://image.nodepass.net/framedrama/1/images/ref.png",
+                },
+                {
+                    "nodeId": "txt-1",
+                    "kind": "text",
+                    "title": "光影",
+                    "text": "暖调夜景",
+                },
+            ],
+        }
+    )
+    img_resolved = resolve_canvas_generation_inputs(img_edit_req)
+    assert img_resolved.reference_urls == ["https://image.nodepass.net/framedrama/1/images/ref.png"]
+    assert "@[图片1]" in img_resolved.resolved_prompt
+    assert "暖调夜景" in img_resolved.resolved_prompt
+
+    empty_img_prompt_req = CanvasGenerateRequest.model_validate(
+        {
+            "kind": "image",
+            "prompt": "   ",
             "references": [
                 {
                     "nodeId": "img-1",
@@ -163,9 +188,9 @@ def test_resolve_canvas_generation_inputs_handles_refs_and_rejects_unsupported_m
             ],
         }
     )
-    with pytest.raises(AppError) as img_err:
-        resolve_canvas_generation_inputs(bad_img_req)
-    assert img_err.value.code == "image_reference_not_supported"
+    with pytest.raises(AppError) as empty_err:
+        resolve_canvas_generation_inputs(empty_img_prompt_req)
+    assert empty_err.value.code == "prompt_missing"
 
     text_vision_req = CanvasGenerateRequest.model_validate(
         {

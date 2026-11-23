@@ -66,7 +66,11 @@ export function formatJobSpec(
     const modelId = readString(result, 'modelId') ?? readString(input, 'modelId')
     const tier = formatImageTier(readString(result, 'tier') ?? readString(input, 'tier'))
     const ratio = readString(result, 'ratio') ?? readString(input, 'ratio')
-    const meta = [tier, ratio].filter((item): item is string => Boolean(item))
+    const refUrls = input?.referenceUrls
+    const refCount = Array.isArray(refUrls) ? refUrls.filter((u) => typeof u === 'string' && u.trim()).length : 0
+    const meta = [tier, ratio, refCount > 0 ? `${refCount}参考图` : null].filter(
+      (item): item is string => Boolean(item),
+    )
     const title = resolveModelName(modelId, modelNames)
     if (!title && !meta.length) return null
     return { title: title || '-', meta }
