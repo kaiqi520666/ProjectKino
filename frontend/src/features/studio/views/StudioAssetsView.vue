@@ -715,10 +715,6 @@ async function deleteAsset() {
                     <div v-else class="studio-asset-thumb">
                       <component :is="group.icon" :size="26" :stroke-width="1.5" aria-hidden="true" />
                     </div>
-                    <div v-if="isAssetGenerating(asset)" class="studio-asset-loading-mask">
-                      <Loader2 class="is-spin" :size="16" aria-hidden="true" />
-                      <span>生图中</span>
-                    </div>
                   </div>
                   <div class="studio-asset-details">
                     <h2 :title="asset.name">{{ asset.name }}</h2>
@@ -989,20 +985,6 @@ async function deleteAsset() {
 .studio-asset-check.is-checked {
   border-color: var(--color-gold);
   background: var(--color-gold);
-}
-.studio-asset-loading-mask {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  border-radius: 6px;
-  background: rgb(9 10 13 / 72%);
-  color: var(--color-gold-soft);
-  font-size: 11px;
 }
 .studio-asset-thumb { display: grid; place-items: center; overflow: hidden; width: 100%; aspect-ratio: 4 / 3; border: 1px solid var(--border-subtle); border-radius: 6px; background: var(--color-elevated); color: var(--color-muted); }
 .studio-asset-thumb img { width: 100%; height: 100%; min-height: 0; object-fit: cover; }
