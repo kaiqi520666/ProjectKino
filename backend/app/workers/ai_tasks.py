@@ -61,6 +61,8 @@ from app.modules.storage.media import (
 from app.modules.storage.oss import OssStorage, load_storage
 from app.modules.studio.models import Project, ProjectAsset, StoryboardClip
 from app.modules.studio.service import (
+    append_asset_image_history,
+    append_clip_video_history,
     build_asset_result_from_db,
     build_script_result_from_db,
     persist_appended_episode,
@@ -659,6 +661,16 @@ async def _execute_asset_image_under_slot(
                     db_asset.image_tier = tier
                     db_asset.image_status = "ready"
                     db_asset.last_job_id = job_id
+                    append_asset_image_history(
+                        db_asset,
+                        url=public_url,
+                        key=key,
+                        source="ai",
+                        job_id=job_id,
+                        model_id=model_id,
+                        tier=tier,
+                        ratio=ratio,
+                    )
             db_job = await session.scalar(select(Job).where(Job.id == job_id))
             if db_job is not None:
                 db_job.status = "succeeded"
@@ -738,6 +750,7 @@ async def _execute_asset_image_under_slot(
                 db_asset = await session.scalar(select(ProjectAsset).where(ProjectAsset.id == asset_id))
                 if db_asset is not None:
                     db_asset.image_status = "ready" if db_asset.image_url else "failed"
+                    db_asset.last_job_id = job_id
             db_job = await session.scalar(select(Job).where(Job.id == job_id))
             if db_job is not None:
                 db_job.status = "review" if is_uncertain else "failed"
@@ -1067,6 +1080,17 @@ async def _execute_clip_video_under_slot(
                     db_clip.video_model_id = model_id
                     db_clip.video_status = "ready"
                     db_clip.last_job_id = job_id
+                    append_clip_video_history(
+                        db_clip,
+                        url=public_url,
+                        key=key,
+                        source="ai",
+                        job_id=job_id,
+                        model_id=model_id,
+                        resolution=resolution,
+                        ratio=ratio,
+                        duration=actual_duration,
+                    )
             db_job = await session.scalar(select(Job).where(Job.id == job_id))
             if db_job is not None:
                 db_job.status = "succeeded"
@@ -1147,6 +1171,7 @@ async def _execute_clip_video_under_slot(
                 db_clip = await session.scalar(select(StoryboardClip).where(StoryboardClip.id == clip_id))
                 if db_clip is not None:
                     db_clip.video_status = "ready" if db_clip.video_url else "failed"
+                    db_clip.last_job_id = job_id
             db_job = await session.scalar(select(Job).where(Job.id == job_id))
             if db_job is not None:
                 db_job.status = "review" if is_uncertain else "failed"

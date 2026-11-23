@@ -46,7 +46,7 @@ from app.modules.admin.schemas import (
 )
 from app.modules.auth.deps import require_admin
 from app.modules.auth.models import User
-from app.modules.canvas.models import Canvas
+from app.modules.canvas.models import Canvas, UserAsset
 from app.modules.canvas.service import patch_canvas_node_media
 from app.modules.catalog.models import (
     AiModel,
@@ -80,6 +80,7 @@ from app.modules.storage.media import (
 )
 from app.modules.storage.oss import load_storage
 from app.modules.studio.models import Episode, Project, ProjectAsset, StoryboardClip
+from app.modules.studio.service import append_asset_image_history, append_clip_video_history
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -586,10 +587,21 @@ async def admin_rescue_job_media(
         except Exception as exc:
             raise AppError(400, "rescue_download_failed", f"下载或转存图片失败：{exc}") from None
 
+        input_payload = job.input_payload or {}
         asset.image_key = key
         asset.image_url = public_url
         asset.image_status = "ready"
         asset.last_job_id = job.id
+        append_asset_image_history(
+            asset,
+            url=public_url,
+            key=key,
+            source="rescue",
+            job_id=job.id,
+            model_id=str(input_payload.get("modelId") or asset.image_model_id or "") or None,
+            tier=str(input_payload.get("tier") or asset.image_tier or "") or None,
+            ratio=str(input_payload.get("ratio") or "") or None,
+        )
         extra = {"assetId": str(asset.id), "imageUrl": public_url, "imageKey": key}
         btype = "image"
     elif job.job_type == "clip_video":
@@ -608,10 +620,22 @@ async def admin_rescue_job_media(
         except Exception as exc:
             raise AppError(400, "rescue_download_failed", f"下载校验或转存视频失败：{exc}") from None
 
+        input_payload = job.input_payload or {}
         clip.video_key = key
         clip.video_url = public_url
         clip.video_status = "ready"
         clip.last_job_id = job.id
+        append_clip_video_history(
+            clip,
+            url=public_url,
+            key=key,
+            source="rescue",
+            job_id=job.id,
+            model_id=str(input_payload.get("modelId") or clip.video_model_id or "") or None,
+            resolution=str(input_payload.get("resolution") or "") or None,
+            ratio=str(input_payload.get("ratio") or "") or None,
+            duration=duration,
+        )
         extra = {"clipId": str(clip.id), "videoUrl": public_url, "videoKey": key, "duration": duration}
         btype = "video"
     elif job.job_type == "canvas_image":
@@ -1456,18 +1480,20 @@ async def admin_purge_archived_project(
     if active_job is not None:
         raise AppError(409, "project_has_active_jobs", "该项目仍有进行中的任务，暂不可清理")
 
-    asset_keys = list(
-        await session.scalars(
-            select(ProjectAsset.image_key).where(
-                ProjectAsset.project_id == project.id, ProjectAsset.image_key.is_not(None)
+    asset_rows = (
+        await session.execute(
+            select(ProjectAsset.image_key, ProjectAsset.image_history).where(
+                ProjectAsset.project_id == project.id
             )
         )
-    )
+    ).all()
     clip_rows = (
         await session.execute(
-            select(StoryboardClip.preview_key, StoryboardClip.video_key).where(
-                StoryboardClip.project_id == project.id
-            )
+            select(
+                StoryboardClip.preview_key,
+                StoryboardClip.video_key,
+                StoryboardClip.video_history,
+            ).where(StoryboardClip.project_id == project.id)
         )
     ).all()
     ep_keys = list(
@@ -1477,12 +1503,37 @@ async def admin_purge_archived_project(
             )
         )
     )
-    oss_keys = [
-        *[k for k in asset_keys if k],
-        *[k for row in clip_rows for k in row if k],
-        *[k for k in ep_keys if k],
-    ]
+    candidate_keys: set[str] = set()
+    for image_key, image_history in asset_rows:
+        if image_key:
+            candidate_keys.add(image_key)
+        for item in image_history or []:
+            if isinstance(item, dict) and isinstance(item.get("key"), str) and item["key"].strip():
+                candidate_keys.add(item["key"].strip())
+    for preview_key, video_key, video_history in clip_rows:
+        if preview_key:
+            candidate_keys.add(preview_key)
+        if video_key:
+            candidate_keys.add(video_key)
+        for item in video_history or []:
+            if isinstance(item, dict) and isinstance(item.get("key"), str) and item["key"].strip():
+                candidate_keys.add(item["key"].strip())
+    for k in ep_keys:
+        if k:
+            candidate_keys.add(k)
+
     owner_id = project.user_id
+    if candidate_keys:
+        referenced_user_asset_keys = set(
+            await session.scalars(
+                select(UserAsset.media_key).where(
+                    UserAsset.user_id == owner_id,
+                    UserAsset.media_key.in_(candidate_keys),
+                )
+            )
+        )
+        candidate_keys.difference_update(k for k in referenced_user_asset_keys if k)
+    oss_keys = list(candidate_keys)
 
     storage = None
     try:

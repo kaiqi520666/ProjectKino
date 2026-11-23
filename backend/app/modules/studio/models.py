@@ -107,6 +107,9 @@ class ProjectAsset(TimestampMixin, Base):
     image_model_id: Mapped[str | None] = mapped_column(String(48))
     image_tier: Mapped[str | None] = mapped_column(String(8))
     image_status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="none")
+    image_history: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
     last_job_id: Mapped[UUID | None] = mapped_column()
 
 
@@ -145,4 +148,7 @@ class StoryboardClip(TimestampMixin, Base):
     video_url: Mapped[str | None] = mapped_column(Text)
     video_model_id: Mapped[str | None] = mapped_column(String(48))
     video_status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="none")
+    video_history: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
     last_job_id: Mapped[UUID | None] = mapped_column()

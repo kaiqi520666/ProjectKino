@@ -45,19 +45,27 @@ from app.modules.studio.schemas import (
     RegenerateStoryRequest,
     RenameProjectRequest,
     RewriteEpisodeRequest,
+    SelectMediaHistoryRequest,
     StoryboardClipOut,
     StructuredEpisodeSaveRequest,
 )
 from app.modules.studio.service import (
     create_clip,
     create_project_asset,
+    delete_asset_image_history,
     delete_clip,
+    delete_clip_video_history,
     delete_project_asset,
     get_owned_project,
     get_project_detail,
     list_user_projects,
+    load_jobs_by_id,
     reorder_episode_clips,
     save_structured_episode,
+    select_asset_image_history,
+    select_clip_video_history,
+    serialize_asset_out,
+    serialize_clip_out,
     update_clip,
     update_project_asset,
 )
@@ -299,6 +307,22 @@ async def extract_project_assets(
     return ApiResponse(data=ProjectJobAcceptedOut(project_id=project.id, job=JobOut.model_validate(job)))
 
 
+async def _serialize_single_asset(session: AsyncSession, asset: ProjectAsset) -> ProjectAssetOut:
+    last_job = None
+    if asset.last_job_id is not None:
+        jobs = await load_jobs_by_id(session, {asset.last_job_id})
+        last_job = jobs.get(asset.last_job_id)
+    return serialize_asset_out(asset, last_job)
+
+
+async def _serialize_single_clip(session: AsyncSession, clip: StoryboardClip) -> StoryboardClipOut:
+    last_job = None
+    if clip.last_job_id is not None:
+        jobs = await load_jobs_by_id(session, {clip.last_job_id})
+        last_job = jobs.get(clip.last_job_id)
+    return serialize_clip_out(clip, last_job)
+
+
 @router.post("/{project_id}/assets", response_model=ApiResponse[ProjectAssetOut], status_code=201)
 async def add_project_asset(
     project_id: UUID,
@@ -310,7 +334,7 @@ async def add_project_asset(
     asset = await create_project_asset(session, project=project, body=body)
     await session.commit()
     await session.refresh(asset)
-    return ApiResponse(data=ProjectAssetOut.model_validate(asset))
+    return ApiResponse(data=await _serialize_single_asset(session, asset))
 
 
 @router.patch("/{project_id}/assets/{asset_id}", response_model=ApiResponse[ProjectAssetOut])
@@ -325,7 +349,47 @@ async def edit_project_asset(
     asset = await update_project_asset(session, project=project, asset_id=asset_id, body=body)
     await session.commit()
     await session.refresh(asset)
-    return ApiResponse(data=ProjectAssetOut.model_validate(asset))
+    return ApiResponse(data=await _serialize_single_asset(session, asset))
+
+
+@router.post(
+    "/{project_id}/assets/{asset_id}/history/select",
+    response_model=ApiResponse[ProjectAssetOut],
+)
+async def select_project_asset_history(
+    project_id: UUID,
+    asset_id: UUID,
+    body: SelectMediaHistoryRequest,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[ProjectAssetOut]:
+    project = await get_owned_project(session, project_id=project_id, user_id=user.id)
+    asset = await select_asset_image_history(
+        session, project=project, asset_id=asset_id, history_id=body.history_id
+    )
+    await session.commit()
+    await session.refresh(asset)
+    return ApiResponse(data=await _serialize_single_asset(session, asset))
+
+
+@router.delete(
+    "/{project_id}/assets/{asset_id}/history/{history_id}",
+    response_model=ApiResponse[ProjectAssetOut],
+)
+async def remove_project_asset_history(
+    project_id: UUID,
+    asset_id: UUID,
+    history_id: str,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[ProjectAssetOut]:
+    project = await get_owned_project(session, project_id=project_id, user_id=user.id)
+    asset = await delete_asset_image_history(
+        session, project=project, asset_id=asset_id, history_id=history_id
+    )
+    await session.commit()
+    await session.refresh(asset)
+    return ApiResponse(data=await _serialize_single_asset(session, asset))
 
 
 @router.delete("/{project_id}/assets/{asset_id}", response_model=ApiResponse[dict])
@@ -419,7 +483,57 @@ async def edit_episode_clip(
     clip = await update_clip(session, project=project, clip_id=clip_id, body=body)
     await session.commit()
     await session.refresh(clip)
-    return ApiResponse(data=StoryboardClipOut.model_validate(clip))
+    return ApiResponse(data=await _serialize_single_clip(session, clip))
+
+
+@router.post(
+    "/{project_id}/episodes/{episode_number}/clips/{clip_id}/history/select",
+    response_model=ApiResponse[StoryboardClipOut],
+)
+async def select_episode_clip_history(
+    project_id: UUID,
+    episode_number: int,
+    clip_id: UUID,
+    body: SelectMediaHistoryRequest,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[StoryboardClipOut]:
+    project = await get_owned_project(session, project_id=project_id, user_id=user.id)
+    clip = await select_clip_video_history(
+        session,
+        project=project,
+        episode_number=episode_number,
+        clip_id=clip_id,
+        history_id=body.history_id,
+    )
+    await session.commit()
+    await session.refresh(clip)
+    return ApiResponse(data=await _serialize_single_clip(session, clip))
+
+
+@router.delete(
+    "/{project_id}/episodes/{episode_number}/clips/{clip_id}/history/{history_id}",
+    response_model=ApiResponse[StoryboardClipOut],
+)
+async def remove_episode_clip_history(
+    project_id: UUID,
+    episode_number: int,
+    clip_id: UUID,
+    history_id: str,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[StoryboardClipOut]:
+    project = await get_owned_project(session, project_id=project_id, user_id=user.id)
+    clip = await delete_clip_video_history(
+        session,
+        project=project,
+        episode_number=episode_number,
+        clip_id=clip_id,
+        history_id=history_id,
+    )
+    await session.commit()
+    await session.refresh(clip)
+    return ApiResponse(data=await _serialize_single_clip(session, clip))
 
 
 @router.delete("/{project_id}/clips/{clip_id}", response_model=ApiResponse[dict])

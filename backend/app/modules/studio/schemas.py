@@ -166,6 +166,24 @@ class EpisodeOut(CamelModel):
     composed_duration: float | None = None
 
 
+class MediaHistoryItemOut(CamelModel):
+    id: str
+    url: str
+    key: str | None = None
+    source: Literal["ai", "upload", "rescue"] = "ai"
+    job_id: str | None = None
+    model_id: str | None = None
+    tier: str | None = None
+    resolution: str | None = None
+    ratio: str | None = None
+    duration: float | None = None
+    created_at: str
+
+
+class SelectMediaHistoryRequest(CamelModel):
+    history_id: str = Field(min_length=1, max_length=128)
+
+
 class ProjectAssetOut(CamelModel):
     id: UUID
     asset_code: str
@@ -179,7 +197,10 @@ class ProjectAssetOut(CamelModel):
     image_model_id: str | None = None
     image_tier: str | None = None
     image_status: str
+    image_history: list[MediaHistoryItemOut] = Field(default_factory=list)
     last_job_id: UUID | None = None
+    last_job_status: str | None = None
+    last_job_error: str | None = None
 
 
 class StoryboardClipOut(CamelModel):
@@ -197,7 +218,10 @@ class StoryboardClipOut(CamelModel):
     video_url: str | None = None
     video_model_id: str | None = None
     video_status: str
+    video_history: list[MediaHistoryItemOut] = Field(default_factory=list)
     last_job_id: UUID | None = None
+    last_job_status: str | None = None
+    last_job_error: str | None = None
 
 
 class EpisodeStoryboardOut(CamelModel):

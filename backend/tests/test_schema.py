@@ -45,4 +45,9 @@ def test_alembic_has_single_head():
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
     assert len(heads) == 1
-    assert heads[0] == "0004_canvas_and_assets"
+    assert heads[0] == "0005_studio_media_history"
+
+
+def test_studio_media_history_columns_registered():
+    assert "image_history" in Base.metadata.tables["project_assets"].c
+    assert "video_history" in Base.metadata.tables["storyboard_clips"].c

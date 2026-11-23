@@ -1,4 +1,6 @@
 import re
+from datetime import UTC, datetime
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete, desc, func, select
@@ -28,6 +30,7 @@ from app.modules.studio.schemas import (
     ClipCreateRequest,
     ClipUpdateRequest,
     EpisodeOut,
+    MediaHistoryItemOut,
     ProjectAssetOut,
     ProjectDetailOut,
     ProjectSummaryOut,
@@ -35,6 +38,152 @@ from app.modules.studio.schemas import (
 )
 
 _SCRIPT_CODE_RE = re.compile(r"^[CSP]\d+$")
+MAX_STUDIO_MEDIA_HISTORY = 20
+MediaHistorySource = Literal["ai", "upload", "rescue"]
+
+
+def _now_iso_utc() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _append_media_history(
+    existing: list[dict[str, Any]] | None,
+    entry: dict[str, Any],
+) -> list[dict[str, Any]]:
+    url = str(entry.get("url") or "").strip()
+    if not url:
+        return list(existing or [])
+    job_id = entry.get("jobId")
+    items = [
+        item
+        for item in (existing or [])
+        if isinstance(item, dict)
+        and item.get("url") != url
+        and (not job_id or item.get("jobId") != job_id)
+    ]
+    items.append(entry)
+    return items[-MAX_STUDIO_MEDIA_HISTORY:]
+
+
+def append_asset_image_history(
+    asset: ProjectAsset,
+    *,
+    url: str,
+    key: str | None = None,
+    source: MediaHistorySource = "ai",
+    job_id: UUID | str | None = None,
+    model_id: str | None = None,
+    tier: str | None = None,
+    ratio: str | None = None,
+    created_at: str | None = None,
+) -> dict[str, Any]:
+    job_id_str = str(job_id) if job_id is not None else None
+    entry: dict[str, Any] = {
+        "id": job_id_str or str(uuid4()),
+        "url": url,
+        "key": key,
+        "source": source,
+        "jobId": job_id_str,
+        "modelId": model_id,
+        "tier": tier,
+        "resolution": None,
+        "ratio": ratio,
+        "duration": None,
+        "createdAt": created_at or _now_iso_utc(),
+    }
+    asset.image_history = _append_media_history(asset.image_history, entry)
+    return entry
+
+
+def append_clip_video_history(
+    clip: StoryboardClip,
+    *,
+    url: str,
+    key: str | None = None,
+    source: MediaHistorySource = "ai",
+    job_id: UUID | str | None = None,
+    model_id: str | None = None,
+    resolution: str | None = None,
+    ratio: str | None = None,
+    duration: float | None = None,
+    created_at: str | None = None,
+) -> dict[str, Any]:
+    job_id_str = str(job_id) if job_id is not None else None
+    entry: dict[str, Any] = {
+        "id": job_id_str or str(uuid4()),
+        "url": url,
+        "key": key,
+        "source": source,
+        "jobId": job_id_str,
+        "modelId": model_id,
+        "tier": None,
+        "resolution": resolution,
+        "ratio": ratio,
+        "duration": float(duration) if duration is not None else None,
+        "createdAt": created_at or _now_iso_utc(),
+    }
+    clip.video_history = _append_media_history(clip.video_history, entry)
+    return entry
+
+
+def _parse_history_items(raw: list[dict[str, Any]] | None) -> list[MediaHistoryItemOut]:
+    items: list[MediaHistoryItemOut] = []
+    for entry in raw or []:
+        if not isinstance(entry, dict) or not entry.get("url"):
+            continue
+        items.append(MediaHistoryItemOut.model_validate(entry))
+    return items
+
+
+async def load_jobs_by_id(session: AsyncSession, job_ids: set[UUID]) -> dict[UUID, Job]:
+    if not job_ids:
+        return {}
+    rows = list(await session.scalars(select(Job).where(Job.id.in_(job_ids))))
+    return {row.id: row for row in rows}
+
+
+def serialize_asset_out(asset: ProjectAsset, last_job: Job | None = None) -> ProjectAssetOut:
+    return ProjectAssetOut(
+        id=asset.id,
+        asset_code=asset.asset_code,
+        kind=asset.kind,
+        name=asset.name,
+        description=asset.description,
+        prompt=asset.prompt,
+        voice=asset.voice,
+        episode_numbers=list(asset.episode_numbers or []),
+        image_url=asset.image_url,
+        image_model_id=asset.image_model_id,
+        image_tier=asset.image_tier,
+        image_status=asset.image_status,
+        image_history=_parse_history_items(asset.image_history),
+        last_job_id=asset.last_job_id,
+        last_job_status=last_job.status if last_job is not None else None,
+        last_job_error=last_job.error_message if last_job is not None else None,
+    )
+
+
+def serialize_clip_out(clip: StoryboardClip, last_job: Job | None = None) -> StoryboardClipOut:
+    return StoryboardClipOut(
+        id=clip.id,
+        episode_id=clip.episode_id,
+        clip_index=clip.clip_index,
+        duration_seconds=clip.duration_seconds,
+        prompt=clip.prompt,
+        prompt_customized=clip.prompt_customized,
+        references=list(clip.references or []),
+        beats=clip.beats,
+        blocking=clip.blocking,
+        cuts=clip.cuts,
+        preview_url=clip.preview_url,
+        video_url=clip.video_url,
+        video_model_id=clip.video_model_id,
+        video_status=clip.video_status,
+        video_history=_parse_history_items(clip.video_history),
+        last_job_id=clip.last_job_id,
+        last_job_status=last_job.status if last_job is not None else None,
+        last_job_error=last_job.error_message if last_job is not None else None,
+    )
 
 
 async def get_owned_project(session: AsyncSession, *, project_id: UUID, user_id: int) -> Project:
@@ -124,12 +273,22 @@ async def get_project_detail(session: AsyncSession, *, project_id: UUID, user_id
         )
     )
 
+    last_job_ids: set[UUID] = set()
+    for asset in assets:
+        if asset.last_job_id is not None:
+            last_job_ids.add(asset.last_job_id)
+    for clip in clips:
+        if clip.last_job_id is not None:
+            last_job_ids.add(clip.last_job_id)
+    jobs_by_id = await load_jobs_by_id(session, last_job_ids)
+
     ep_num_by_id = {ep.id: ep.number for ep in episodes}
     storyboards: dict[int, list[StoryboardClipOut]] = {}
     for clip in clips:
         ep_num = ep_num_by_id.get(clip.episode_id)
         if ep_num is not None:
-            storyboards.setdefault(ep_num, []).append(StoryboardClipOut.model_validate(clip))
+            last_job = jobs_by_id.get(clip.last_job_id) if clip.last_job_id else None
+            storyboards.setdefault(ep_num, []).append(serialize_clip_out(clip, last_job))
 
     return ProjectDetailOut(
         id=project.id,
@@ -140,7 +299,10 @@ async def get_project_detail(session: AsyncSession, *, project_id: UUID, user_id
         outline=project.outline,
         script_confirmed=project.script_confirmed,
         episodes=[EpisodeOut.model_validate(ep) for ep in episodes],
-        assets=[ProjectAssetOut.model_validate(a) for a in assets],
+        assets=[
+            serialize_asset_out(a, jobs_by_id.get(a.last_job_id) if a.last_job_id else None)
+            for a in assets
+        ],
         storyboards=storyboards,
         active_jobs=[JobOut.model_validate(j) for j in active_jobs],
         created_at=project.created_at,
@@ -490,6 +652,13 @@ async def create_project_asset(
         image_key=body.image_key,
         image_status="ready" if body.image_url else "none",
     )
+    if body.image_url:
+        append_asset_image_history(
+            asset,
+            url=body.image_url,
+            key=body.image_key,
+            source="upload",
+        )
     session.add(asset)
     await session.flush()
     return asset
@@ -519,6 +688,54 @@ async def update_project_asset(
         asset.image_url = body.image_url
         asset.image_key = body.image_key
         asset.image_status = "ready"
+        append_asset_image_history(
+            asset,
+            url=body.image_url,
+            key=body.image_key,
+            source="upload",
+        )
+    await session.flush()
+    return asset
+
+
+async def select_asset_image_history(
+    session: AsyncSession, *, project: Project, asset_id: UUID, history_id: str
+) -> ProjectAsset:
+    asset = await session.scalar(
+        select(ProjectAsset).where(ProjectAsset.id == asset_id, ProjectAsset.project_id == project.id)
+    )
+    if asset is None:
+        raise AppError(404, "asset_not_found", "资产不存在")
+    if asset.image_status == "generating":
+        raise AppError(409, "asset_image_in_progress", "资产正在生图中，请稍后再切换历史版本")
+    history = list(asset.image_history or [])
+    entry = next((item for item in history if isinstance(item, dict) and item.get("id") == history_id), None)
+    if entry is None or not entry.get("url"):
+        raise AppError(404, "history_item_not_found", "历史图片版本不存在")
+    asset.image_url = str(entry["url"])
+    asset.image_key = str(entry["key"]) if entry.get("key") else None
+    asset.image_model_id = str(entry["modelId"]) if entry.get("modelId") else None
+    asset.image_tier = str(entry["tier"]) if entry.get("tier") else None
+    asset.image_status = "ready"
+    await session.flush()
+    return asset
+
+
+async def delete_asset_image_history(
+    session: AsyncSession, *, project: Project, asset_id: UUID, history_id: str
+) -> ProjectAsset:
+    asset = await session.scalar(
+        select(ProjectAsset).where(ProjectAsset.id == asset_id, ProjectAsset.project_id == project.id)
+    )
+    if asset is None:
+        raise AppError(404, "asset_not_found", "资产不存在")
+    history = [item for item in (asset.image_history or []) if isinstance(item, dict)]
+    entry = next((item for item in history if item.get("id") == history_id), None)
+    if entry is None:
+        raise AppError(404, "history_item_not_found", "历史图片版本不存在")
+    if asset.image_url and entry.get("url") == asset.image_url:
+        raise AppError(400, "cannot_delete_active_history", "当前正在使用的版本不可删除，请先切换其他版本")
+    asset.image_history = [item for item in history if item.get("id") != history_id]
     await session.flush()
     return asset
 
@@ -630,3 +847,72 @@ async def delete_clip(session: AsyncSession, *, project: Project, clip_id: UUID)
         raise AppError(404, "clip_not_found", "片段不存在")
     await session.delete(clip)
     await session.flush()
+
+
+async def select_clip_video_history(
+    session: AsyncSession,
+    *,
+    project: Project,
+    episode_number: int,
+    clip_id: UUID,
+    history_id: str,
+) -> StoryboardClip:
+    ep = await session.scalar(
+        select(Episode).where(Episode.project_id == project.id, Episode.number == episode_number)
+    )
+    if ep is None:
+        raise AppError(404, "episode_not_found", f"第 {episode_number} 集不存在")
+    clip = await session.scalar(
+        select(StoryboardClip).where(
+            StoryboardClip.id == clip_id,
+            StoryboardClip.project_id == project.id,
+            StoryboardClip.episode_id == ep.id,
+        )
+    )
+    if clip is None:
+        raise AppError(404, "clip_not_found", "片段不存在")
+    if clip.video_status == "generating":
+        raise AppError(409, "clip_video_in_progress", "片段正在生成视频中，请稍后再切换历史版本")
+    history = list(clip.video_history or [])
+    entry = next((item for item in history if isinstance(item, dict) and item.get("id") == history_id), None)
+    if entry is None or not entry.get("url"):
+        raise AppError(404, "history_item_not_found", "历史视频版本不存在")
+    clip.video_url = str(entry["url"])
+    clip.video_key = str(entry["key"]) if entry.get("key") else None
+    clip.video_model_id = str(entry["modelId"]) if entry.get("modelId") else None
+    clip.video_status = "ready"
+    await session.flush()
+    return clip
+
+
+async def delete_clip_video_history(
+    session: AsyncSession,
+    *,
+    project: Project,
+    episode_number: int,
+    clip_id: UUID,
+    history_id: str,
+) -> StoryboardClip:
+    ep = await session.scalar(
+        select(Episode).where(Episode.project_id == project.id, Episode.number == episode_number)
+    )
+    if ep is None:
+        raise AppError(404, "episode_not_found", f"第 {episode_number} 集不存在")
+    clip = await session.scalar(
+        select(StoryboardClip).where(
+            StoryboardClip.id == clip_id,
+            StoryboardClip.project_id == project.id,
+            StoryboardClip.episode_id == ep.id,
+        )
+    )
+    if clip is None:
+        raise AppError(404, "clip_not_found", "片段不存在")
+    history = [item for item in (clip.video_history or []) if isinstance(item, dict)]
+    entry = next((item for item in history if item.get("id") == history_id), None)
+    if entry is None:
+        raise AppError(404, "history_item_not_found", "历史视频版本不存在")
+    if clip.video_url and entry.get("url") == clip.video_url:
+        raise AppError(400, "cannot_delete_active_history", "当前正在使用的版本不可删除，请先切换其他版本")
+    clip.video_history = [item for item in history if item.get("id") != history_id]
+    await session.flush()
+    return clip

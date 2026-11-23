@@ -759,6 +759,7 @@ async def test_asset_image_worker_enforces_concurrency_semaphore():
     assert peak == 2
     assert all(db.jobs[jid].status == "succeeded" for jid in job_ids)
     assert db.users[1].frozen == Decimal("0.0000")
+    assert all(len(asset.image_history) == 1 for asset in db.assets.values())
 
 
 async def test_clip_video_worker_enforces_concurrency_semaphore():
@@ -903,6 +904,176 @@ async def test_clip_video_worker_enforces_concurrency_semaphore():
     assert peak == 2
     assert all(db.jobs[jid].status == "succeeded" for jid in job_ids)
     assert db.users[1].frozen == Decimal("0.0000")
+    assert all(len(clip.video_history) == 1 for clip in db.clips.values())
+
+
+def test_studio_media_history_dedupe_cap_and_serialization():
+    from app.modules.studio.service import (
+        MAX_STUDIO_MEDIA_HISTORY,
+        append_asset_image_history,
+        append_clip_video_history,
+        serialize_asset_out,
+        serialize_clip_out,
+    )
+
+    project_id = uuid4()
+    episode_id = uuid4()
+    asset = ProjectAsset(
+        id=uuid4(),
+        project_id=project_id,
+        asset_code="C1",
+        kind="character",
+        name="王丽",
+        description="desc",
+        prompt="prompt",
+        voice="",
+        episode_numbers=[1],
+        image_status="ready",
+    )
+    first_job_id = uuid4()
+    append_asset_image_history(
+        asset,
+        url="https://img.example/1.png",
+        key="framedrama/1/images/1.png",
+        source="ai",
+        job_id=first_job_id,
+        model_id="gpt-image-2",
+        tier="web",
+        ratio="16:9",
+    )
+    # 同一 jobId 或同一 URL 重复追加应去重
+    append_asset_image_history(
+        asset,
+        url="https://img.example/1.png",
+        key="framedrama/1/images/1.png",
+        source="ai",
+        job_id=first_job_id,
+        model_id="gpt-image-2",
+        tier="web",
+        ratio="16:9",
+    )
+    assert len(asset.image_history) == 1
+
+    # 超过上限时裁剪最旧记录，仅保留最近 MAX_STUDIO_MEDIA_HISTORY 条
+    for idx in range(2, MAX_STUDIO_MEDIA_HISTORY + 5):
+        append_asset_image_history(
+            asset,
+            url=f"https://img.example/{idx}.png",
+            key=f"framedrama/1/images/{idx}.png",
+            source="upload" if idx % 2 == 0 else "ai",
+        )
+    assert len(asset.image_history) == MAX_STUDIO_MEDIA_HISTORY
+    assert asset.image_history[0]["url"] == "https://img.example/5.png"
+    assert asset.image_history[-1]["url"] == f"https://img.example/{MAX_STUDIO_MEDIA_HISTORY + 4}.png"
+
+    failed_job = Job(
+        id=uuid4(),
+        user_id=1,
+        project_id=project_id,
+        job_type="asset_image",
+        target_id=str(asset.id),
+        status="review",
+        error_code="poll_timeout",
+        error_message="[HTTP 503] 上游超时待核对",
+    )
+    asset.image_url = asset.image_history[-1]["url"]
+    asset.last_job_id = failed_job.id
+    out = serialize_asset_out(asset, failed_job)
+    assert len(out.image_history) == MAX_STUDIO_MEDIA_HISTORY
+    assert out.last_job_status == "review"
+    assert out.last_job_error == "[HTTP 503] 上游超时待核对"
+
+    clip = StoryboardClip(
+        id=uuid4(),
+        project_id=project_id,
+        episode_id=episode_id,
+        clip_index=1,
+        duration_seconds=5,
+        prompt="镜头一",
+        prompt_customized=False,
+        references=[],
+        video_status="ready",
+    )
+    append_clip_video_history(
+        clip,
+        url="https://vid.example/v1.mp4",
+        key="framedrama/1/videos/v1.mp4",
+        source="ai",
+        model_id="seedance-2.0",
+        resolution="720p",
+        ratio="16:9",
+        duration=5.2,
+    )
+    clip_out = serialize_clip_out(clip)
+    assert len(clip_out.video_history) == 1
+    assert clip_out.video_history[0].duration == 5.2
+    assert clip_out.last_job_status is None
+
+
+async def test_select_and_delete_asset_image_history_service():
+    from app.core.errors import AppError
+    from app.modules.studio.models import Project
+    from app.modules.studio.service import (
+        append_asset_image_history,
+        delete_asset_image_history,
+        select_asset_image_history,
+    )
+
+    db = InMemoryMediaDB()
+    project = Project(id=uuid4(), user_id=1, name="测试剧")
+    asset = ProjectAsset(
+        id=uuid4(),
+        project_id=project.id,
+        asset_code="C1",
+        kind="character",
+        name="老刑警",
+        description="",
+        prompt="",
+        voice="",
+        episode_numbers=[],
+        image_status="ready",
+        image_url="https://img.example/v2.png",
+        image_key="framedrama/1/images/v2.png",
+    )
+    e1 = append_asset_image_history(
+        asset,
+        url="https://img.example/v1.png",
+        key="framedrama/1/images/v1.png",
+        source="ai",
+        model_id="gpt-image-2",
+        tier="1k",
+    )
+    e2 = append_asset_image_history(
+        asset,
+        url="https://img.example/v2.png",
+        key="framedrama/1/images/v2.png",
+        source="upload",
+    )
+    db.assets[asset.id] = asset
+
+    async with db.session_factory() as session:
+        # 当前生效版本不可删除
+        with pytest.raises(AppError) as active_err:
+            await delete_asset_image_history(
+                session, project=project, asset_id=asset.id, history_id=e2["id"]
+            )
+        assert active_err.value.code == "cannot_delete_active_history"
+
+        # 切换到旧版本
+        updated = await select_asset_image_history(
+            session, project=project, asset_id=asset.id, history_id=e1["id"]
+        )
+        assert updated.image_url == "https://img.example/v1.png"
+        assert updated.image_key == "framedrama/1/images/v1.png"
+        assert updated.image_model_id == "gpt-image-2"
+        assert updated.image_tier == "1k"
+
+        # 切换后，原来的 v2 可以删除
+        after_delete = await delete_asset_image_history(
+            session, project=project, asset_id=asset.id, history_id=e2["id"]
+        )
+        assert len(after_delete.image_history) == 1
+        assert after_delete.image_history[0]["id"] == e1["id"]
 
 
 async def _async_return(value):
