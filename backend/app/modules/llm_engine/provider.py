@@ -20,6 +20,20 @@ MODEL_SETTINGS = OpenRouterModelSettings(
     openrouter_usage={"include": True},
 )
 
+PLANNING_MODEL_SETTINGS = OpenRouterModelSettings(
+    timeout=420,
+    max_tokens=32768,
+    openrouter_reasoning={"enabled": True, "effort": "medium"},
+    openrouter_usage={"include": True},
+)
+
+BEAT_SHEET_MODEL_SETTINGS = OpenRouterModelSettings(
+    timeout=420,
+    max_tokens=16384,
+    openrouter_reasoning={"enabled": True, "effort": "low"},
+    openrouter_usage={"include": True},
+)
+
 
 async def resolve_text_model(
     session: AsyncSession,

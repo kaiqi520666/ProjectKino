@@ -42,6 +42,7 @@ export interface BackendEpisode {
   seconds: number
   scenes: BackendScene[]
   script: string
+  warnings?: string[]
 }
 
 export interface BackendWorld {
@@ -69,6 +70,7 @@ export interface BackendOutline {
   world?: BackendWorld
   characters?: BackendOutlineCharacter[]
   scenes?: BackendOutlineScene[]
+  episodes?: Array<{ number: number; title?: string }>
   [key: string]: unknown
 }
 

@@ -74,8 +74,9 @@ from app.modules.studio.service import (
     persist_appended_episode,
     persist_extracted_assets,
     persist_generated_new_clip,
+    persist_project_outline,
     persist_rewritten_episode,
-    persist_script_result,
+    persist_single_episode,
     persist_storyboard_result,
 )
 from app.workers.broker import WorkerRuntime, ai_broker
@@ -226,6 +227,40 @@ async def run_llm_job_core(
                 if job.job_type in ("script_generate", "script_regenerate"):
                     proj_settings = ProjectSettings.model_validate(project.settings)
                     source = Source.from_text(project.mode, project.source_text)  # type: ignore[arg-type]
+                    is_resume = bool(payload.get("resume")) and job.job_type == "script_generate"
+                    existing_outline = None
+                    existing_eps = ()
+                    if is_resume:
+                        existing_script = await build_script_result_from_db(session, project)
+                        existing_outline = existing_script.outline
+                        existing_eps = tuple(existing_script.episodes)
+                    project_uuid = project.id
+                    reset_downstream = job.job_type == "script_regenerate"
+
+                    async def _save_outline(outline_obj) -> None:
+                        async with sessions() as write_db:
+                            proj_row = await write_db.scalar(
+                                select(Project).where(Project.id == project_uuid)
+                            )
+                            if proj_row is not None:
+                                await persist_project_outline(
+                                    write_db,
+                                    proj_row,
+                                    proj_settings,
+                                    outline_obj,
+                                    reset_downstream=reset_downstream,
+                                )
+                                await write_db.commit()
+
+                    async def _save_episode(ep_obj) -> None:
+                        async with sessions() as write_db:
+                            proj_row = await write_db.scalar(
+                                select(Project).where(Project.id == project_uuid)
+                            )
+                            if proj_row is not None:
+                                await persist_single_episode(write_db, proj_row, ep_obj)
+                                await write_db.commit()
+
                     generated = await generate_script(
                         model,
                         proj_settings,
@@ -233,12 +268,10 @@ async def run_llm_job_core(
                         feedback=str(payload.get("feedback", "")),
                         usage=run_usage,
                         on_progress=on_progress,
-                    )
-                    await persist_script_result(
-                        session,
-                        project,
-                        generated,
-                        reset_downstream=(job.job_type == "script_regenerate"),
+                        on_outline=_save_outline,
+                        on_episode_ready=_save_episode,
+                        existing_outline=existing_outline,
+                        existing_episodes=existing_eps,
                     )
                     result_payload["episodeCount"] = len(generated.episodes)
 

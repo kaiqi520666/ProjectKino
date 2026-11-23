@@ -15,6 +15,7 @@ from app.modules.llm_engine.script_gen import ProgressCallback, _notify, prompt,
 MAX_CLUES_PER_ASSET = 16
 MAX_CLUE_CHARS = 80
 MAX_VARIANTS_PER_ASSET = 3
+ASSET_DESIGN_BATCH_SIZE = 15
 _SCENE_EMPTY = re.compile(
     r"(无人|空景|空无一人|没有人物|无人物|无任何人物|empty scene|no people)", re.IGNORECASE
 )
@@ -312,27 +313,42 @@ async def design_kind(
         retries=2,
     )
     agent.output_validator(verify_designs)
-    result = await agent.run(
-        prompt(
-            {
-                "kind": kind,
-                "settings": settings_payload,
-                "assets": [
+    forbidden_names = tuple(n for n in forbidden if n)
+    chunks = [
+        items[start : start + ASSET_DESIGN_BATCH_SIZE]
+        for start in range(0, len(items), ASSET_DESIGN_BATCH_SIZE)
+    ]
+    limiter = asyncio.Semaphore(3)
+
+    async def run_chunk(chunk: list[InventoryItem]) -> dict[str, AssetDesign]:
+        async with limiter:
+            result = await agent.run(
+                prompt(
                     {
-                        "id": item.id,
-                        "name": item.name,
-                        "episodes": list(item.episodes),
-                        "profile": item.profile,
-                        **({"scriptClues": list(item.clues)} if item.clues else {}),
+                        "kind": kind,
+                        "settings": settings_payload,
+                        "assets": [
+                            {
+                                "id": item.id,
+                                "name": item.name,
+                                "episodes": list(item.episodes),
+                                "profile": item.profile,
+                                **({"scriptClues": list(item.clues)} if item.clues else {}),
+                            }
+                            for item in chunk
+                        ],
                     }
-                    for item in items
-                ],
-            }
-        ),
-        deps=DesignContext(kind, tuple(item.id for item in items), tuple(n for n in forbidden if n)),
-        usage=usage,
-    )
-    return {design.id: design for design in result.output.assets}
+                ),
+                deps=DesignContext(kind, tuple(item.id for item in chunk), forbidden_names),
+                usage=usage,
+            )
+        return {design.id: design for design in result.output.assets}
+
+    chunk_results = await asyncio.gather(*(run_chunk(chunk) for chunk in chunks))
+    merged: dict[str, AssetDesign] = {}
+    for part in chunk_results:
+        merged.update(part)
+    return merged
 
 
 class VariantPromptSuggestion(Record):

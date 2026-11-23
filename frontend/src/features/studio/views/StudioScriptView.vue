@@ -18,6 +18,7 @@ import {
   saveStructuredEpisodeApi,
   startAppendEpisode,
   startRegenerateStory,
+  startResumeScript,
   startRewriteEpisode,
   watchJob,
 } from '../api'
@@ -48,6 +49,14 @@ const regenFeedback = ref('')
 const total = computed(() => props.project.creation.settings.episodeCount)
 const episode = computed(() => readEpisode(props.project, number.value))
 const backendEpisode = computed(() => props.project.scriptResult?.episodes.find((item) => item.number === number.value))
+const episodeWarnings = computed(() => backendEpisode.value?.warnings ?? [])
+const missingEpisodeCount = computed(() => {
+  if (!props.project.persisted || !props.project.scriptResult?.outline) return 0
+  const planned = props.project.scriptResult.outline.episodes
+  const plannedCount = Array.isArray(planned) && planned.length > 0 ? planned.length : total.value
+  const completedCount = props.project.scriptResult.episodes.length
+  return Math.max(0, plannedCount - completedCount)
+})
 const episodeLabel = computed(() => `第 ${number.value} 集`)
 const isStructuredEditing = computed(() => !!draft.value && !!structuredDraft.value)
 const structuredError = computed(() => {
@@ -341,6 +350,52 @@ async function submitRegen() {
   if (result) regenFeedback.value = ''
 }
 
+async function resumeMissingEpisodes() {
+  if (generation.isRunning || missingEpisodeCount.value <= 0) return
+  const missing = missingEpisodeCount.value
+  const style = artStyles.find(({ value }) => value === props.project.creation.settings.visualStyle)
+  const subtitle = [
+    props.project.creation.settings.name,
+    `继续补写剩余 ${missing} 集`,
+    style?.label || props.project.creation.settings.visualStyle,
+  ].filter(Boolean).join(' · ')
+
+  await generation.runTask(
+    {
+      title: `正在续写剩余 ${missing} 集剧本`,
+      subtitle,
+      description: '已复用现有分集大纲与已完成分集，继续逐集生成剩余剧本',
+      steps: [
+        '读取已保存的分集大纲与已完成分集',
+        '逐集规划分场节拍表并多轮扩写正文',
+      ],
+      hint: '每写完一集将自动落库保存，刷新页面也不会丢失进度',
+      formatError: apiErrorMessage,
+      canRetryError: isRetryableApiError,
+      successMessage: (detail: ProjectDetailOut) => `《${detail.name}》已完成全部 ${detail.episodes.length} 集剧本`,
+    },
+    async (controls) => {
+      try {
+        const accepted = await startResumeScript(props.project.id)
+        controls.setJobId(accepted.job.id)
+        controls.setProgress(accepted.job.progress)
+        await watchJob(accepted.job.id, (job) => {
+          controls.setProgress(job.progress)
+          if (job.stepLabel) controls.setDescription(job.stepLabel)
+          controls.setStep(job.stepIndex <= 1 ? 0 : 1)
+        })
+        const detail = await getProjectDetail(props.project.id)
+        studio.hydrateProjectDetail(detail)
+        clearEditDraft()
+        ui.notify(`已完成剩余 ${missing} 集剧本`, 'success')
+        return detail
+      } finally {
+        void auth.refreshBalance()
+      }
+    },
+  )
+}
+
 onBeforeRouteLeave((to) => {
   if (!canLeave()) return false
   if (to.params.projectId === props.project.id) {
@@ -372,6 +427,16 @@ onBeforeRouteUpdate(canLeave)
           </StudioEpisodeList>
         </div>
         <div class="script-episodes-footer">
+          <UiButton
+            v-if="missingEpisodeCount > 0"
+            class="script-resume-episodes"
+            variant="primary"
+            size="sm"
+            :disabled="generation.isRunning"
+            @click="resumeMissingEpisodes"
+          >
+            <template #leading><RefreshCw :size="14" aria-hidden="true" /></template>继续生成剩余 {{ missingEpisodeCount }} 集
+          </UiButton>
           <UiButton class="script-add-episode" variant="outline" size="sm" :disabled="total === Number.MAX_SAFE_INTEGER || generation.isRunning" @click="addEpisode">
             <template #leading><Plus :size="15" aria-hidden="true" /></template>新增一集
           </UiButton>
@@ -413,6 +478,21 @@ onBeforeRouteUpdate(canLeave)
             </UiButton>
           </div>
         </header>
+
+        <div v-if="!draft && (missingEpisodeCount > 0 || episodeWarnings.length > 0)" class="script-banners">
+          <UiAlert
+            v-if="missingEpisodeCount > 0"
+            tone="warning"
+            :title="`全剧大纲已保存，还有 ${missingEpisodeCount} 集待继续生成`"
+            description="已完成的分集均已安全落库；点击左侧「继续生成剩余分集」可从断点接着补写，不会覆盖已有集数。"
+          />
+          <UiAlert
+            v-if="episodeWarnings.length > 0"
+            tone="warning"
+            title="本集质量门提醒"
+            :description="episodeWarnings.join('；')"
+          />
+        </div>
 
         <form v-if="draft" :id="editFormId" class="script-edit-form" @submit.prevent="save">
           <StructuredScriptEditor
@@ -500,6 +580,8 @@ onBeforeRouteUpdate(canLeave)
 .script-muted { color: var(--color-muted); }
 .script-example { color: var(--color-gold-soft); font-size: 12px; }
 .script-reading, .script-edit-form { padding: 16px; }
+.script-banners { display: grid; flex-shrink: 0; gap: 8px; padding: 12px 16px 0; }
+.script-resume-episodes { width: 100%; }
 .script-reading { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: rgb(255 255 255 / 16%) transparent; }
 .script-reading p { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 .script-prose { line-height: 1.9; }

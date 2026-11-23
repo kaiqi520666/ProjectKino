@@ -383,6 +383,54 @@ async def build_asset_result_from_db(
     )
 
 
+async def persist_project_outline(
+    session: AsyncSession,
+    project: Project,
+    settings: ProjectSettings,
+    outline: Outline,
+    *,
+    reset_downstream: bool = False,
+) -> None:
+    """大纲规划完成后立即落库；若为全剧重生成则清空下游资产/分镜，并清理旧分集准备逐集写入。"""
+    project.name = settings.name
+    project.settings = settings.model_dump()
+    project.outline = outline.model_dump()
+    project.script_confirmed = False
+
+    if reset_downstream:
+        await session.execute(delete(StoryboardClip).where(StoryboardClip.project_id == project.id))
+        await session.execute(delete(ProjectAsset).where(ProjectAsset.project_id == project.id))
+    await session.execute(delete(Episode).where(Episode.project_id == project.id))
+    await session.flush()
+
+
+async def persist_single_episode(
+    session: AsyncSession,
+    project: Project,
+    ep_data: LlmEpisode,
+) -> Episode:
+    """逐集增量落库：每写完一集立即持久化，避免长剧后半程异常导致已完成分集白跑。"""
+    ep = await session.scalar(
+        select(Episode).where(Episode.project_id == project.id, Episode.number == ep_data.number)
+    )
+    if ep is None:
+        ep = Episode(project_id=project.id, number=ep_data.number, title=ep_data.title)
+        session.add(ep)
+    ep.title = ep_data.title
+    ep.summary = ep_data.summary
+    ep.target_seconds = ep_data.targetSeconds
+    ep.seconds = ep_data.seconds
+    ep.hook = ep_data.hook
+    ep.cliff = ep_data.cliff
+    ep.hook_beat = list(ep_data.hookBeat)
+    ep.scenes = [scene.model_dump() for scene in ep_data.scenes]
+    ep.script = ep_data.script
+    ep.warnings = list(ep_data.warnings)
+    project.script_confirmed = False
+    await session.flush()
+    return ep
+
+
 async def persist_script_result(
     session: AsyncSession,
     project: Project,

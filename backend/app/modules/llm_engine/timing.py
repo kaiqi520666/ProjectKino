@@ -144,7 +144,10 @@ def episode_problems(
     if position is None:
         problems.append(f"hookBeat {list(episode.hookBeat)} 指向不存在的场次或节拍。")
     elif position > HOOK_WINDOW:
-        problems.append(f"钩子认领落在全集第 {position} 拍，必须在前 {HOOK_WINDOW} 拍内兑现（冷开场）。")
+        problems.append(
+            f"钩子认领落在全集第 {position} 拍，必须把开场钩子事件提前写进第 1 场前 {HOOK_WINDOW} 拍内，"
+            "再将 hookBeat 指向该拍（如 [1, 1]–[1, 3]，不要只改数字敷衍，也不要填结尾悬念 cliff 的位置）。"
+        )
 
     if check_duration:
         problems.extend(episode_duration_problems(episode, target))
@@ -152,13 +155,19 @@ def episode_problems(
 
 
 def episode_warnings(episode: EpisodeDraft, target: int) -> list[str]:
+    warnings: list[str] = []
     seconds = episode_seconds(episode)
     low, high = seconds_range(target)
     if seconds < low:
-        return [f"全集 {seconds} 秒，短于建议区间 {low}–{high} 秒，建议补戏"]
-    if seconds > high:
-        return [f"全集 {seconds} 秒，超出建议区间 {low}–{high} 秒，建议压缩"]
-    return []
+        warnings.append(f"全集 {seconds} 秒，短于建议区间 {low}–{high} 秒，建议补戏")
+    elif seconds > high:
+        warnings.append(f"全集 {seconds} 秒，超出建议区间 {low}–{high} 秒，建议压缩")
+    position = _hook_position(episode)
+    if position is not None and position > HOOK_WINDOW:
+        warnings.append(
+            f"开场钩子落在全集第 {position} 拍（建议在前 {HOOK_WINDOW} 拍内），建议审校第 1 场开场或重写本集"
+        )
+    return warnings
 
 
 def render_script(episode: EpisodeDraft, outline: Outline) -> str:

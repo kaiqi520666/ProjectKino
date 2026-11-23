@@ -67,6 +67,10 @@ export function startAppendEpisode(projectId: string, feedback = '') {
   return unwrap<ProjectJobAcceptedOut>(http.post(`/projects/${projectId}/episodes/append`, { feedback }))
 }
 
+export function startResumeScript(projectId: string) {
+  return unwrap<ProjectJobAcceptedOut>(http.post(`/projects/${projectId}/episodes/resume`))
+}
+
 export function saveStructuredEpisodeApi(
   projectId: string,
   episodeNumber: number,

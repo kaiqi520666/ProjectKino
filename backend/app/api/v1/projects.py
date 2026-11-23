@@ -209,6 +209,42 @@ async def regenerate_project_script(
 
 
 @router.post(
+    "/{project_id}/episodes/resume", response_model=ApiResponse[ProjectJobAcceptedOut], status_code=202
+)
+async def resume_project_episodes(
+    project_id: UUID,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[ProjectJobAcceptedOut]:
+    await assert_llm_balance_positive(session, user.id)
+    project = await get_owned_project(session, project_id=project_id, user_id=user.id)
+    if not project.outline:
+        raise AppError(400, "outline_missing", "该项目尚未生成分集大纲，请使用重生成全剧")
+    if not project.source_text.strip():
+        raise AppError(400, "source_text_missing", "该项目缺少原始故事内容，无法继续生成")
+    planned_eps = project.outline.get("episodes") if isinstance(project.outline, dict) else []
+    planned_numbers = {int(item["number"]) for item in (planned_eps or []) if isinstance(item, dict)}
+    existing_numbers = set(
+        await session.scalars(select(Episode.number).where(Episode.project_id == project.id))
+    )
+    missing_count = len(planned_numbers - existing_numbers)
+    if missing_count <= 0:
+        raise AppError(400, "episodes_already_complete", "全部分集均已生成完成，无需继续补写")
+    job = await create_job(
+        session,
+        user_id=user.id,
+        project_id=project.id,
+        job_type="script_generate",
+        input_payload={"resume": True},
+        step_total=missing_count + 2,
+        step_label=f"继续生成剩余 {missing_count} 集任务已排队",
+    )
+    await session.commit()
+    await execute_llm_job.kiq(str(job.id))
+    return ApiResponse(data=ProjectJobAcceptedOut(project_id=project.id, job=JobOut.model_validate(job)))
+
+
+@router.post(
     "/{project_id}/episodes/append", response_model=ApiResponse[ProjectJobAcceptedOut], status_code=202
 )
 async def append_project_episode(

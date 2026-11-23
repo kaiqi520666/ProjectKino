@@ -5,7 +5,12 @@ from pydantic_ai.models.openrouter import OpenRouterModel
 
 from app.core.errors import AppError
 from app.modules.catalog.models import AiModel, AiProvider
-from app.modules.llm_engine.provider import MODEL_SETTINGS, resolve_text_model
+from app.modules.llm_engine.provider import (
+    BEAT_SHEET_MODEL_SETTINGS,
+    MODEL_SETTINGS,
+    PLANNING_MODEL_SETTINGS,
+    resolve_text_model,
+)
 
 
 class _FakeExecuteResult:
@@ -68,6 +73,8 @@ async def test_resolve_text_model_uses_openrouter_preset_and_disables_reasoning(
     assert model.model_name == "@preset/ds-baidu"
     assert MODEL_SETTINGS.get("max_tokens") == 32768
     assert MODEL_SETTINGS.get("openrouter_reasoning") == {"enabled": False}
+    assert PLANNING_MODEL_SETTINGS.get("openrouter_reasoning") == {"enabled": True, "effort": "medium"}
+    assert BEAT_SHEET_MODEL_SETTINGS.get("openrouter_reasoning") == {"enabled": True, "effort": "low"}
     assert MODEL_SETTINGS.get("openrouter_usage") == {"include": True}
 
 

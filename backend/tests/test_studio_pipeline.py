@@ -9,7 +9,14 @@ from pydantic_ai.messages import ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.usage import RequestUsage
 
-from app.modules.llm_engine.asset_gen import MAX_CLUES_PER_ASSET, analyze_assets, inventory
+from app.modules.llm_engine.asset_gen import (
+    ASSET_DESIGN_BATCH_SIZE,
+    MAX_CLUES_PER_ASSET,
+    InventoryItem,
+    analyze_assets,
+    design_kind,
+    inventory,
+)
 from app.modules.llm_engine.schema import (
     Asset,
     AssetResult,
@@ -20,11 +27,14 @@ from app.modules.llm_engine.schema import (
 from app.modules.llm_engine.schema import Episode as SchemaEpisode
 from app.modules.llm_engine.script_gen import (
     CHUNK_CHARS,
+    MAX_GROUP_SECONDS,
     MAX_SOURCE_EXCERPT_CHARS_PER_EPISODE,
     MAX_SOURCE_LINE_CHARS,
+    SceneBeatPlan,
     Source,
     _bounded_source_excerpts,
     _episode_budget,
+    _group_beat_plans,
     _outline_scale_guide,
     append_episode,
     chunk_ranges,
@@ -111,6 +121,71 @@ def _valid_episode(number: int = 1, *, short: bool = False) -> dict:
     }
 
 
+def _last_user_json(messages) -> dict:
+    parts = [p for m in messages for p in m.parts if isinstance(p, UserPromptPart)]
+    for part in reversed(parts):
+        if isinstance(part.content, str) and part.content.lstrip().startswith("{"):
+            return json.loads(part.content)
+    return json.loads(parts[-1].content)
+
+
+def _valid_beat_sheet(number: int = 1, target: int = 120) -> dict:
+    per_scene = min(150, max(60, target // max(1, round(target / 150))))
+    count = max(1, round(target / per_scene))
+    allocated = [target // count] * count
+    allocated[-1] += target - sum(allocated)
+    return {
+        "title": f"三短一长-{number}",
+        "summary": "十一点整墙里传来三短一长敲击声。",
+        "hook": "十一点整敲墙声响起。",
+        "cliff": "门缝滑进一张带血字条。",
+        "scenes": [
+            {
+                "index": idx,
+                "sceneId": "S01",
+                "lighting": "暖黄台灯微光",
+                "characters": ["C01"],
+                "props": ["P01"],
+                "goal": f"第 {idx} 场：林晚追查墙内敲击声来源并发现异常线索。",
+                "targetSeconds": sec,
+            }
+            for idx, sec in enumerate(allocated, 1)
+        ],
+    }
+
+
+def _valid_scene_group(target: int = 120, *, include_hook: bool = True, short: bool = False) -> dict:
+    if short:
+        flow = [{"action": "林晚猛地睁开眼。"}]
+    else:
+        # 每对 (action 2.5s + 26字台词 5.8s) ≈ 8.3s
+        pairs = max(4, round(target / 8.3))
+        flow = []
+        for idx in range(pairs):
+            flow.append({"action": f"林晚第 {idx + 1} 次靠近墙面仔细听动静，手里紧握木质晾衣杆。"})
+            flow.append(
+                {
+                    "speaker": "C01",
+                    "delivery": "低声压抑",
+                    "line": "十一点整三短一长，隔壁明明空了半年，到底是谁在敲墙？",
+                }
+            )
+    body: dict = {
+        "scenes": [
+            {
+                "sceneId": "S01",
+                "lighting": "暖黄台灯微光",
+                "characters": ["C01"],
+                "props": ["P01"],
+                "flow": flow,
+            }
+        ]
+    }
+    if include_hook:
+        body["hookBeat"] = [1, 1]
+    return body
+
+
 async def test_generate_script_tracks_usage_and_emits_progress_steps():
     progress_events: list[tuple[int, int, str, int]] = []
 
@@ -118,14 +193,19 @@ async def test_generate_script_tracks_usage_and_emits_progress_steps():
         progress_events.append((step_idx, step_total, label, pct))
 
     def respond(messages, _info):
-        user = next(p for m in messages for p in m.parts if isinstance(p, UserPromptPart))
-        data = json.loads(user.content)
-        if "episode" not in data:
+        data = _last_user_json(messages)
+        task = data.get("task")
+        if task == "plan_episode_beats":
+            body = _valid_beat_sheet(int(data["episode"]["number"]), int(data["episodeSeconds"]))
+            usage = RequestUsage(input_tokens=500, cache_read_tokens=100, output_tokens=150)
+        elif task == "write_scene_group":
+            body = _valid_scene_group(
+                int(data["groupTargetSeconds"]), include_hook=(data["groupIndex"] == 1)
+            )
+            usage = RequestUsage(input_tokens=1500, cache_read_tokens=400, output_tokens=450)
+        else:
             body = _valid_outline(1)
             usage = RequestUsage(input_tokens=1000, cache_read_tokens=200, output_tokens=300)
-        else:
-            body = _valid_episode(1)
-            usage = RequestUsage(input_tokens=2000, cache_read_tokens=500, output_tokens=600)
         return ModelResponse(parts=[TextPart(json.dumps(body, ensure_ascii=False))], usage=usage)
 
     usage = RunUsage()
@@ -155,15 +235,18 @@ async def test_failed_episode_still_accumulates_consumed_tokens_in_shared_usage(
     """验证零垫资原则：即便第 1 集校验失败抛出异常，已消耗的大纲 + 重试 token 依然保留在 RunUsage 中。"""
 
     def respond(messages, _info):
-        user = next(p for m in messages for p in m.parts if isinstance(p, UserPromptPart))
-        data = json.loads(user.content)
-        if "episode" not in data:
+        data = _last_user_json(messages)
+        task = data.get("task")
+        if task == "plan_episode_beats":
+            body = _valid_beat_sheet(1, 120)
+            usage = RequestUsage(input_tokens=400, output_tokens=100)
+        elif task == "write_scene_group":
+            # 故意永远返回极短剧本，触发全部重试并最终抛出 UnexpectedModelBehavior。
+            body = _valid_scene_group(120, include_hook=True, short=True)
+            usage = RequestUsage(input_tokens=500, output_tokens=100)
+        else:
             body = _valid_outline(1)
             usage = RequestUsage(input_tokens=800, output_tokens=200)
-        else:
-            # 故意永远返回极短剧本，触发全部重试并最终抛出 UnexpectedModelBehavior。
-            body = _valid_episode(1, short=True)
-            usage = RequestUsage(input_tokens=500, output_tokens=100)
         return ModelResponse(parts=[TextPart(json.dumps(body, ensure_ascii=False))], usage=usage)
 
     usage = RunUsage()
@@ -182,15 +265,15 @@ async def test_failed_episode_still_accumulates_consumed_tokens_in_shared_usage(
             usage=usage,
         )
 
-    # 1 次大纲 (800 in, 200 out) + 6 次分集尝试 (6 * 500 = 3000 in, 600 out)
-    assert usage.input_tokens >= 3800
-    assert usage.output_tokens >= 800
+    # 1 次大纲 (800) + 1 次节拍表 (400) + 4 次组尝试 (4 * 500 = 2000)
+    assert usage.input_tokens >= 3200
+    assert usage.output_tokens >= 700
 
 
 async def test_append_assets_and_storyboard_pipeline_works_with_shared_usage():
     def script_respond(messages, _info):
-        user = next(p for m in messages for p in m.parts if isinstance(p, UserPromptPart))
-        data = json.loads(user.content)
+        data = _last_user_json(messages)
+        task = data.get("task")
         if "nextEpisodeNumber" in data:
             body = {
                 "plan": {
@@ -209,8 +292,12 @@ async def test_append_assets_and_storyboard_pipeline_works_with_shared_usage():
                 "newProps": [],
                 "continuityUpdate": "林晚拿到纸条。",
             }
-        elif "episode" in data:
-            body = _valid_episode(int(data["episode"]["number"]))
+        elif task == "plan_episode_beats":
+            body = _valid_beat_sheet(int(data["episode"]["number"]), int(data["episodeSeconds"]))
+        elif task == "write_scene_group":
+            body = _valid_scene_group(
+                int(data["groupTargetSeconds"]), include_hook=(data["groupIndex"] == 1)
+            )
         else:
             body = _valid_outline(1)
         return ModelResponse(
@@ -335,9 +422,16 @@ async def test_analyze_assets_auto_variants_and_storyboard_variant_binding():
     )
 
     def script_respond(messages, _info):
-        user = next(p for m in messages for p in m.parts if isinstance(p, UserPromptPart))
-        data = json.loads(user.content)
-        body = _valid_episode(int(data["episode"]["number"])) if "episode" in data else _valid_outline(1)
+        data = _last_user_json(messages)
+        task = data.get("task")
+        if task == "plan_episode_beats":
+            body = _valid_beat_sheet(int(data["episode"]["number"]), int(data["episodeSeconds"]))
+        elif task == "write_scene_group":
+            body = _valid_scene_group(
+                int(data["groupTargetSeconds"]), include_hook=(data["groupIndex"] == 1)
+            )
+        else:
+            body = _valid_outline(1)
         return ModelResponse(parts=[TextPart(json.dumps(body, ensure_ascii=False))])
 
     script = await generate_script(
@@ -474,13 +568,16 @@ async def test_analyze_assets_auto_variants_and_storyboard_variant_binding():
 
 def _script_responder(*, count: int = 1):
     def respond(messages, _info):
-        user = next(p for m in messages for p in m.parts if isinstance(p, UserPromptPart))
-        data = json.loads(user.content)
-        body = (
-            _valid_outline(count)
-            if "episode" not in data
-            else _valid_episode(data["episode"]["number"])
-        )
+        data = _last_user_json(messages)
+        task = data.get("task")
+        if task == "plan_episode_beats":
+            body = _valid_beat_sheet(int(data["episode"]["number"]), int(data["episodeSeconds"]))
+        elif task == "write_scene_group":
+            body = _valid_scene_group(
+                int(data["groupTargetSeconds"]), include_hook=(data["groupIndex"] == 1)
+            )
+        else:
+            body = _valid_outline(count)
         return ModelResponse(parts=[TextPart(json.dumps(body, ensure_ascii=False))])
 
     return respond
@@ -1109,3 +1206,151 @@ def test_outline_scale_guide_tiers_and_round_robin_asset_clues():
     assert len(c01_clues) <= MAX_CLUES_PER_ASSET
     assert any("第5集" in c and "黑色风衣" in c for c in c01_clues)
     assert any("第6集" in c and "米色毛衣" in c for c in c01_clues)
+
+
+@pytest.mark.asyncio
+async def test_unified_600s_multiturn_closed_loop_patch_and_resume():
+    # 1. 验证 _group_beat_plans 统一公式：120s -> 1 组，600s -> 4 组
+    plans_120 = [
+        SceneBeatPlan(index=1, sceneId="S01", goal="开场钩子", targetSeconds=55),
+        SceneBeatPlan(index=2, sceneId="S01", goal="反转收尾", targetSeconds=65),
+    ]
+    assert len(_group_beat_plans(plans_120, MAX_GROUP_SECONDS)) == 1
+
+    plans_600 = [
+        SceneBeatPlan(index=i, sceneId="S01", goal=f"第{i}场冲突", targetSeconds=150)
+        for i in range(1, 5)
+    ]
+    assert len(_group_beat_plans(plans_600, MAX_GROUP_SECONDS)) == 4
+
+    # 2. 验证 600s 单集多轮闭环纠偏 + 偏短时触发局部补戏 Patch（插在结尾场之前）
+    seen_groups: list[dict] = []
+    seen_history_lengths: list[int] = []
+    patch_calls = 0
+
+    def long_ep_responder(messages, _info):
+        nonlocal patch_calls
+        data = _last_user_json(messages)
+        task = data.get("task")
+        if task == "plan_episode_beats":
+            return ModelResponse(
+                parts=[TextPart(json.dumps(_valid_beat_sheet(1, 600), ensure_ascii=False))]
+            )
+        if task == "write_scene_group":
+            seen_groups.append(data)
+            seen_history_lengths.append(len(messages))
+            # 故意每组都写短到 ~105s（4 组总计 ~420s < 448s 硬下界），既验证闭环自动拉高后续组目标，
+            # 也验证全集拼装偏短时触发局部补戏 Patch 而非撕卷重来
+            body = _valid_scene_group(105, include_hook=(data["groupIndex"] == 1))
+            if data["groupIndex"] == data["groupTotal"]:
+                body["scenes"][0]["lighting"] = "结尾悬念专属冷光"
+            return ModelResponse(parts=[TextPart(json.dumps(body, ensure_ascii=False))])
+        if task == "patch_short_episode":
+            patch_calls += 1
+            body = _valid_scene_group(int(data["gapSeconds"]), include_hook=False)
+            body["scenes"][0]["lighting"] = "局部补戏中段灯光"
+            return ModelResponse(parts=[TextPart(json.dumps(body, ensure_ascii=False))])
+        return ModelResponse(parts=[TextPart(json.dumps(_valid_outline(2), ensure_ascii=False))])
+
+    saved_outlines: list[Outline] = []
+    saved_episodes: list[int] = []
+
+    async def on_outline(o: Outline) -> None:
+        saved_outlines.append(o)
+
+    async def on_episode_ready(ep: SchemaEpisode) -> None:
+        saved_episodes.append(ep.number)
+
+    settings_600 = ProjectSettings(
+        name="十钟测试",
+        ratio="16:9",
+        visualStyle="live-action",
+        episodeCount=2,
+        maxSegmentDuration=30,
+        secondsPerEpisode=600,
+    )
+    res = await generate_script(
+        FunctionModel(long_ep_responder),
+        settings_600,
+        Source.from_text("story", "600秒多轮闭环与补戏测试"),
+        on_outline=on_outline,
+        on_episode_ready=on_episode_ready,
+    )
+    assert len(saved_outlines) == 1
+    assert saved_episodes == [1, 2]
+    # 第 1 集的后续轮次应携带不断增长的多轮历史、自动调高剩余组目标，且最后触发了局部补戏
+    assert len(seen_groups) >= 8  # 2 集 × 4 组
+    assert seen_history_lengths[1] > seen_history_lengths[0]
+    assert seen_groups[1]["groupTargetSeconds"] > seen_groups[0]["groupTargetSeconds"]
+    assert patch_calls >= 1
+    # 验证补戏场被插在了结尾悬念场之前，最后一场仍是结尾悬念场
+    assert res.episodes[0].scenes[-1].lighting == "结尾悬念专属冷光"
+    assert any(s.lighting == "局部补戏中段灯光" for s in res.episodes[0].scenes[:-1])
+
+    # 3. 验证断点续写：传入 existing_outline + 第 1 集，只生成第 2 集
+    resumed_saved: list[int] = []
+
+    async def on_resumed_ep(ep: SchemaEpisode) -> None:
+        resumed_saved.append(ep.number)
+
+    resumed = await generate_script(
+        FunctionModel(long_ep_responder),
+        settings_600,
+        Source.from_text("story", "600秒多轮闭环与补戏测试"),
+        existing_outline=res.outline,
+        existing_episodes=[res.episodes[0]],
+        on_episode_ready=on_resumed_ep,
+    )
+    assert resumed_saved == [2]
+    assert [ep.number for ep in resumed.episodes] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_design_kind_batches_large_asset_lists():
+    total_items = ASSET_DESIGN_BATCH_SIZE + 5
+    items = [
+        InventoryItem(
+            id=f"S{idx:02d}",
+            kind="scene",
+            name=f"场景{idx}",
+            profile="内景 · 夜",
+            episodes=(1,),
+        )
+        for idx in range(1, total_items + 1)
+    ]
+    batch_sizes: list[int] = []
+
+    def batch_responder(messages, _info):
+        data = _last_user_json(messages)
+        batch_sizes.append(len(data["assets"]))
+        return ModelResponse(
+            parts=[
+                TextPart(
+                    json.dumps(
+                        {
+                            "assets": [
+                                {
+                                    "id": entry["id"],
+                                    "description": f"{entry['name']} 描述",
+                                    "prompt": f"电影写实，无人空景，{entry['name']} 夜晚室内",
+                                    "voice": "",
+                                    "variants": [],
+                                }
+                                for entry in data["assets"]
+                            ]
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            ]
+        )
+
+    designs = await design_kind(
+        FunctionModel(batch_responder),
+        "scene",
+        items,
+        {"visualStyle": "live-action"},
+        [],
+    )
+    assert sorted(batch_sizes) == [5, ASSET_DESIGN_BATCH_SIZE]
+    assert len(designs) == total_items

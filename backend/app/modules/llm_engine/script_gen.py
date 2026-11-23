@@ -1,27 +1,37 @@
 import asyncio
 import json
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from math import ceil
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, PositiveInt
 from pydantic_ai import Agent, ModelRetry, PromptedOutput, RunContext, RunUsage
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models import Model
 
 from app.modules.llm_engine.gates import record_gate
-from app.modules.llm_engine.provider import MODEL_SETTINGS
+from app.modules.llm_engine.provider import (
+    BEAT_SHEET_MODEL_SETTINGS,
+    MODEL_SETTINGS,
+    PLANNING_MODEL_SETTINGS,
+)
 from app.modules.llm_engine.schema import (
     Character,
+    CharacterId,
     Episode,
     EpisodeDraft,
     EpisodePlan,
     Outline,
     ProjectSettings,
     PropCard,
+    PropId,
     Record,
+    Scene,
     SceneCard,
+    SceneId,
     ScriptResult,
     Text,
     World,
@@ -29,17 +39,23 @@ from app.modules.llm_engine.schema import (
 from app.modules.llm_engine.timing import (
     ACTION_SECONDS,
     CHARS_PER_SECOND,
+    DURATION_SLACK,
+    HARD_TOLERANCE,
     HOOK_WINDOW,
     MAX_LINE_CHARS,
+    beat_seconds,
     episode_duration_problems,
     episode_problems,
     episode_seconds,
     episode_warnings,
+    line_chars,
     render_script,
     seconds_range,
 )
 
 ProgressCallback = Callable[[int, int, str, int], Awaitable[None]]
+OutlineCallback = Callable[[Outline], Awaitable[None]]
+EpisodeReadyCallback = Callable[[Episode], Awaitable[None]]
 
 SKILLS_DIR = Path(__file__).resolve().parents[3] / "skills"
 DIGEST_THRESHOLD_CHARS = 40_000
@@ -47,6 +63,10 @@ CHUNK_CHARS = 20_000
 MAX_SOURCE_LINE_CHARS = 400
 MAX_SOURCE_LINES_PER_EPISODE = 4000
 MAX_SOURCE_EXCERPT_CHARS_PER_EPISODE = 30_000
+MAX_GROUP_SECONDS = 180
+GROUP_DURATION_TOLERANCE = 0.30
+
+_ACTION_QUOTES = re.compile(r"[「」『』“”\"]")
 
 _CHAPTER_HEADING = re.compile(r"^\s*(第[〇零一二三四五六七八九十百千万0-9]+[章回节][^\n]{0,40})\s*$")
 _SOFT_BREAK_CHARS = "。！？；!?;…\n"
@@ -117,9 +137,52 @@ class ExtensionContext:
     next_number: int
 
 
+@dataclass(frozen=True)
+class BeatSheetContext:
+    plan: EpisodePlan
+    outline: Outline
+    source: Source | None
+    settings: ProjectSettings
+
+
+@dataclass(frozen=True)
+class SceneGroupContext:
+    plan: EpisodePlan
+    outline: Outline
+    source: Source | None
+    settings: ProjectSettings
+    group_index: int
+    group_total: int
+    group_target: int
+    is_patch: bool = False
+
+
 class ChunkDigest(Record):
     summary: Text
     events: Annotated[list[Text], Field(min_length=1)]
+
+
+class SceneBeatPlan(Record):
+    index: PositiveInt
+    sceneId: SceneId
+    lighting: str = ""
+    characters: list[CharacterId] = Field(default_factory=list)
+    props: list[PropId] = Field(default_factory=list)
+    goal: Text
+    targetSeconds: Annotated[int, Field(ge=20, le=MAX_GROUP_SECONDS)]
+
+
+class EpisodeBeatSheet(Record):
+    title: Text
+    summary: Text
+    hook: Text
+    cliff: Text
+    scenes: Annotated[list[SceneBeatPlan], Field(min_length=1, max_length=16)]
+
+
+class SceneGroupDraft(Record):
+    scenes: Annotated[list[Scene], Field(min_length=1)]
+    hookBeat: tuple[PositiveInt, PositiveInt] | None = None
 
 
 class EpisodeExtension(Record):
@@ -133,6 +196,7 @@ class EpisodeExtension(Record):
 def skill_instructions(
     name: Literal[
         "plan-episodes",
+        "plan-episode-beats",
         "write-episode",
         "append-episode",
         "condense-source",
@@ -300,13 +364,217 @@ def verify_episode(ctx: RunContext[EpisodeContext], episode: EpisodeDraft) -> Ep
     return episode
 
 
-def read_source_excerpt(ctx: RunContext[EpisodeContext], start_line: int, end_line: int) -> str:
+def read_source_excerpt(
+    ctx: RunContext[EpisodeContext] | RunContext[BeatSheetContext] | RunContext[SceneGroupContext],
+    start_line: int,
+    end_line: int,
+) -> str:
     source = ctx.deps.source
     if source is None:
         raise ModelRetry("当前请求未附带原稿文本，请直接依据大纲和本集计划写作。")
     if not 1 <= start_line <= end_line <= len(source.lines) or end_line - start_line >= 120:
         raise ModelRetry(f"请在原稿 1–{len(source.lines)} 行内指定范围，每次最多 120 行。")
     return source.excerpt(start_line, end_line)
+
+
+def _scenes_seconds(scenes: Sequence[Scene]) -> float:
+    return round(sum(beat_seconds(beat) for scene in scenes for beat in scene.flow), 1)
+
+
+def _group_hook_position(scenes: Sequence[Scene], hook_beat: tuple[int, int]) -> int | None:
+    scene_index, beat_index = hook_beat
+    if not 1 <= scene_index <= len(scenes):
+        return None
+    if not 1 <= beat_index <= len(scenes[scene_index - 1].flow):
+        return None
+    return sum(len(scene.flow) for scene in scenes[: scene_index - 1]) + beat_index
+
+
+def _scenes_structural_problems(scenes: Sequence[Scene], outline: Outline) -> list[str]:
+    problems: list[str] = []
+    valid_characters = {card.id for card in outline.characters}
+    valid_scenes = {card.id for card in outline.scenes}
+    valid_props = {prop.id for prop in outline.props}
+
+    for scene_index, scene in enumerate(scenes, 1):
+        if scene.sceneId not in valid_scenes:
+            problems.append(f"第 {scene_index} 场引用了大纲里没有的场景 {scene.sceneId}。")
+        for character in scene.characters:
+            if character not in valid_characters:
+                problems.append(f"第 {scene_index} 场引用了大纲里没有的角色 {character}。")
+        for prop in scene.props:
+            if prop not in valid_props:
+                problems.append(f"第 {scene_index} 场引用了大纲里没有的道具 {prop}。")
+
+        if not any(beat.action is not None for beat in scene.flow):
+            problems.append(f"第 {scene_index} 场没有任何动作节拍，纯对白拍不成画面。")
+
+        for beat_index, beat in enumerate(scene.flow, 1):
+            where = f"第 {scene_index} 场第 {beat_index} 拍"
+            if beat.action is not None:
+                if _ACTION_QUOTES.search(beat.action):
+                    problems.append(f"{where}的动作里出现了引号台词，请拆成独立台词节拍。")
+                continue
+            if beat.speaker != "VO" and beat.speaker not in scene.characters:
+                problems.append(
+                    f"{where}的说话人「{beat.speaker}」不在本场 characters {scene.characters} 里。"
+                )
+            if line_chars(beat.line or "") > MAX_LINE_CHARS:
+                problems.append(
+                    f"{where}的台词 {line_chars(beat.line or '')} 字，超过单句 {MAX_LINE_CHARS} 字上限。"
+                )
+    return problems
+
+
+def _group_duration_problems(scenes: Sequence[Scene], target: int) -> list[str]:
+    seconds = _scenes_seconds(scenes)
+    low, high = seconds_range(target, GROUP_DURATION_TOLERANCE)
+    actions = sum(1 for scene in scenes for beat in scene.flow if beat.action is not None)
+    characters = sum(line_chars(beat.line or "") for scene in scenes for beat in scene.flow)
+    if seconds < low - DURATION_SLACK:
+        gap = target - seconds
+        return [
+            f"本组共 {seconds} 秒，短于可交付区间 {low}–{high} 秒（本组目标 {target} 秒）："
+            f"约差 {gap:.1f} 秒，请补足约 {ceil(gap * CHARS_PER_SECOND)} 字台词"
+            f"（或 {ceil(gap / 2 / ACTION_SECONDS)} 拍动作 + {ceil(gap / 2 * CHARS_PER_SECOND)} 字台词）。"
+            f"（当前 {actions} 拍动作、{characters} 字台词）"
+        ]
+    if seconds > high + DURATION_SLACK:
+        excess = seconds - target
+        return [
+            f"本组共 {seconds} 秒，超出可交付区间 {low}–{high} 秒（本组目标 {target} 秒）："
+            f"约多 {excess:.1f} 秒，请压缩约 {ceil(excess / 2 / ACTION_SECONDS)} 拍动作"
+            f" + {ceil(excess / 2 * CHARS_PER_SECOND)} 字台词。"
+            f"（当前 {actions} 拍动作、{characters} 字台词）"
+        ]
+    return []
+
+
+def verify_beat_sheet(ctx: RunContext[BeatSheetContext], sheet: EpisodeBeatSheet) -> EpisodeBeatSheet:
+    outline = ctx.deps.outline
+    plan = ctx.deps.plan
+    target = ctx.deps.settings.secondsPerEpisode
+    valid_characters = {card.id for card in outline.characters}
+    valid_scenes = {card.id for card in outline.scenes}
+    valid_props = {prop.id for prop in outline.props}
+    planned_scenes = set(plan.sceneIds)
+
+    structural: list[str] = []
+    used_planned = False
+    for idx, scene in enumerate(sheet.scenes, 1):
+        if scene.sceneId not in valid_scenes:
+            structural.append(f"节拍表第 {idx} 场引用了不存在的场景 {scene.sceneId}。")
+        if scene.sceneId in planned_scenes:
+            used_planned = True
+        for char_id in scene.characters:
+            if char_id not in valid_characters:
+                structural.append(f"节拍表第 {idx} 场引用了不存在的角色 {char_id}。")
+        for prop_id in scene.props:
+            if prop_id not in valid_props:
+                structural.append(f"节拍表第 {idx} 场引用了不存在的道具 {prop_id}。")
+    if not used_planned:
+        structural.append(f"节拍表未包含本集计划场景 {sorted(planned_scenes)} 中的任何一场。")
+
+    total_planned = sum(scene.targetSeconds for scene in sheet.scenes)
+    low, high = seconds_range(target, 0.15)
+    duration_err: list[str] = []
+    if not (low - DURATION_SLACK <= total_planned <= high + DURATION_SLACK):
+        duration_err.append(
+            f"各场 targetSeconds 总和为 {total_planned} 秒，偏离目标 {target} 秒（建议 {low}–{high} 秒）。"
+        )
+
+    meta = {"episode": plan.number, "retry": ctx.retry}
+    if (
+        not structural
+        and duration_err
+        and ctx.retry >= ctx.max_retries
+        and target * 0.6 <= total_planned <= target * 1.4
+    ):
+        record_gate("plan-episode-beats", True, duration_err, {**meta, "fallback": "duration_soft_pass"})
+        return sheet
+
+    problems = structural + duration_err
+    if problems:
+        record_gate("plan-episode-beats", False, problems, meta)
+        raise ModelRetry("单集分场节拍表未通过检查：\n" + "\n".join(f"- {item}" for item in problems))
+    record_gate("plan-episode-beats", True, meta=meta)
+    return sheet
+
+
+def _group_beat_plans(
+    plans: Sequence[SceneBeatPlan], max_group_seconds: int = MAX_GROUP_SECONDS
+) -> list[list[SceneBeatPlan]]:
+    """统一打包公式：按单组 <= 180s 贪心打包连续场次，120s 自动成 1 组，600s 自动成 3–4 组。"""
+    groups: list[list[SceneBeatPlan]] = []
+    current: list[SceneBeatPlan] = []
+    current_sum = 0
+    for item in plans:
+        if current and current_sum + item.targetSeconds > max_group_seconds:
+            groups.append(current)
+            current = [item]
+            current_sum = item.targetSeconds
+        else:
+            current.append(item)
+            current_sum += item.targetSeconds
+    if current:
+        groups.append(current)
+    return groups
+
+
+def verify_scene_group(ctx: RunContext[SceneGroupContext], draft: SceneGroupDraft) -> SceneGroupDraft:
+    deps = ctx.deps
+    structural = _scenes_structural_problems(draft.scenes, deps.outline)
+    hook_errors: list[str] = []
+    hook_soft = False
+    if deps.group_index == 1 and not deps.is_patch:
+        if draft.hookBeat is None:
+            structural.append("第 1 组必须提供 hookBeat 指向第 1 场前 3 拍内的开场钩子。")
+        else:
+            pos = _group_hook_position(draft.scenes, draft.hookBeat)
+            if pos is None:
+                structural.append(f"hookBeat {list(draft.hookBeat)} 指向不存在的场次或节拍。")
+            elif pos > HOOK_WINDOW:
+                hook_soft = True
+                hook_errors.append(
+                    f"开场钩子落在第 {pos} 拍，必须把开场钩子事件提前写进第 1 场前 {HOOK_WINDOW} 拍内，"
+                    "再将 hookBeat 指向该拍（如 [1, 1]–[1, 3]，不要只改数字敷衍，"
+                    "也不要填结尾悬念 cliff 的位置）。"
+                )
+
+    duration_errors = (
+        [] if deps.is_patch else _group_duration_problems(draft.scenes, deps.group_target)
+    )
+    meta = {
+        "episode": deps.plan.number,
+        "group": deps.group_index,
+        "groupTotal": deps.group_total,
+        "isPatch": deps.is_patch,
+        "retry": ctx.retry,
+    }
+    actual = _scenes_seconds(draft.scenes)
+    if (
+        not structural
+        and (duration_errors or hook_soft)
+        and ctx.retry >= ctx.max_retries
+        and (deps.is_patch or deps.group_target * 0.4 <= actual <= deps.group_target * 2.0)
+    ):
+        record_gate(
+            "write-episode",
+            True,
+            hook_errors + duration_errors,
+            {**meta, "fallback": "group_soft_pass"},
+        )
+        return draft
+
+    problems = structural + hook_errors + duration_errors
+    if problems:
+        record_gate("write-episode", False, problems, meta)
+        raise ModelRetry(
+            f"第 {deps.plan.number} 集第 {deps.group_index}/{deps.group_total} 组未通过检查：\n"
+            + "\n".join(f"- {item}" for item in problems)
+        )
+    record_gate("write-episode", True, meta=meta)
+    return draft
 
 
 def finalize(draft: EpisodeDraft, outline: Outline, target: int) -> Episode:
@@ -329,8 +597,8 @@ def _cards(outline: Outline, plan: EpisodePlan) -> dict:
 
 def _episode_budget(target: int) -> dict:
     low, high = seconds_range(target)
-    line_beats = max(6, round(target / 6.6))
-    action_beats = max(3, round(target / 15))
+    line_beats = max(4, round(target / 6.6))
+    action_beats = max(2, round(target / 15))
     return {
         "targetSeconds": target,
         "minSeconds": low,
@@ -340,7 +608,7 @@ def _episode_budget(target: int) -> dict:
             f"{low}–{high} 秒；输出前先自己算一遍"
         ),
         "reference": (
-            f"{target} 秒一集建议约 {line_beats} 句台词（每句 20–28 字）加 {action_beats} 个动作节拍"
+            f"{target} 秒建议约 {line_beats} 句台词（每句 20–28 字）加 {action_beats} 个动作节拍"
         ),
         "recommended": {
             "lineBeats": line_beats,
@@ -373,19 +641,40 @@ def _bounded_source_excerpts(source: Source, ranges: list[tuple[int, int]]) -> l
     return excerpts
 
 
-def _build_writer(model: Model, source: Source | None) -> Agent[EpisodeContext, EpisodeDraft]:
+def _build_beat_planner(model: Model, source: Source | None) -> Agent[BeatSheetContext, EpisodeBeatSheet]:
+    planner = Agent(
+        model,
+        deps_type=BeatSheetContext,
+        output_type=PromptedOutput(EpisodeBeatSheet),
+        instructions=skill_instructions("plan-episode-beats"),
+        model_settings=BEAT_SHEET_MODEL_SETTINGS,
+        retries=2,
+    )
+    planner.output_validator(verify_beat_sheet)
+    if source is not None and source.mode == "upload":
+        planner.tool(read_source_excerpt)
+    return planner
+
+
+def _build_group_writer(model: Model, source: Source | None) -> Agent[SceneGroupContext, SceneGroupDraft]:
     writer = Agent(
         model,
-        deps_type=EpisodeContext,
-        output_type=PromptedOutput(EpisodeDraft),
+        deps_type=SceneGroupContext,
+        output_type=PromptedOutput(SceneGroupDraft),
         instructions=skill_instructions("write-episode"),
         model_settings=MODEL_SETTINGS,
-        retries=5,
+        retries=3,
     )
-    writer.output_validator(verify_episode)
+    writer.output_validator(verify_scene_group)
     if source is not None and source.mode == "upload":
         writer.tool(read_source_excerpt)
     return writer
+
+
+def _recommended_scene_count(target: int) -> dict[str, int]:
+    low = max(1, round(target / 130))
+    high = max(low + 1, min(14, round(target / 60)))
+    return {"min": low, "max": high}
 
 
 def _episode_payload(
@@ -401,10 +690,11 @@ def _episode_payload(
     target = settings.secondsPerEpisode
     next_plan = next((item for item in outline.episodes if item.number == plan.number + 1), None)
     payload: dict = {
+        "task": "plan_episode_beats",
         "settings": settings.model_dump(),
         "mode": source.mode if source is not None else "story",
         "episodeSeconds": target,
-        "budget": _episode_budget(target),
+        "recommendedSceneCount": _recommended_scene_count(target),
         "continuity": outline.continuity,
         "episode": plan.model_dump(),
         **_cards(outline, plan),
@@ -432,6 +722,179 @@ def _episode_payload(
     if note:
         payload["revisionFeedback"] = note
     return payload
+
+
+async def _write_episode_unified(
+    model: Model,
+    *,
+    settings: ProjectSettings,
+    outline: Outline,
+    plan: EpisodePlan,
+    source: Source | None,
+    previous: Episode | None,
+    previous_draft: Episode | None = None,
+    feedback: str = "",
+    usage: RunUsage | None = None,
+) -> Episode:
+    """
+    统一单集写作公式（不区分短集/长集分支）：
+    1. 规划单集分场节拍表（Beat Sheet，low 思考）
+    2. 按 <=180s/组贪心分组，单集内多轮对话闭环算秒逐组扩写（复用 Prefix Cache）
+    3. 全集拼装后若仍短于硬下界，执行 1 次局部补戏 Patch（插在收尾悬念场前，不撕全集）
+    """
+    target = settings.secondsPerEpisode
+    base_payload = _episode_payload(
+        settings,
+        outline,
+        plan,
+        source,
+        previous,
+        previous_draft=previous_draft,
+        feedback=feedback,
+    )
+
+    beat_planner = _build_beat_planner(model, source)
+    beat_result = await beat_planner.run(
+        prompt(base_payload),
+        deps=BeatSheetContext(plan, outline, source, settings),
+        usage=usage,
+    )
+    sheet = beat_result.output
+    groups = _group_beat_plans(sheet.scenes, MAX_GROUP_SECONDS)
+
+    group_writer = _build_group_writer(model, source)
+    history: list[ModelMessage] = []
+    assembled_scenes: list[Scene] = []
+    completed_seconds = 0.0
+    hook_beat: tuple[int, int] = (1, 1)
+
+    for g_idx, group_plans in enumerate(groups, 1):
+        planned_remaining = sum(
+            item.targetSeconds for grp in groups[g_idx - 1 :] for item in grp
+        )
+        planned_this = sum(item.targetSeconds for item in group_plans)
+        remaining_needed = max(30.0, target - completed_seconds)
+        if g_idx == len(groups):
+            group_target = max(30, min(MAX_GROUP_SECONDS + 60, round(remaining_needed)))
+        else:
+            scaled = remaining_needed * (planned_this / max(1, planned_remaining))
+            group_target = max(30, min(MAX_GROUP_SECONDS + 40, round(scaled)))
+
+        scene_plans_dump = [item.model_dump() for item in group_plans]
+        if g_idx == 1:
+            turn_payload: dict = {
+                **{k: v for k, v in base_payload.items() if k != "task"},
+                "task": "write_scene_group",
+                "beatSheet": {
+                    "title": sheet.title,
+                    "summary": sheet.summary,
+                    "hook": sheet.hook,
+                    "cliff": sheet.cliff,
+                },
+                "groupIndex": 1,
+                "groupTotal": len(groups),
+                "isFinalGroup": len(groups) == 1,
+                "groupTargetSeconds": group_target,
+                "budget": _episode_budget(group_target),
+                "scenePlans": scene_plans_dump,
+            }
+        else:
+            turn_payload = {
+                "task": "write_scene_group",
+                "groupIndex": g_idx,
+                "groupTotal": len(groups),
+                "isFinalGroup": g_idx == len(groups),
+                "completedSeconds": round(completed_seconds, 1),
+                "remainingEpisodeSeconds": round(max(0.0, target - completed_seconds), 1),
+                "groupTargetSeconds": group_target,
+                "budget": _episode_budget(group_target),
+                "scenePlans": scene_plans_dump,
+                **({"cliff": sheet.cliff} if g_idx == len(groups) else {}),
+            }
+
+        turn_prompt_str = prompt(turn_payload)
+        turn_result = await group_writer.run(
+            turn_prompt_str,
+            deps=SceneGroupContext(
+                plan=plan,
+                outline=outline,
+                source=source,
+                settings=settings,
+                group_index=g_idx,
+                group_total=len(groups),
+                group_target=group_target,
+            ),
+            message_history=history or None,
+            usage=usage,
+        )
+        new_msgs = turn_result.new_messages()
+        if len(new_msgs) == 2:
+            # 一次过审时原样保留完整消息历史，100% 命中 DeepSeek Prefix Cache。
+            history = list(turn_result.all_messages())
+        else:
+            # 若本组经历过校验重试，仅保留干净的最终问答对，避免错误重试废话污染后续轮次。
+            history = [
+                *history,
+                ModelRequest(parts=[UserPromptPart(content=turn_prompt_str)]),
+                ModelResponse(parts=[TextPart(content=turn_result.output.model_dump_json())]),
+            ]
+
+        if g_idx == 1 and turn_result.output.hookBeat is not None:
+            hook_beat = turn_result.output.hookBeat
+        assembled_scenes.extend(turn_result.output.scenes)
+        completed_seconds = _scenes_seconds(assembled_scenes)
+
+    # 局部补戏 Patch：若全部组拼完仍短于硬下界，不撕全集，仅补 1–2 场插在收尾悬念场之前。
+    low_hard, _ = seconds_range(target, HARD_TOLERANCE)
+    if completed_seconds < low_hard - DURATION_SLACK:
+        gap = max(45, min(MAX_GROUP_SECONDS, round(target - completed_seconds)))
+        patch_payload = {
+            "task": "patch_short_episode",
+            "completedSeconds": round(completed_seconds, 1),
+            "targetSeconds": target,
+            "gapSeconds": gap,
+            "budget": _episode_budget(gap),
+            "instruction": (
+                f"本集已写完 {completed_seconds:.1f} 秒，距目标 {target} 秒还差约 {gap} 秒。"
+                "请不要重复已写场次，额外补写 1–2 场承上启下的冲突推进戏，"
+                "程序会自动将其插入收尾悬念场之前。"
+            ),
+        }
+        try:
+            patch_result = await group_writer.run(
+                prompt(patch_payload),
+                deps=SceneGroupContext(
+                    plan=plan,
+                    outline=outline,
+                    source=source,
+                    settings=settings,
+                    group_index=len(groups) + 1,
+                    group_total=len(groups) + 1,
+                    group_target=gap,
+                    is_patch=True,
+                ),
+                message_history=history or None,
+                usage=usage,
+            )
+            patch_scenes = patch_result.output.scenes
+            if len(assembled_scenes) > 1:
+                assembled_scenes = [*assembled_scenes[:-1], *patch_scenes, assembled_scenes[-1]]
+            else:
+                assembled_scenes = [*assembled_scenes, *patch_scenes]
+        except Exception:
+            # 局部补戏偶发失败不毁掉已成型的正片，由 finalize 写入时长 warning 透明提示用户。
+            pass
+
+    draft = EpisodeDraft(
+        number=plan.number,
+        title=sheet.title,
+        summary=sheet.summary,
+        hook=sheet.hook,
+        cliff=sheet.cliff,
+        hookBeat=hook_beat,
+        scenes=assembled_scenes,
+    )
+    return finalize(draft, outline, target)
 
 
 def _outline_scale_guide(settings: ProjectSettings, mode: Literal["story", "upload"]) -> dict:
@@ -484,53 +947,74 @@ async def generate_script(
     feedback: str = "",
     usage: RunUsage | None = None,
     on_progress: ProgressCallback | None = None,
+    on_outline: OutlineCallback | None = None,
+    on_episode_ready: EpisodeReadyCallback | None = None,
+    existing_outline: Outline | None = None,
+    existing_episodes: Sequence[Episode] = (),
 ) -> ScriptResult:
     target = settings.secondsPerEpisode
     total_steps = settings.episodeCount + 2
-    digest = None
-    if source.mode == "upload" and source.chars > DIGEST_THRESHOLD_CHARS:
-        await _notify(on_progress, 0, total_steps, "正在浓缩长文原稿", 5)
-        digest = await condense_source(model, source, usage=usage)
-
-    planner = Agent(
-        model,
-        deps_type=OutlineContext,
-        output_type=PromptedOutput(Outline),
-        instructions=skill_instructions("plan-episodes"),
-        model_settings=MODEL_SETTINGS,
-        retries=2,
-    )
-    planner.output_validator(verify_outline)
-    writer = _build_writer(model, source)
-
     note = feedback.strip()
-    plan_payload: dict = {
-        "settings": settings.model_dump(),
-        "mode": source.mode,
-        "episodeSeconds": target,
-        "scaleGuide": _outline_scale_guide(settings, source.mode),
-        "source": source.excerpt(1, len(source.lines)) if digest is None else None,
-        "digest": digest,
-    }
-    if note:
-        plan_payload["revisionFeedback"] = note
 
-    await _notify(on_progress, 1, total_steps, f"正在规划全剧 {settings.episodeCount} 集大纲与世界观", 12)
-    draft = await planner.run(prompt(plan_payload), deps=OutlineContext(settings, source), usage=usage)
-    outline = draft.output
+    if existing_outline is not None:
+        outline = existing_outline
+        await _notify(on_progress, 1, total_steps, "已复用现有大纲，继续补写剩余分集", 15)
+    else:
+        digest = None
+        if source.mode == "upload" and source.chars > DIGEST_THRESHOLD_CHARS:
+            await _notify(on_progress, 0, total_steps, "正在浓缩长文原稿", 5)
+            digest = await condense_source(model, source, usage=usage)
 
+        planner = Agent(
+            model,
+            deps_type=OutlineContext,
+            output_type=PromptedOutput(Outline),
+            instructions=skill_instructions("plan-episodes"),
+            model_settings=PLANNING_MODEL_SETTINGS,
+            retries=2,
+        )
+        planner.output_validator(verify_outline)
+
+        plan_payload: dict = {
+            "settings": settings.model_dump(),
+            "mode": source.mode,
+            "episodeSeconds": target,
+            "scaleGuide": _outline_scale_guide(settings, source.mode),
+            "source": source.excerpt(1, len(source.lines)) if digest is None else None,
+            "digest": digest,
+        }
+        if note:
+            plan_payload["revisionFeedback"] = note
+
+        await _notify(on_progress, 1, total_steps, f"正在规划全剧 {settings.episodeCount} 集大纲与世界观", 12)
+        draft = await planner.run(prompt(plan_payload), deps=OutlineContext(settings, source), usage=usage)
+        outline = draft.output
+        if on_outline is not None:
+            await on_outline(outline)
+
+    done_by_number = {ep.number: ep for ep in existing_episodes}
     episodes: list[Episode] = []
     total = len(outline.episodes)
     for idx, plan in enumerate(outline.episodes, 1):
         pct = 20 + int((idx - 1) / max(1, total) * 75)
+        if plan.number in done_by_number:
+            episodes.append(done_by_number[plan.number])
+            continue
         await _notify(on_progress, idx + 1, total_steps, f"正在撰写第 {idx}/{total} 集《{plan.title}》", pct)
         previous = episodes[-1] if episodes else None
-        result = await writer.run(
-            prompt(_episode_payload(settings, outline, plan, source, previous, feedback=note)),
-            deps=EpisodeContext(plan, outline, source, settings),
+        ep = await _write_episode_unified(
+            model,
+            settings=settings,
+            outline=outline,
+            plan=plan,
+            source=source,
+            previous=previous,
+            feedback=note,
             usage=usage,
         )
-        episodes.append(finalize(result.output, outline, target))
+        episodes.append(ep)
+        if on_episode_ready is not None:
+            await on_episode_ready(ep)
 
     await _notify(on_progress, total_steps, total_steps, "剧本生成完成，正在落库保存", 98)
     return ScriptResult(settings=settings, outline=outline, episodes=episodes)
@@ -559,23 +1043,17 @@ async def regenerate_episode(
     )
 
     await _notify(on_progress, 1, 2, f"正在重写第 {episode_number} 集《{plan.title}》", 30)
-    writer = _build_writer(model, source)
-    result = await writer.run(
-        prompt(
-            _episode_payload(
-                script.settings,
-                script.outline,
-                plan,
-                source,
-                previous,
-                previous_draft=current,
-                feedback=note,
-            )
-        ),
-        deps=EpisodeContext(plan, script.outline, source, script.settings),
+    finalized = await _write_episode_unified(
+        model,
+        settings=script.settings,
+        outline=script.outline,
+        plan=plan,
+        source=source,
+        previous=previous,
+        previous_draft=current,
+        feedback=note,
         usage=usage,
     )
-    finalized = finalize(result.output, script.outline, script.settings.secondsPerEpisode)
     await _notify(on_progress, 2, 2, f"第 {episode_number} 集重写完成", 98)
     return finalized
 
@@ -654,7 +1132,7 @@ async def append_episode(
         deps_type=ExtensionContext,
         output_type=PromptedOutput(EpisodeExtension),
         instructions=skill_instructions("append-episode"),
-        model_settings=MODEL_SETTINGS,
+        model_settings=BEAT_SHEET_MODEL_SETTINGS,
         retries=2,
     )
     planner.output_validator(verify_extension)
@@ -706,17 +1184,16 @@ async def append_episode(
     )
 
     await _notify(on_progress, 2, 3, f"正在撰写第 {next_number} 集《{ext.plan.title}》", 55)
-    writer = _build_writer(model, source)
-    written = await writer.run(
-        prompt(
-            _episode_payload(
-                updated_settings, updated_outline, ext.plan, source, previous, feedback=direction
-            )
-        ),
-        deps=EpisodeContext(ext.plan, updated_outline, source, updated_settings),
+    new_episode = await _write_episode_unified(
+        model,
+        settings=updated_settings,
+        outline=updated_outline,
+        plan=ext.plan,
+        source=source,
+        previous=previous,
+        feedback=direction,
         usage=usage,
     )
-    new_episode = finalize(written.output, updated_outline, updated_settings.secondsPerEpisode)
     await _notify(on_progress, 3, 3, f"第 {next_number} 集续写完成", 98)
     return ScriptResult(
         settings=updated_settings,

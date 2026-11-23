@@ -145,6 +145,7 @@ export const useStudioStore = defineStore('studio', () => {
         hookBeat: ep.hookBeat,
         scenes: ep.scenes,
         script: ep.script,
+        warnings: ep.warnings ?? [],
       })
     }
 
