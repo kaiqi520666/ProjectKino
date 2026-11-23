@@ -5,6 +5,7 @@ import {
   AlertCircle,
   ArrowLeft,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
   Clapperboard,
   Clock,
@@ -19,6 +20,13 @@ import {
   Video,
   X,
 } from 'lucide-vue-next'
+import {
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuPortal,
+  DropdownMenuRoot,
+  DropdownMenuTrigger,
+} from 'reka-ui'
 import EmptyState from '@/components/business/EmptyState.vue'
 import MediaHistoryDialog from '@/components/business/MediaHistoryDialog.vue'
 import type { MediaHistoryItem } from '@/components/business/MediaHistoryDialog.vue'
@@ -56,6 +64,7 @@ import VideoModelPicker from '../components/VideoModelPicker.vue'
 import VideoParamsPopover from '../components/VideoParamsPopover.vue'
 import { useBatchJobTracker } from '../composables/useBatchJobTracker'
 import { useModelCatalog } from '../composables/useModelCatalog'
+import { assetDisplayName, assetStateLabel, findAssetSiblings } from '../studio-assets'
 import type { StudioAsset } from '../studio-assets'
 import { episodeLabel, isEpisodeNumber, readEpisode } from '../studio-project'
 import type { StudioProject } from '../studio-project'
@@ -298,7 +307,7 @@ const resolvedStoryboardAssets = computed(() => (storyboard.value?.assets ?? [])
   const live = projectAssetsById.value.get(asset.id)
   return {
     ...asset,
-    name: live?.name || asset.name,
+    name: live ? assetDisplayName(live) : asset.name,
     imageUrl: live?.imageUrl ?? asset.imageUrl,
   }
 }))
@@ -307,26 +316,43 @@ const assetGroups = computed(() => assetCategoryItems.map((category) => ({
   assets: resolvedStoryboardAssets.value.filter(({ kind }) => kind === category.kind),
 })))
 const references = computed(() => {
+  const allAssets = props.project.assets ?? []
   const listed = clip.value?.references
   if (listed?.length) {
     const assets = resolvedStoryboardAssets.value
     return listed.map((reference) => {
       const live = projectAssetsById.value.get(reference.assetId)
       const boardAsset = assets.find((asset) => asset.id === reference.assetId)
+      const siblings = live ? findAssetSiblings(allAssets, live) : []
       return {
         id: reference.assetId,
         name: live?.name || boardAsset?.name || reference.name,
+        displayName: live ? assetDisplayName(live) : (boardAsset?.name || reference.name),
+        stateLabel: live ? assetStateLabel(live) : '',
         kind: reference.kind,
         index: reference.index as number | undefined,
         icon: assetKindIcons[reference.kind],
         imageUrl: live?.imageUrl ?? boardAsset?.imageUrl,
+        siblings,
       }
     })
   }
   return assetGroups.value.flatMap(({ icon, assets }) =>
-    assets.filter((asset) => clip.value?.assetIds.includes(asset.id)).map((asset) => ({
-      id: asset.id, name: asset.name, kind: asset.kind, icon, imageUrl: asset.imageUrl, index: undefined as number | undefined,
-    })),
+    assets.filter((asset) => clip.value?.assetIds.includes(asset.id)).map((asset) => {
+      const live = projectAssetsById.value.get(asset.id)
+      const siblings = live ? findAssetSiblings(allAssets, live) : []
+      return {
+        id: asset.id,
+        name: live?.name || asset.name,
+        displayName: live ? assetDisplayName(live) : asset.name,
+        stateLabel: live ? assetStateLabel(live) : '',
+        kind: asset.kind,
+        icon,
+        imageUrl: asset.imageUrl,
+        index: undefined as number | undefined,
+        siblings,
+      }
+    }),
   )
 })
 
@@ -698,6 +724,37 @@ async function removeReferenceAsset(assetCode: string) {
   await persistClipReferences(next)
 }
 
+async function switchReferenceVariant(slotIndex: number, target: StudioAsset) {
+  if (!clip.value || !props.project.persisted) return
+  const currentSlot = references.value[slotIndex]
+  if (!currentSlot || currentSlot.id === target.id) return
+  if (references.value.some((ref, idx) => idx !== slotIndex && ref.id === target.id)) {
+    ui.notify(`「${assetDisplayName(target)}」已存在于当前片段的其他参考槽位中`, 'info')
+    return
+  }
+  const next = references.value.map((ref, idx) => {
+    if (idx === slotIndex) {
+      return {
+        index: idx + 1,
+        assetId: target.backendId || target.id,
+        assetCode: target.id,
+        name: assetDisplayName(target),
+        kind: target.kind,
+      }
+    }
+    const live = projectAssetsById.value.get(ref.id)
+    return {
+      index: idx + 1,
+      assetId: live?.backendId || ref.id,
+      assetCode: ref.id,
+      name: ref.displayName,
+      kind: ref.kind,
+    }
+  })
+  await persistClipReferences(next)
+  ui.notify(`已将图片${slotIndex + 1}切换为「${assetDisplayName(target)}」（提示词无需修改）`, 'success')
+}
+
 async function generateClipVideo() {
   const activeClip = clip.value
   if (!activeClip || !props.project.persisted || !activeClip.backendId) {
@@ -967,11 +1024,11 @@ async function deleteClip() {
               <h2 id="episode-clip-title"><Clapperboard :size="17" aria-hidden="true" />片段 {{ clip.id }}</h2>
             </div>
             <ul class="episode-reference-list" aria-label="片段参考素材">
-              <li v-for="asset in references" :key="asset.id">
+              <li v-for="(asset, slotIndex) in references" :key="asset.id">
                 <div class="episode-reference-thumb-wrap">
-                  <ImagePreview v-if="asset.imageUrl" :src="asset.imageUrl" :title="asset.name">
+                  <ImagePreview v-if="asset.imageUrl" :src="asset.imageUrl" :title="asset.displayName">
                     <template #trigger>
-                      <button type="button" class="episode-asset-thumb" :aria-label="'预览片段参考 ' + asset.name"><img :src="asset.imageUrl" alt="" /></button>
+                      <button type="button" class="episode-asset-thumb" :aria-label="'预览片段参考 ' + asset.displayName"><img :src="asset.imageUrl" alt="" /></button>
                     </template>
                   </ImagePreview>
                   <span v-else class="episode-asset-thumb">
@@ -982,14 +1039,39 @@ async function deleteClip() {
                     v-if="project.persisted && clip.backendId"
                     type="button"
                     class="episode-reference-remove"
-                    :aria-label="`移除参考 ${asset.name}`"
+                    :aria-label="`移除参考 ${asset.displayName}`"
                     title="移除该参考素材"
                     @click="removeReferenceAsset(asset.id)"
                   >
                     <X :size="11" aria-hidden="true" />
                   </button>
                 </div>
-                <span class="episode-asset-name" :title="asset.name">{{ asset.name }}</span>
+                <span class="episode-asset-name" :title="asset.displayName">{{ asset.name }}</span>
+                <DropdownMenuRoot v-if="project.persisted && clip.backendId && asset.siblings.length >= 2">
+                  <DropdownMenuTrigger type="button" class="episode-variant-trigger" :title="`切换「${asset.name}」的造型/时段/状态`">
+                    <span>{{ asset.stateLabel }}</span>
+                    <ChevronDown :size="11" aria-hidden="true" />
+                  </DropdownMenuTrigger>
+                  <DropdownMenuPortal>
+                    <DropdownMenuContent class="episode-variant-menu" :side-offset="5" align="start">
+                      <DropdownMenuItem
+                        v-for="sibling in asset.siblings"
+                        :key="sibling.backendId || sibling.id"
+                        class="episode-variant-option"
+                        :class="{ 'is-current': sibling.id === asset.id }"
+                        @select="switchReferenceVariant(slotIndex, sibling)"
+                      >
+                        <span class="episode-variant-option-thumb">
+                          <img v-if="sibling.imageUrl" :src="sibling.imageUrl" alt="" />
+                          <component :is="asset.icon" v-else :size="13" aria-hidden="true" />
+                        </span>
+                        <span class="episode-variant-option-label">{{ assetStateLabel(sibling) }}</span>
+                        <span v-if="sibling.id === asset.id" class="episode-variant-option-tag">当前</span>
+                        <span v-else-if="!sibling.imageUrl" class="episode-variant-option-missing">无图</span>
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenuPortal>
+                </DropdownMenuRoot>
               </li>
               <li>
                 <UiButton
@@ -1158,7 +1240,7 @@ async function deleteClip() {
               <component :is="assetKindIcons[asset.kind]" v-else :size="20" aria-hidden="true" />
             </span>
             <span class="picker-asset-info">
-              <strong>{{ asset.name }}</strong>
+              <strong :title="assetDisplayName(asset)">{{ assetDisplayName(asset) }}</strong>
               <small :class="{ 'is-ready': !!asset.imageUrl }">{{ asset.imageUrl ? '已有图片' : '暂未生图' }}</small>
             </span>
           </button>
@@ -1527,6 +1609,90 @@ button.episode-asset-thumb { width: 100%; cursor: zoom-in; }
 .picker-asset-info strong { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .picker-asset-info small { color: var(--color-muted); font-size: 11px; }
 .picker-asset-info small.is-ready { color: var(--color-success); }
+.episode-variant-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  max-width: 100%;
+  margin-top: 2px;
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--color-gold) 45%, transparent);
+  border-radius: 999px;
+  background: var(--gold-tint);
+  color: var(--color-gold-soft);
+  font-size: 11px;
+  line-height: 1.35;
+  cursor: pointer;
+}
+.episode-variant-trigger span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.episode-variant-trigger:hover { border-color: var(--color-gold); }
+:global(.episode-variant-menu) {
+  z-index: 120;
+  min-width: 168px;
+  max-width: 240px;
+  padding: 4px;
+  border: 1px solid var(--border-control);
+  border-radius: 8px;
+  background: var(--color-elevated);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 40%);
+}
+:global(.episode-variant-option) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 7px;
+  border-radius: 5px;
+  color: var(--color-text);
+  font-size: 12px;
+  cursor: pointer;
+  outline: none;
+}
+:global(.episode-variant-option[data-highlighted]) {
+  background: var(--gold-tint);
+  color: var(--color-gold-soft);
+}
+:global(.episode-variant-option.is-current) {
+  color: var(--color-gold-soft);
+  font-weight: 500;
+}
+:global(.episode-variant-option-thumb) {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 20px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--color-canvas);
+  color: var(--color-muted);
+}
+:global(.episode-variant-option-thumb img) {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+:global(.episode-variant-option-label) {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:global(.episode-variant-option-tag) {
+  flex: none;
+  font-size: 10px;
+  color: var(--color-gold-soft);
+}
+:global(.episode-variant-option-missing) {
+  flex: none;
+  font-size: 10px;
+  color: var(--color-muted);
+}
 .is-spin { animation: spin 1s linear infinite; }
 @keyframes spin {
   from { transform: rotate(0deg); }

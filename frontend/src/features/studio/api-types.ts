@@ -245,6 +245,8 @@ export interface PersistedAssetOut {
   prompt: string
   voice: string
   episodeNumbers: number[]
+  parentAssetId?: string | null
+  variantLabel?: string
   imageUrl?: string | null
   imageModelId?: string | null
   imageTier?: string | null

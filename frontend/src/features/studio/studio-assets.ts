@@ -11,6 +11,8 @@ export type StudioAssetKind = (typeof assetKindOptions)[number]['value']
 export interface StudioAsset {
   id: string
   backendId?: string
+  parentAssetId?: string
+  variantLabel?: string
   kind: StudioAssetKind
   name: string
   description: string
@@ -27,7 +29,77 @@ export interface StudioAsset {
   lastJobError?: string
 }
 
-export type StudioAssetDraft = Pick<StudioAsset, 'name' | 'description' | 'prompt' | 'imageUrl' | 'imageKey' | 'voice'>
+export type StudioAssetDraft = Pick<
+  StudioAsset,
+  'name' | 'description' | 'prompt' | 'imageUrl' | 'imageKey' | 'voice' | 'parentAssetId' | 'variantLabel'
+>
+
+export interface StudioAssetGroup {
+  root: StudioAsset
+  items: StudioAsset[]
+}
+
+export const variantLabelSuggestions: Record<StudioAssetKind, readonly string[]> = {
+  character: ['晚宴礼服', '便装', '受伤战损', '雨中湿身', '回忆/年轻'],
+  scene: ['深夜', '黄昏', '雨夜', '灯火通明', '损毁/凌乱'],
+  prop: ['碎裂', '拆封', '沾血', '启动/发光', '陈旧破损'],
+}
+
+export function assetStateLabel(asset: Pick<StudioAsset, 'variantLabel'>): string {
+  return asset.variantLabel?.trim() || '默认'
+}
+
+export function assetDisplayName(asset: Pick<StudioAsset, 'name' | 'variantLabel'>): string {
+  const label = asset.variantLabel?.trim()
+  return label ? `${asset.name} · ${label}` : asset.name
+}
+
+export function groupStudioAssets(assets: readonly StudioAsset[]): StudioAssetGroup[] {
+  const roots = new Map<string, StudioAssetGroup>()
+  const ordered: StudioAssetGroup[] = []
+  const variants: StudioAsset[] = []
+
+  for (const asset of assets) {
+    if (asset.parentAssetId) {
+      variants.push(asset)
+      continue
+    }
+    const group: StudioAssetGroup = { root: asset, items: [asset] }
+    if (asset.backendId) roots.set(asset.backendId, group)
+    ordered.push(group)
+  }
+
+  for (const variant of variants) {
+    const parentGroup = variant.parentAssetId ? roots.get(variant.parentAssetId) : undefined
+    if (parentGroup) {
+      parentGroup.items.push(variant)
+    } else {
+      ordered.push({ root: variant, items: [variant] })
+    }
+  }
+
+  return ordered
+}
+
+export function findParentAsset(
+  assets: readonly StudioAsset[],
+  asset: StudioAsset,
+): StudioAsset | undefined {
+  if (!asset.parentAssetId) return undefined
+  return assets.find((item) => item.backendId === asset.parentAssetId)
+}
+
+export function findAssetSiblings(
+  assets: readonly StudioAsset[],
+  target: StudioAsset,
+): StudioAsset[] {
+  const rootId = target.parentAssetId ?? target.backendId
+  if (!rootId) return [target]
+  const root = assets.find((item) => item.backendId === rootId)
+  const variants = assets.filter((item) => item.parentAssetId === rootId)
+  if (!root) return variants.length ? variants : [target]
+  return [root, ...variants]
+}
 
 export const exampleAssetLibrary = {
   character: [

@@ -91,6 +91,8 @@ export function createAssetApi(projectId: string, kind: StudioAssetKind, draft: 
       voice: draft.voice ?? '',
       imageUrl: draft.imageUrl ?? null,
       imageKey: draft.imageKey ?? null,
+      parentAssetId: draft.parentAssetId ?? null,
+      variantLabel: draft.variantLabel ?? '',
     }),
   )
 }
@@ -105,6 +107,7 @@ export function updateAssetApi(projectId: string, assetId: string, draft: Studio
       imageUrl: draft.imageUrl ?? null,
       imageKey: draft.imageKey ?? null,
       clearImage: !draft.imageUrl,
+      ...(draft.variantLabel !== undefined ? { variantLabel: draft.variantLabel } : {}),
     }),
   )
 }
@@ -163,7 +166,12 @@ export async function uploadFileToOss(
 export function startGenerateAssetImage(
   projectId: string,
   assetId: string,
-  body: { modelId: string; tier: 'web' | '1k' | '2k' | '4k'; ratio?: string },
+  body: {
+    modelId: string
+    tier: 'web' | '1k' | '2k' | '4k'
+    ratio?: string
+    referenceUrls?: string[]
+  },
 ) {
   return unwrap<ProjectJobAcceptedOut>(
     http.post(`/projects/${projectId}/assets/${assetId}/generate-image`, body),
@@ -172,7 +180,13 @@ export function startGenerateAssetImage(
 
 export function startBatchGenerateAssetImages(
   projectId: string,
-  body: { assetIds: string[]; modelId: string; tier: 'web' | '1k' | '2k' | '4k'; ratio?: string },
+  body: {
+    assetIds: string[]
+    modelId: string
+    tier: 'web' | '1k' | '2k' | '4k'
+    ratio?: string
+    useParentReference?: boolean
+  },
 ) {
   return unwrap<BatchAssetImageAcceptedOut>(
     http.post(`/projects/${projectId}/assets/batch-generate-image`, body),

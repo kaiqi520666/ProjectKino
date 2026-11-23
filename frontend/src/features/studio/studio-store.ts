@@ -146,6 +146,8 @@ export const useStudioStore = defineStore('studio', () => {
     const uiAssets: StudioAsset[] = detail.assets.map((item) => ({
       id: item.assetCode,
       backendId: item.id,
+      ...(item.parentAssetId ? { parentAssetId: item.parentAssetId } : {}),
+      ...(item.variantLabel ? { variantLabel: item.variantLabel } : {}),
       kind: item.kind,
       name: item.name,
       description: item.description,
@@ -657,6 +659,8 @@ export const useStudioStore = defineStore('studio', () => {
     const nextAsset: StudioAsset = {
       id: persisted.assetCode,
       backendId: persisted.id,
+      ...(persisted.parentAssetId ? { parentAssetId: persisted.parentAssetId } : {}),
+      ...(persisted.variantLabel ? { variantLabel: persisted.variantLabel } : {}),
       kind: persisted.kind,
       name: persisted.name,
       description: persisted.description,

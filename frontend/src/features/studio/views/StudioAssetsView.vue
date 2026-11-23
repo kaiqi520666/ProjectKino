@@ -51,8 +51,14 @@ import StudioAssetEditor from '../components/StudioAssetEditor.vue'
 import StudioBatchImageDialog from '../components/StudioBatchImageDialog.vue'
 import { useBatchJobTracker } from '../composables/useBatchJobTracker'
 import { useModelCatalog } from '../composables/useModelCatalog'
-import { assetKindOptions } from '../studio-assets'
-import type { StudioAsset, StudioAssetDraft, StudioAssetKind } from '../studio-assets'
+import {
+  assetDisplayName,
+  assetKindOptions,
+  assetStateLabel,
+  findParentAsset,
+  groupStudioAssets,
+} from '../studio-assets'
+import type { StudioAsset, StudioAssetDraft, StudioAssetGroup, StudioAssetKind } from '../studio-assets'
 import type { StudioProject } from '../studio-project'
 import { useStudioStore } from '../studio-store'
 
@@ -84,6 +90,28 @@ const historyAssetId = ref<string | null>(null)
 const historySelecting = ref(false)
 const historyDeletingId = ref<string | null>(null)
 const dismissedJobIds = ref<Set<string>>(new Set())
+const activeVariantByRoot = ref<Record<string, string>>({})
+
+function rootKeyOf(asset: StudioAsset): string {
+  return asset.backendId || asset.id
+}
+
+function resolveGroupAsset(group: StudioAssetGroup): StudioAsset {
+  const key = rootKeyOf(group.root)
+  const chosenId = activeVariantByRoot.value[key]
+  if (chosenId) {
+    const matched = group.items.find((item) => rootKeyOf(item) === chosenId)
+    if (matched) return matched
+  }
+  return group.root
+}
+
+function selectGroupVariant(root: StudioAsset, item: StudioAsset) {
+  activeVariantByRoot.value = {
+    ...activeVariantByRoot.value,
+    [rootKeyOf(root)]: rootKeyOf(item),
+  }
+}
 
 const imageModelNames = computed<Record<string, string>>(() => {
   const map: Record<string, string> = {}
@@ -248,8 +276,14 @@ const missingImageCount = computed(() =>
 
 const groups = computed(() => assetKindOptions.map((item) => {
   const assets = props.project.assets?.filter(({ kind }) => kind === item.value) ?? []
-  const images = assets.flatMap(asset => asset.imageUrl ? [{ src: asset.imageUrl, title: asset.name }] : [])
-  return { ...item, icon: assetKindIcons[item.value], count: assets.length, assets, images }
+  const cards = groupStudioAssets(assets).map((assetGroup) => ({
+    ...assetGroup,
+    active: resolveGroupAsset(assetGroup),
+  }))
+  const images = assets.flatMap(asset =>
+    asset.imageUrl ? [{ src: asset.imageUrl, title: assetDisplayName(asset) }] : [],
+  )
+  return { ...item, icon: assetKindIcons[item.value], count: cards.length, assets, cards, images }
 }))
 
 const missingScriptAssetIds = computed(() => {
@@ -437,7 +471,13 @@ async function generateFromScript(mode: 'full' | 'incremental' = 'full') {
 
 async function generateAssetImage(
   asset: StudioAsset,
-  options: { modelId: string; tier: 'web' | '1k' | '2k' | '4k'; ratio?: string; draft?: StudioAssetDraft },
+  options: {
+    modelId: string
+    tier: 'web' | '1k' | '2k' | '4k'
+    ratio?: string
+    referenceUrls?: string[]
+    draft?: StudioAssetDraft
+  },
 ) {
   if (!props.project.persisted || !asset.backendId) {
     ui.notify('示例项目暂不支持真实 AI 生图', 'info')
@@ -445,8 +485,12 @@ async function generateAssetImage(
   }
   if (submittingAssetId.value === asset.backendId || isAssetGenerating(asset)) return
 
-  const assetName = options.draft?.name.trim() || asset.name
+  const assetName = assetDisplayName({
+    name: options.draft?.name.trim() || asset.name,
+    variantLabel: options.draft?.variantLabel ?? asset.variantLabel,
+  })
   const isRedraw = !!asset.imageUrl
+  const refUrls = (options.referenceUrls ?? []).filter((u) => /^https?:\/\//i.test(u))
   submittingAssetId.value = asset.backendId
 
   try {
@@ -459,6 +503,7 @@ async function generateAssetImage(
       modelId: options.modelId,
       tier: options.tier,
       ratio: options.ratio,
+      ...(refUrls.length ? { referenceUrls: refUrls } : {}),
     })
     trackImageBatchJobs([accepted.job], {
       modelId: options.modelId,
@@ -471,7 +516,8 @@ async function generateAssetImage(
     void auth.refreshBalance()
     startBatchPolling()
 
-    ui.notify(`已提交「${assetName}」${isRedraw ? '重绘' : '生图'}任务，后台生成中`, 'success')
+    const refHint = refUrls.length ? `（已带 ${refUrls.length} 张参考图垫图）` : ''
+    ui.notify(`已提交「${assetName}」${isRedraw ? '重绘' : '生图'}任务${refHint}，后台生成中`, 'success')
   } catch (error) {
     ui.notify(apiErrorMessage(error), 'error')
   } finally {
@@ -486,7 +532,12 @@ function quickGenerateAssetImage(asset: StudioAsset, event: MouseEvent) {
     ui.notify('请先填写该资产的文生图提示词', 'info')
     return
   }
-  const defaultModel = imageModels.value.find((m) => m.isDefault)?.id || imageModels.value[0]?.id
+  const parent = findParentAsset(props.project.assets ?? [], asset)
+  const parentRefUrl = parent?.imageUrl && /^https?:\/\//i.test(parent.imageUrl) ? parent.imageUrl : undefined
+  const sunburstModel = parentRefUrl
+    ? imageModels.value.find((m) => m.id === 'gpt-image-2.6-sunburst')?.id
+    : undefined
+  const defaultModel = sunburstModel || imageModels.value.find((m) => m.isDefault)?.id || imageModels.value[0]?.id
   const modelId = asset.imageModelId && imageModels.value.some((m) => m.id === asset.imageModelId)
     ? asset.imageModelId
     : defaultModel
@@ -500,6 +551,7 @@ function quickGenerateAssetImage(asset: StudioAsset, event: MouseEvent) {
   void generateAssetImage(asset, {
     modelId,
     tier,
+    ...(parentRefUrl ? { referenceUrls: [parentRefUrl] } : {}),
   })
 }
 
@@ -508,13 +560,27 @@ function addAsset(event: MouseEvent) {
   editor.value?.create(kind, event.currentTarget as HTMLButtonElement)
 }
 
+function addVariant(root: StudioAsset, event: MouseEvent) {
+  if (!props.project.persisted || !root.backendId) {
+    ui.notify('示例项目暂不支持创建资产变体', 'info')
+    return
+  }
+  editor.value?.createVariant(root, event.currentTarget as HTMLButtonElement)
+}
+
 async function createAsset(kind: StudioAssetKind, draft: StudioAssetDraft) {
   if (props.project.persisted) {
     try {
-      await createAssetApi(props.project.id, kind, draft)
+      const created = await createAssetApi(props.project.id, kind, draft)
       const detail = await getProjectDetail(props.project.id)
       studio.hydrateProjectDetail(detail)
       category.value = kind
+      if (created.parentAssetId) {
+        activeVariantByRoot.value = {
+          ...activeVariantByRoot.value,
+          [created.parentAssetId]: created.id,
+        }
+      }
       editor.value?.close()
       return
     } catch (error) {
@@ -554,6 +620,12 @@ function confirmAssetDeletion(asset: StudioAsset) {
   assetToDelete.value = asset
   deleteOpen.value = true
 }
+
+const deleteVariantChildCount = computed(() => {
+  const target = assetToDelete.value
+  if (!target?.backendId || target.parentAssetId) return 0
+  return (props.project.assets ?? []).filter((a) => a.parentAssetId === target.backendId).length
+})
 
 async function deleteAsset() {
   const target = assetToDelete.value
@@ -682,33 +754,38 @@ async function deleteAsset() {
       </EmptyState>
       <UiTabs v-else v-model="category" label="资产分类" :tabs="groups">
         <template v-for="group in groups" :key="group.value" #[group.value]>
-          <ul v-if="group.assets.length" class="studio-asset-list">
-            <li v-for="asset in group.assets" :key="asset.id">
+          <ul v-if="group.cards.length" class="studio-asset-list">
+            <li v-for="card in group.cards" :key="card.root.backendId || card.root.id">
               <article
                 class="studio-asset-card"
                 :class="{
-                  'is-generating': isAssetGenerating(asset),
-                  'is-select-mode': selectMode && !!asset.backendId,
-                  'is-checked': selectMode && !!asset.backendId && checkedSet.has(asset.backendId),
+                  'is-generating': isAssetGenerating(card.active),
+                  'is-select-mode': selectMode && !!card.active.backendId,
+                  'is-checked': selectMode && !!card.active.backendId && checkedSet.has(card.active.backendId),
                 }"
               >
                 <button
-                  v-if="selectMode && asset.backendId"
+                  v-if="selectMode && card.active.backendId"
                   type="button"
                   class="studio-asset-check"
-                  :class="{ 'is-checked': checkedSet.has(asset.backendId) }"
-                  :disabled="isAssetGenerating(asset)"
-                  :aria-label="`选择 ${asset.name}`"
-                  @click="toggleCardCheck(asset)"
+                  :class="{ 'is-checked': checkedSet.has(card.active.backendId) }"
+                  :disabled="isAssetGenerating(card.active)"
+                  :aria-label="`选择 ${assetDisplayName(card.active)}`"
+                  @click="toggleCardCheck(card.active)"
                 >
-                  <Check v-if="checkedSet.has(asset.backendId)" :size="12" :stroke-width="2.6" />
+                  <Check v-if="checkedSet.has(card.active.backendId)" :size="12" :stroke-width="2.6" />
                 </button>
                 <div class="studio-asset-main">
                   <div class="studio-asset-thumb-wrap">
-                    <ImagePreview v-if="asset.imageUrl" :src="asset.imageUrl" :title="asset.name" :items="group.images">
+                    <ImagePreview
+                      v-if="card.active.imageUrl"
+                      :src="card.active.imageUrl"
+                      :title="assetDisplayName(card.active)"
+                      :items="group.images"
+                    >
                       <template #trigger>
-                        <button type="button" class="studio-asset-thumb" :aria-label="'预览 ' + asset.name">
-                          <img :src="asset.imageUrl" alt="" />
+                        <button type="button" class="studio-asset-thumb" :aria-label="'预览 ' + assetDisplayName(card.active)">
+                          <img :src="card.active.imageUrl" alt="" />
                         </button>
                       </template>
                     </ImagePreview>
@@ -717,29 +794,67 @@ async function deleteAsset() {
                     </div>
                   </div>
                   <div class="studio-asset-details">
-                    <h2 :title="asset.name">{{ asset.name }}</h2>
-                    <p v-if="asset.description">{{ asset.description }}</p>
+                    <div class="studio-asset-title-row">
+                      <h2 :title="card.active.name">{{ card.active.name }}</h2>
+                      <button
+                        v-if="card.items.length === 1 && project.persisted && card.root.backendId && !selectMode"
+                        type="button"
+                        class="studio-variant-add-inline"
+                        :title="`为「${card.root.name}」新增换装/时段/状态变体`"
+                        @click="addVariant(card.root, $event)"
+                      >
+                        <Plus :size="11" aria-hidden="true" />变体
+                      </button>
+                    </div>
+                    <p v-if="card.active.description">{{ card.active.description }}</p>
                   </div>
                 </div>
+                <div v-if="card.items.length > 1" class="studio-asset-variants" role="tablist" :aria-label="`${card.root.name}状态变体`">
+                  <button
+                    v-for="variant in card.items"
+                    :key="variant.backendId || variant.id"
+                    type="button"
+                    class="studio-variant-pill"
+                    :class="{
+                      'is-active': (variant.backendId || variant.id) === (card.active.backendId || card.active.id),
+                      'has-image': !!variant.imageUrl,
+                      'is-generating': isAssetGenerating(variant),
+                      'is-alert': !isAssetGenerating(variant) && !!assetJobAlert(variant),
+                    }"
+                    @click="selectGroupVariant(card.root, variant)"
+                  >
+                    <span class="studio-variant-dot" aria-hidden="true" />
+                    <span>{{ assetStateLabel(variant) }}</span>
+                  </button>
+                  <button
+                    v-if="project.persisted && card.root.backendId"
+                    type="button"
+                    class="studio-variant-pill is-add"
+                    :title="`为「${card.root.name}」新增状态变体`"
+                    @click="addVariant(card.root, $event)"
+                  >
+                    <Plus :size="11" aria-hidden="true" />变体
+                  </button>
+                </div>
                 <div
-                  v-if="assetJobAlert(asset)"
+                  v-if="assetJobAlert(card.active)"
                   class="studio-asset-job-banner"
-                  :class="assetJobAlert(asset)?.status === 'review' ? 'is-review' : 'is-failed'"
-                  :title="assetJobAlert(asset)?.message"
+                  :class="assetJobAlert(card.active)?.status === 'review' ? 'is-review' : 'is-failed'"
+                  :title="assetJobAlert(card.active)?.message"
                 >
-                  <Clock v-if="assetJobAlert(asset)?.status === 'review'" :size="13" aria-hidden="true" />
+                  <Clock v-if="assetJobAlert(card.active)?.status === 'review'" :size="13" aria-hidden="true" />
                   <AlertCircle v-else :size="13" aria-hidden="true" />
                   <span class="studio-asset-job-banner-text">
-                    <strong>{{ assetJobAlert(asset)?.status === 'review' ? '最近重绘待核对（积分冻结中）' : '最近重绘失败' }}：</strong>
-                    {{ assetJobAlert(asset)?.message }}
+                    <strong>{{ assetJobAlert(card.active)?.status === 'review' ? '最近重绘待核对（积分冻结中）' : '最近重绘失败' }}：</strong>
+                    {{ assetJobAlert(card.active)?.message }}
                   </span>
                   <button
-                    v-if="assetJobAlert(asset)?.jobId"
+                    v-if="assetJobAlert(card.active)?.jobId"
                     type="button"
                     class="studio-asset-job-close"
                     aria-label="忽略本次提示"
                     title="忽略本次提示"
-                    @click.stop="dismissAssetJobAlert(assetJobAlert(asset)?.jobId)"
+                    @click.stop="dismissAssetJobAlert(assetJobAlert(card.active)?.jobId)"
                   >
                     <X :size="12" aria-hidden="true" />
                   </button>
@@ -748,62 +863,62 @@ async function deleteAsset() {
                   <span
                     class="studio-asset-status"
                     :class="{
-                      'is-generating': isAssetGenerating(asset),
-                      'is-review': !isAssetGenerating(asset) && assetJobAlert(asset)?.status === 'review',
-                      'is-failed': !isAssetGenerating(asset) && (asset.imageStatus === 'failed' || assetJobAlert(asset)?.status === 'failed'),
-                      'has-image': !isAssetGenerating(asset) && !assetJobAlert(asset) && !!asset.imageUrl,
+                      'is-generating': isAssetGenerating(card.active),
+                      'is-review': !isAssetGenerating(card.active) && assetJobAlert(card.active)?.status === 'review',
+                      'is-failed': !isAssetGenerating(card.active) && (card.active.imageStatus === 'failed' || assetJobAlert(card.active)?.status === 'failed'),
+                      'has-image': !isAssetGenerating(card.active) && !assetJobAlert(card.active) && !!card.active.imageUrl,
                     }"
-                    :title="assetJobAlert(asset)?.message"
+                    :title="assetJobAlert(card.active)?.message"
                   >
-                    <Loader2 v-if="isAssetGenerating(asset)" class="is-spin" :size="14" aria-hidden="true" />
-                    <Clock v-else-if="assetJobAlert(asset)?.status === 'review'" :size="14" aria-hidden="true" />
+                    <Loader2 v-if="isAssetGenerating(card.active)" class="is-spin" :size="14" aria-hidden="true" />
+                    <Clock v-else-if="assetJobAlert(card.active)?.status === 'review'" :size="14" aria-hidden="true" />
                     <AlertCircle
-                      v-else-if="asset.imageStatus === 'failed' || assetJobAlert(asset)?.status === 'failed'"
+                      v-else-if="card.active.imageStatus === 'failed' || assetJobAlert(card.active)?.status === 'failed'"
                       :size="14"
                       aria-hidden="true"
                     />
-                    <component :is="asset.imageUrl ? ImageIcon : ImageOff" v-else :size="14" aria-hidden="true" />
-                    <template v-if="isAssetGenerating(asset)">生图中…</template>
-                    <template v-else-if="assetJobAlert(asset)?.status === 'review'">待核对</template>
-                    <template v-else-if="assetJobAlert(asset)?.status === 'failed'">{{ asset.imageUrl ? '重绘失败' : '生成失败' }}</template>
-                    <template v-else-if="asset.imageStatus === 'failed'">生成失败</template>
-                    <template v-else>{{ asset.imageUrl ? '已有图片' : '暂无图片' }}</template>
+                    <component :is="card.active.imageUrl ? ImageIcon : ImageOff" v-else :size="14" aria-hidden="true" />
+                    <template v-if="isAssetGenerating(card.active)">生图中…</template>
+                    <template v-else-if="assetJobAlert(card.active)?.status === 'review'">待核对</template>
+                    <template v-else-if="assetJobAlert(card.active)?.status === 'failed'">{{ card.active.imageUrl ? '重绘失败' : '生成失败' }}</template>
+                    <template v-else-if="card.active.imageStatus === 'failed'">生成失败</template>
+                    <template v-else>{{ card.active.imageUrl ? '已有图片' : '暂无图片' }}</template>
                   </span>
                   <div class="studio-asset-buttons">
                     <UiButton
-                      v-if="project.persisted && asset.backendId && (asset.imageHistory?.length ?? 0) >= 2"
+                      v-if="project.persisted && card.active.backendId && (card.active.imageHistory?.length ?? 0) >= 2"
                       variant="outline"
                       size="sm"
-                      :disabled="isAssetGenerating(asset)"
-                      :aria-label="`查看${asset.name}历史图片`"
-                      @click="openAssetHistory(asset)"
+                      :disabled="isAssetGenerating(card.active)"
+                      :aria-label="`查看${assetDisplayName(card.active)}历史图片`"
+                      @click="openAssetHistory(card.active)"
                     >
                       <template #leading><History :size="14" aria-hidden="true" /></template>
-                      历史 · {{ asset.imageHistory?.length }}
+                      历史 · {{ card.active.imageHistory?.length }}
                     </UiButton>
                     <UiButton
-                      v-if="project.persisted && asset.backendId"
+                      v-if="project.persisted && card.active.backendId"
                       variant="outline"
                       size="sm"
-                      :loading="submittingAssetId === asset.backendId"
-                      :disabled="generating || submittingAssetId === asset.backendId || isAssetGenerating(asset)"
-                      :aria-label="`AI生成${asset.name}图片`"
-                      @click="quickGenerateAssetImage(asset, $event)"
+                      :loading="submittingAssetId === card.active.backendId"
+                      :disabled="generating || submittingAssetId === card.active.backendId || isAssetGenerating(card.active)"
+                      :aria-label="`AI生成${assetDisplayName(card.active)}图片`"
+                      @click="quickGenerateAssetImage(card.active, $event)"
                     >
-                      <template v-if="submittingAssetId !== asset.backendId" #leading><Sparkles :size="14" aria-hidden="true" /></template>
-                      {{ asset.imageUrl ? '重绘' : 'AI 生图' }}
+                      <template v-if="submittingAssetId !== card.active.backendId" #leading><Sparkles :size="14" aria-hidden="true" /></template>
+                      {{ card.active.imageUrl ? '重绘' : 'AI 生图' }}
                     </UiButton>
-                    <UiButton variant="outline" size="sm" :aria-label="`编辑${asset.name}`" @click="editAsset(asset, $event)">
+                    <UiButton variant="outline" size="sm" :aria-label="`编辑${assetDisplayName(card.active)}`" @click="editAsset(card.active, $event)">
                       <template #leading><Pencil :size="14" aria-hidden="true" /></template>编辑
                     </UiButton>
                     <UiButton
                       class="studio-asset-delete"
                       variant="secondary"
                       size="sm"
-                      :disabled="isAssetGenerating(asset)"
-                      :aria-label="`删除${asset.name}`"
-                      title="删除资产"
-                      @click="confirmAssetDeletion(asset)"
+                      :disabled="isAssetGenerating(card.active)"
+                      :aria-label="`删除${assetDisplayName(card.active)}`"
+                      title="删除当前状态"
+                      @click="confirmAssetDeletion(card.active)"
                     >
                       <template #leading><Trash2 :size="14" aria-hidden="true" /></template>
                     </UiButton>
@@ -822,6 +937,7 @@ async function deleteAsset() {
     <StudioAssetEditor
       ref="editor"
       :image-models="imageModels"
+      :project-assets="project.assets ?? []"
       :persisted="project.persisted"
       :generating-image="!!submittingAssetId"
       @create="createAsset"
@@ -833,7 +949,7 @@ async function deleteAsset() {
     <MediaHistoryDialog
       v-model:open="historyOpen"
       kind="image"
-      :title="historyAsset ? `${historyAsset.name} · 历史图片` : '历史图片'"
+      :title="historyAsset ? `${assetDisplayName(historyAsset)} · 历史图片` : '历史图片'"
       :items="historyAsset?.imageHistory ?? []"
       :current-url="historyAsset?.imageUrl"
       :selecting="historySelecting"
@@ -856,7 +972,12 @@ async function deleteAsset() {
     />
 
     <UiDialog v-model:open="deleteOpen" title="删除资产">
-      <p class="studio-asset-delete-message">确定从当前项目删除「{{ assetToDelete?.name }}」吗？</p>
+      <p class="studio-asset-delete-message">
+        确定从当前项目删除「{{ assetToDelete ? assetDisplayName(assetToDelete) : '' }}」吗？
+      </p>
+      <p v-if="deleteVariantChildCount > 0" class="studio-asset-delete-note">
+        该主资产下还有 {{ deleteVariantChildCount }} 个状态变体，删除后首个变体将自动升级为主资产，不会删除已有变体图片。
+      </p>
       <template #footer>
         <UiButton variant="ghost" @click="deleteOpen = false">取消</UiButton>
         <UiButton variant="danger" @click="deleteAsset">
@@ -989,7 +1110,82 @@ async function deleteAsset() {
 .studio-asset-thumb { display: grid; place-items: center; overflow: hidden; width: 100%; aspect-ratio: 4 / 3; border: 1px solid var(--border-subtle); border-radius: 6px; background: var(--color-elevated); color: var(--color-muted); }
 .studio-asset-thumb img { width: 100%; height: 100%; min-height: 0; object-fit: cover; }
 button.studio-asset-thumb { cursor: zoom-in; }
-.studio-asset-details h2 { margin: 0 0 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-size-body); font-weight: 600; }
+.studio-asset-details h2 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-size-body); font-weight: 600; }
+.studio-asset-title-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 5px; min-width: 0; }
+.studio-variant-add-inline {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 6px;
+  border: 1px dashed var(--border-control);
+  border-radius: 999px;
+  color: var(--color-muted);
+  font-size: 11px;
+  line-height: 1.3;
+  cursor: pointer;
+  transition: border-color 140ms, color 140ms, background-color 140ms;
+}
+.studio-variant-add-inline:hover {
+  border-color: var(--color-gold);
+  color: var(--color-gold-soft);
+  background: var(--gold-tint);
+}
+.studio-asset-variants {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 10px;
+}
+.studio-variant-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-control);
+  border-radius: 999px;
+  background: var(--color-canvas);
+  color: var(--color-muted);
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: border-color 140ms, color 140ms, background-color 140ms;
+}
+.studio-variant-pill:hover {
+  border-color: var(--border-strong);
+  color: var(--color-text);
+}
+.studio-variant-pill.is-active {
+  border-color: var(--color-gold);
+  background: var(--gold-tint);
+  color: var(--color-gold-soft);
+  font-weight: 500;
+}
+.studio-variant-pill.is-add {
+  border-style: dashed;
+  gap: 2px;
+  padding-inline: 7px;
+}
+.studio-variant-pill.is-add:hover {
+  border-color: var(--color-gold);
+  color: var(--color-gold-soft);
+}
+.studio-variant-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-subtle);
+}
+.studio-variant-pill.has-image .studio-variant-dot { background: var(--color-success); }
+.studio-variant-pill.is-generating .studio-variant-dot { background: var(--color-gold); }
+.studio-variant-pill.is-alert .studio-variant-dot { background: var(--color-error); }
+.studio-asset-delete-note {
+  margin: 8px 0 0;
+  color: var(--color-muted);
+  font-size: var(--font-size-caption);
+  line-height: 1.5;
+}
 .studio-asset-details p { display: -webkit-box; overflow: hidden; margin: 0; color: var(--color-muted); font-size: var(--font-size-caption); overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 .studio-asset-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; padding-top: 10px; border-top: 1px solid var(--border-subtle); }
 .studio-asset-buttons { display: flex; gap: 6px; margin-left: auto; }

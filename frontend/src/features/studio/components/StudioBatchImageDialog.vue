@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { Check, Sparkles } from 'lucide-vue-next'
+import UiAlert from '@/components/ui/UiAlert.vue'
 import UiButton from '@/components/ui/UiButton.vue'
 import UiDialog from '@/components/ui/UiDialog.vue'
 import type { ModelCatalogItemOut } from '../api-types'
 import { assetKindIcons } from '../asset-icons'
-import { assetKindOptions } from '../studio-assets'
+import { assetDisplayName, assetKindOptions, findParentAsset } from '../studio-assets'
 import type { StudioAsset, StudioAssetKind } from '../studio-assets'
 import ImageModelPicker from './ImageModelPicker.vue'
 import ImageParamsPopover from './ImageParamsPopover.vue'
@@ -91,6 +92,16 @@ const selectedAssets = computed(() =>
 
 const newCount = computed(() => selectedAssets.value.filter((a) => !a.imageUrl).length)
 const redrawCount = computed(() => selectedAssets.value.filter((a) => !!a.imageUrl).length)
+
+function hasReadyParentImage(asset: StudioAsset): boolean {
+  if (!asset.parentAssetId) return false
+  const parent = findParentAsset(props.assets, asset)
+  return !!parent?.imageUrl && /^https?:\/\//i.test(parent.imageUrl)
+}
+
+const variantsMissingParentCount = computed(() =>
+  selectedAssets.value.filter((a) => !!a.parentAssetId && !hasReadyParentImage(a)).length,
+)
 
 const unitPrice = computed(() => {
   const price = currentModel.value?.imagePrices.find((p) => p.tier === selectedTier.value)
@@ -186,6 +197,14 @@ function confirmSubmit() {
         <span class="batch-count-hint">已选 {{ selectedAssets.length }} / 30 项</span>
       </div>
 
+      <UiAlert
+        v-if="variantsMissingParentCount > 0"
+        tone="warning"
+        :title="`有 ${variantsMissingParentCount} 项已选变体的主资产尚未出图`"
+      >
+        建议先生成主资产图，再批量生成变体，系统将自动以主资产图垫图以保持五官、场景或道具外观一致。
+      </UiAlert>
+
       <div class="batch-groups">
         <section v-for="group in groups" :key="group.value" class="batch-group">
           <h3 class="batch-group-title">
@@ -213,7 +232,7 @@ function confirmSubmit() {
                   <component :is="group.icon" v-else :size="18" aria-hidden="true" />
                 </span>
                 <span class="batch-info">
-                  <strong :title="asset.name">{{ asset.name }}</strong>
+                  <strong :title="assetDisplayName(asset)">{{ assetDisplayName(asset) }}</strong>
                   <span class="batch-tags">
                     <span
                       class="batch-ratio"
@@ -222,6 +241,7 @@ function confirmSubmit() {
                     >
                       {{ effectiveAssetRatio(asset) === 'auto' ? '自动' : effectiveAssetRatio(asset) }}
                     </span>
+                    <span v-if="hasReadyParentImage(asset)" class="batch-badge is-ref">主图垫图</span>
                     <span v-if="disabledReason(asset)" class="batch-badge is-disabled">{{ disabledReason(asset) }}</span>
                     <span v-else-if="asset.imageUrl" class="batch-badge is-redraw">已有图 · 重绘</span>
                     <span v-else class="batch-badge is-missing">暂无图片</span>
@@ -436,6 +456,10 @@ function confirmSubmit() {
 .batch-badge.is-redraw {
   background: rgb(74 222 128 / 12%);
   color: var(--color-success);
+}
+.batch-badge.is-ref {
+  background: color-mix(in srgb, var(--color-gold) 18%, transparent);
+  color: var(--color-gold-soft);
 }
 .batch-badge.is-disabled {
   background: rgb(255 255 255 / 5%);

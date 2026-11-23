@@ -457,3 +457,61 @@ test('hydrateProjectDetail maps persisted episodes, assets, storyboard reference
   assert.equal(hydrated.assets?.[0]?.imageUrl, 'https://oss.example/framedrama/c01-old.png')
   assert.equal(hydrated.storyboards?.[1]?.assets[0]?.imageUrl, 'https://oss.example/framedrama/c01-old.png')
 })
+
+test('groupStudioAssets and findAssetSiblings group root and variants across character, scene, and prop', async () => {
+  const { assetDisplayName, findAssetSiblings, findParentAsset, groupStudioAssets } = await import(
+    '../src/features/studio/studio-assets.ts'
+  )
+  const assets = [
+    {
+      id: 'C01',
+      backendId: 'u-root',
+      kind: 'character' as const,
+      name: '林薇',
+      description: '主造型',
+      prompt: '默认',
+      imageUrl: 'https://img.example/root.png',
+    },
+    {
+      id: 'v1-code',
+      backendId: 'u-v1',
+      parentAssetId: 'u-root',
+      variantLabel: '晚宴礼服',
+      kind: 'character' as const,
+      name: '林薇',
+      description: '晚宴',
+      prompt: '晚宴礼服',
+    },
+    {
+      id: 'v2-code',
+      backendId: 'u-v2',
+      parentAssetId: 'u-root',
+      variantLabel: '战损',
+      kind: 'character' as const,
+      name: '林薇',
+      description: '战损',
+      prompt: '战损',
+    },
+    {
+      id: 'C02',
+      backendId: 'u-other',
+      kind: 'character' as const,
+      name: '周明远',
+      description: '反派',
+      prompt: '西装',
+    },
+  ]
+
+  const grouped = groupStudioAssets(assets)
+  assert.equal(grouped.length, 2)
+  assert.equal(grouped[0].root.backendId, 'u-root')
+  assert.equal(grouped[0].items.length, 3)
+  assert.equal(grouped[1].root.backendId, 'u-other')
+  assert.equal(grouped[1].items.length, 1)
+
+  assert.equal(assetDisplayName(assets[0]), '林薇')
+  assert.equal(assetDisplayName(assets[1]), '林薇 · 晚宴礼服')
+  assert.equal(findParentAsset(assets, assets[1])?.backendId, 'u-root')
+  assert.equal(findAssetSiblings(assets, assets[1]).length, 3)
+  assert.equal(findAssetSiblings(assets, assets[3]).length, 1)
+})
