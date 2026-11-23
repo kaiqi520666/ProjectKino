@@ -111,6 +111,8 @@ async def claim_job_lease(
             return None
         if job.status == "running" and job.lease_until and job.lease_until > now:
             return None
+        if job.status == "queued" and job.dispatch_after and job.dispatch_after > now:
+            return None
         job.status = "running"
         job.lease_token = token
         job.lease_until = now + timedelta(seconds=lease_seconds)

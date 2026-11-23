@@ -944,6 +944,93 @@ def _outline_scale_guide(settings: ProjectSettings, mode: Literal["story", "uplo
     return guide
 
 
+async def plan_script_outline(
+    model: Model,
+    settings: ProjectSettings,
+    source: Source,
+    *,
+    feedback: str = "",
+    usage: RunUsage | None = None,
+    on_progress: ProgressCallback | None = None,
+) -> Outline:
+    """独立原子步骤：长文浓缩（按需）+ 全剧大纲与世界观规划。"""
+    target = settings.secondsPerEpisode
+    total_steps = settings.episodeCount + 2
+    note = feedback.strip()
+
+    digest = None
+    if source.mode == "upload" and source.chars > DIGEST_THRESHOLD_CHARS:
+        await _notify(on_progress, 0, total_steps, "正在浓缩长文原稿", 5)
+        digest = await condense_source(model, source, usage=usage)
+
+    planner = Agent(
+        model,
+        deps_type=OutlineContext,
+        output_type=PromptedOutput(Outline),
+        instructions=skill_instructions("plan-episodes"),
+        model_settings=PLANNING_MODEL_SETTINGS,
+        retries=2,
+    )
+    planner.output_validator(verify_outline)
+
+    plan_payload: dict = {
+        "settings": settings.model_dump(),
+        "mode": source.mode,
+        "episodeSeconds": target,
+        "scaleGuide": _outline_scale_guide(settings, source.mode),
+        "source": source.excerpt(1, len(source.lines)) if digest is None else None,
+        "digest": digest,
+    }
+    if note:
+        plan_payload["revisionFeedback"] = note
+
+    await _notify(
+        on_progress, 1, total_steps, f"正在规划全剧 {settings.episodeCount} 集大纲与世界观", 12
+    )
+    draft = await planner.run(
+        prompt(plan_payload),
+        deps=OutlineContext(settings, source),
+        usage=usage,
+        usage_limits=SHARED_USAGE_LIMITS,
+    )
+    return draft.output
+
+
+async def write_single_script_episode(
+    model: Model,
+    *,
+    settings: ProjectSettings,
+    outline: Outline,
+    plan: EpisodePlan,
+    source: Source,
+    previous: Episode | None = None,
+    feedback: str = "",
+    usage: RunUsage | None = None,
+    on_progress: ProgressCallback | None = None,
+) -> Episode:
+    """独立原子步骤：撰写单集结构化剧本（Beat-Sheet -> 分组多轮扩写 -> 质量门补强）。"""
+    total = max(1, len(outline.episodes))
+    total_steps = max(settings.episodeCount, total) + 2
+    pct = 20 + int((plan.number - 1) / total * 75)
+    await _notify(
+        on_progress,
+        plan.number + 1,
+        total_steps,
+        f"正在撰写第 {plan.number}/{total} 集《{plan.title}》",
+        pct,
+    )
+    return await _write_episode_unified(
+        model,
+        settings=settings,
+        outline=outline,
+        plan=plan,
+        source=source,
+        previous=previous,
+        feedback=feedback.strip(),
+        usage=usage,
+    )
+
+
 async def generate_script(
     model: Model,
     settings: ProjectSettings,
@@ -957,7 +1044,6 @@ async def generate_script(
     existing_outline: Outline | None = None,
     existing_episodes: Sequence[Episode] = (),
 ) -> ScriptResult:
-    target = settings.secondsPerEpisode
     total_steps = settings.episodeCount + 2
     note = feedback.strip()
 
@@ -965,54 +1051,25 @@ async def generate_script(
         outline = existing_outline
         await _notify(on_progress, 1, total_steps, "已复用现有大纲，继续补写剩余分集", 15)
     else:
-        digest = None
-        if source.mode == "upload" and source.chars > DIGEST_THRESHOLD_CHARS:
-            await _notify(on_progress, 0, total_steps, "正在浓缩长文原稿", 5)
-            digest = await condense_source(model, source, usage=usage)
-
-        planner = Agent(
+        outline = await plan_script_outline(
             model,
-            deps_type=OutlineContext,
-            output_type=PromptedOutput(Outline),
-            instructions=skill_instructions("plan-episodes"),
-            model_settings=PLANNING_MODEL_SETTINGS,
-            retries=2,
-        )
-        planner.output_validator(verify_outline)
-
-        plan_payload: dict = {
-            "settings": settings.model_dump(),
-            "mode": source.mode,
-            "episodeSeconds": target,
-            "scaleGuide": _outline_scale_guide(settings, source.mode),
-            "source": source.excerpt(1, len(source.lines)) if digest is None else None,
-            "digest": digest,
-        }
-        if note:
-            plan_payload["revisionFeedback"] = note
-
-        await _notify(on_progress, 1, total_steps, f"正在规划全剧 {settings.episodeCount} 集大纲与世界观", 12)
-        draft = await planner.run(
-            prompt(plan_payload),
-            deps=OutlineContext(settings, source),
+            settings,
+            source,
+            feedback=note,
             usage=usage,
-            usage_limits=SHARED_USAGE_LIMITS,
+            on_progress=on_progress,
         )
-        outline = draft.output
         if on_outline is not None:
             await on_outline(outline)
 
     done_by_number = {ep.number: ep for ep in existing_episodes}
     episodes: list[Episode] = []
-    total = len(outline.episodes)
-    for idx, plan in enumerate(outline.episodes, 1):
-        pct = 20 + int((idx - 1) / max(1, total) * 75)
+    for plan in outline.episodes:
         if plan.number in done_by_number:
             episodes.append(done_by_number[plan.number])
             continue
-        await _notify(on_progress, idx + 1, total_steps, f"正在撰写第 {idx}/{total} 集《{plan.title}》", pct)
         previous = episodes[-1] if episodes else None
-        ep = await _write_episode_unified(
+        ep = await write_single_script_episode(
             model,
             settings=settings,
             outline=outline,
@@ -1021,6 +1078,7 @@ async def generate_script(
             previous=previous,
             feedback=note,
             usage=usage,
+            on_progress=on_progress,
         )
         episodes.append(ep)
         if on_episode_ready is not None:

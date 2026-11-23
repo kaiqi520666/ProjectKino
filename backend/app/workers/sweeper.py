@@ -5,7 +5,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.modules.canvas.service import patch_canvas_node_error
@@ -16,6 +16,7 @@ from app.modules.studio.models import ProjectAsset, StoryboardClip
 logger = structlog.get_logger(__name__)
 
 _MEDIA_JOB_TYPES = {"asset_image", "clip_video", "canvas_image", "canvas_video"}
+_SCRIPT_STEP_JOB_TYPES = {"script_generate", "script_regenerate"}
 _LLM_JOB_TYPES = {
     "script_generate",
     "script_regenerate",
@@ -63,7 +64,7 @@ async def sweep_stale_jobs_once(
     3. 长时间滞留 queued（如 Redis 重启丢队列）-> 补投递至对应队列并延后下次重试时间防刷屏。
     """
     lock_key = f"{settings.redis_key_prefix}sweeper:lock"
-    acquired = await redis.set(lock_key, "1", nx=True, ex=55)
+    acquired = await redis.set(lock_key, "1", nx=True, ex=12)
     if not acquired:
         return {"skipped": 1, "resumed": 0, "requeued": 0, "reviewed": 0, "failed": 0}
 
@@ -125,6 +126,32 @@ async def sweep_stale_jobs_once(
                     )
                 to_publish.append(job)
                 counts["reviewed"] += 1
+            elif job.job_type in _SCRIPT_STEP_JOB_TYPES:
+                payload = dict(job.input_payload or {})
+                recoveries = int(payload.get("crashRecoveries") or 0)
+                max_recoveries = max(
+                    0, int(getattr(settings, "script_crash_max_recoveries", 2) or 0)
+                )
+                if recoveries < max_recoveries:
+                    next_recovery = recoveries + 1
+                    job.input_payload = {**payload, "crashRecoveries": next_recovery}
+                    job.status = "queued"
+                    job.step_label = (
+                        "检测到后台节点切换，正在从断点自动续写"
+                        f"（第 {next_recovery}/{max_recoveries} 次恢复）"
+                    )
+                    job.dispatch_after = current
+                    job.next_attempt_at = current + timedelta(seconds=queued_stale_seconds)
+                    to_dispatch.append((job.job_type, str(job.id)))
+                    to_publish.append(job)
+                    counts["resumed"] += 1
+                else:
+                    job.status = "failed"
+                    job.error_code = "worker_lease_expired"
+                    job.error_message = "后台多次意外中断，已暂停自动恢复，请点击继续生成剩余分集"
+                    job.finished_at = current
+                    to_publish.append(job)
+                    counts["failed"] += 1
             else:
                 job.status = "failed"
                 job.error_code = "worker_lease_expired"
@@ -147,8 +174,15 @@ async def sweep_stale_jobs_once(
                 select(Job)
                 .where(
                     Job.status == "queued",
-                    Job.created_at < stale_cutoff,
                     or_(Job.next_attempt_at.is_(None), Job.next_attempt_at <= current),
+                    or_(Job.dispatch_after.is_(None), Job.dispatch_after <= current),
+                    or_(
+                        Job.created_at < stale_cutoff,
+                        and_(
+                            Job.dispatch_after.is_not(None),
+                            Job.dispatch_after > Job.created_at,
+                        ),
+                    ),
                 )
                 .limit(50)
             )
@@ -179,7 +213,7 @@ async def sweeper_loop(
     sessions: async_sessionmaker[AsyncSession],
     redis: Any,
     settings: Any,
-    interval_seconds: float = 60.0,
+    interval_seconds: float = 15.0,
 ) -> None:
     while True:
         await asyncio.sleep(interval_seconds)

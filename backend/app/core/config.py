@@ -42,3 +42,7 @@ class Settings(BaseSettings):
     ffprobe_path: str = "ffprobe"
     image_concurrency: int = Field(default=4, ge=1, le=20)
     video_concurrency: int = Field(default=3, ge=1, le=20)
+    llm_max_concurrency: int = Field(default=20, ge=1, le=500)
+    llm_slot_ttl_seconds: int = Field(default=240, ge=30, le=1800)
+    script_step_max_retries: int = Field(default=3, ge=0, le=10)
+    script_crash_max_recoveries: int = Field(default=2, ge=0, le=10)

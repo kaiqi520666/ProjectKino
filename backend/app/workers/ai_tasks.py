@@ -1,7 +1,8 @@
 import asyncio
 import tempfile
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -42,8 +43,9 @@ from app.modules.llm_engine.schema import ProjectSettings
 from app.modules.llm_engine.script_gen import (
     Source,
     append_episode,
-    generate_script,
+    plan_script_outline,
     regenerate_episode,
+    write_single_script_episode,
 )
 from app.modules.llm_engine.storyboard_gen import (
     generate_new_clip_storyboard,
@@ -80,6 +82,11 @@ from app.modules.studio.service import (
     persist_storyboard_result,
 )
 from app.workers.broker import WorkerRuntime, ai_broker
+from app.workers.llm_limiter import (
+    acquire_llm_slot,
+    is_retryable_llm_error,
+    retry_backoff_seconds,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -119,6 +126,367 @@ def _format_error(exc: Exception) -> tuple[str, str]:
     return type(exc).__name__, str(exc)[:1000] or "任务执行失败"
 
 
+def _merge_usage_summary(
+    existing: dict[str, Any] | None,
+    step_usage: dict[str, Any],
+) -> dict[str, Any]:
+    if not existing:
+        return dict(step_usage)
+    prev_in = int(existing.get("inputTokens") or 0)
+    prev_cache = int(existing.get("cacheReadTokens") or 0)
+    prev_out = int(existing.get("outputTokens") or 0)
+    prev_cost = Decimal(str(existing.get("cost") or "0"))
+
+    add_in = int(step_usage.get("inputTokens") or 0)
+    add_cache = int(step_usage.get("cacheReadTokens") or 0)
+    add_out = int(step_usage.get("outputTokens") or 0)
+    add_cost = Decimal(str(step_usage.get("cost") or "0"))
+
+    merged = dict(step_usage)
+    merged["inputTokens"] = prev_in + add_in
+    merged["cacheReadTokens"] = prev_cache + add_cache
+    merged["outputTokens"] = prev_out + add_out
+    merged["cost"] = str((prev_cost + add_cost).quantize(Decimal("0.0001")))
+    return merged
+
+
+async def _default_enqueue_llm_job(job_id: str) -> None:
+    await execute_llm_job.kiq(job_id)
+
+
+async def _run_script_step_job(
+    *,
+    sessions: async_sessionmaker[AsyncSession],
+    redis: Any,
+    settings: Any,
+    job: Job,
+    model_override: tuple[Model, str] | None = None,
+    enqueue_next: Callable[[str], Awaitable[None]] | None = None,
+) -> None:
+    """
+    剧本按集短任务链核心执行器（零持 DB 连接 + 按步落库接力 + 指数退避重试 + 全局并发闸门）：
+    - 每次 Worker 抢占只执行 1 个原子步骤（规划大纲 OR 撰写 1 集，约 30-90s）；
+    - LLM 调用期间不持有 PostgreSQL 连接，仅在读/写瞬间打开短事务；
+    - 每步落库后若仍有未写集数，释放租约并重新入队下一步，实现多用户公平轮转与发版零中断；
+    - 遇到上游 429/5xx/网络超时自动指数退避（5s -> 15s -> 30s），用户全程无感；
+    - finally 按步骤幂等扣费并累加汇总到 job.usage_summary。
+    """
+    job_id = job.id
+    dispatch_next = enqueue_next or _default_enqueue_llm_job
+    payload = dict(job.input_payload or {})
+    feedback = str(payload.get("feedback", ""))
+    attempt_no = int(payload.get("stepAttempts") or 0) + 1
+    crash_no = int(payload.get("crashRecoveries") or 0)
+    run_usage = RunUsage()
+    model_id = DEFAULT_TEXT_MODEL_ID
+    step_key = "init"
+    target_episode_number: int | None = None
+
+    async def on_progress(step_index: int, step_total: int, label: str, progress: int) -> None:
+        await update_job_progress(
+            sessions,
+            redis,
+            settings,
+            job_id=job_id,
+            step_index=step_index,
+            step_total=step_total,
+            step_label=label,
+            progress=progress,
+        )
+
+    try:
+        # Phase A: 短 DB 会话只负责读取状态与规划本步要做什么，读完立刻关闭连接。
+        async with sessions() as read_db:
+            requested_model_id = (
+                str(payload.get("modelId")).strip() if payload.get("modelId") else None
+            )
+            if model_override is not None:
+                model, model_id = model_override
+            else:
+                model, model_id = await resolve_text_model(read_db, model_id=requested_model_id)
+
+            project = (
+                await read_db.scalar(select(Project).where(Project.id == job.project_id))
+                if job.project_id
+                else None
+            )
+            if project is None:
+                raise AppError(404, "project_not_found", "关联项目不存在")
+
+            project_uuid = project.id
+            proj_settings = ProjectSettings.model_validate(project.settings)
+            source = Source.from_text(project.mode, project.source_text)  # type: ignore[arg-type]
+
+            outline_ready = bool(payload.get("outlineReady"))
+            is_resume = bool(payload.get("resume")) and job.job_type == "script_generate"
+            existing_outline = None
+            existing_episodes: list[Any] = []
+            if outline_ready or is_resume:
+                existing_script = await build_script_result_from_db(read_db, project)
+                existing_outline = existing_script.outline
+                existing_episodes = list(existing_script.episodes)
+
+        # 判断本步该执行：大纲规划 / 撰写首个未写分集 / 已全部完成收尾。
+        next_plan = None
+        previous_ep = None
+        if existing_outline is None:
+            step_key = "outline"
+        else:
+            done_numbers = {ep.number for ep in existing_episodes}
+            for plan in existing_outline.episodes:
+                if plan.number not in done_numbers:
+                    next_plan = plan
+                    break
+            if next_plan is None:
+                # 兜底：所有集已落库（例如上次写完最后一集后崩溃），直接收尾标记成功。
+                now = datetime.now(UTC)
+                async with sessions() as write_db:
+                    db_job = await write_db.scalar(select(Job).where(Job.id == job_id))
+                    if db_job is not None:
+                        db_job.status = "succeeded"
+                        db_job.progress = 100
+                        db_job.step_index = db_job.step_total
+                        db_job.step_label = "已完成"
+                        db_job.result_payload = {
+                            "projectId": str(project_uuid),
+                            "episodeCount": len(existing_episodes),
+                        }
+                        db_job.finished_at = now
+                        db_job.lease_token = None
+                        db_job.lease_until = None
+                    await write_db.commit()
+                    if db_job is not None:
+                        await write_db.refresh(db_job)
+                        await publish_job_event(redis, settings, db_job)
+                return
+
+            target_episode_number = next_plan.number
+            step_key = f"ep{next_plan.number}"
+            previous_ep = next(
+                (ep for ep in reversed(existing_episodes) if ep.number < next_plan.number),
+                None,
+            )
+
+        # Phase B: 零 DB 连接 + 全局 Redis LLM 并发闸门保护下执行单步 LLM 调用。
+        planned_outline = None
+        written_episode = None
+        async with acquire_llm_slot(redis, settings, model_id):
+            if step_key == "outline":
+                planned_outline = await plan_script_outline(
+                    model,
+                    proj_settings,
+                    source,
+                    feedback=feedback,
+                    usage=run_usage,
+                    on_progress=on_progress,
+                )
+            else:
+                assert existing_outline is not None and next_plan is not None
+                written_episode = await write_single_script_episode(
+                    model,
+                    settings=proj_settings,
+                    outline=existing_outline,
+                    plan=next_plan,
+                    source=source,
+                    previous=previous_ep,
+                    feedback=feedback,
+                    usage=run_usage,
+                    on_progress=on_progress,
+                )
+
+        # Phase C: 短 DB 会话提交本步成果并决定接力下一步还是终态完成。
+        should_enqueue_next = False
+        published_job: Job | None = None
+        now = datetime.now(UTC)
+
+        async with sessions() as write_db:
+            proj_row = await write_db.scalar(select(Project).where(Project.id == project_uuid))
+            if proj_row is None:
+                raise AppError(404, "project_not_found", "关联项目不存在")
+            db_job = await write_db.scalar(select(Job).where(Job.id == job_id))
+
+            if step_key == "outline":
+                assert planned_outline is not None
+                await persist_project_outline(
+                    write_db,
+                    proj_row,
+                    proj_settings,
+                    planned_outline,
+                    reset_downstream=(job.job_type == "script_regenerate"),
+                )
+                total_eps = max(1, len(planned_outline.episodes))
+                if db_job is not None:
+                    db_job.input_payload = {
+                        **payload,
+                        "outlineReady": True,
+                        "stepAttempts": 0,
+                    }
+                    db_job.status = "queued"
+                    db_job.lease_token = None
+                    db_job.lease_until = None
+                    db_job.step_index = 1
+                    db_job.step_total = total_eps + 2
+                    db_job.step_label = f"全剧 {total_eps} 集大纲已保存，开始逐集撰写正文"
+                    db_job.progress = 18
+                    db_job.dispatch_after = now
+                    db_job.next_attempt_at = now
+                should_enqueue_next = True
+            else:
+                assert existing_outline is not None and written_episode is not None
+                await persist_single_episode(write_db, proj_row, written_episode)
+                done_numbers = {ep.number for ep in existing_episodes} | {written_episode.number}
+                total_eps = max(1, len(existing_outline.episodes))
+                remaining = [p for p in existing_outline.episodes if p.number not in done_numbers]
+
+                if remaining:
+                    saved_pct = min(96, 20 + int(len(done_numbers) / total_eps * 75))
+                    if db_job is not None:
+                        db_job.input_payload = {
+                            **payload,
+                            "outlineReady": True,
+                            "stepAttempts": 0,
+                        }
+                        db_job.status = "queued"
+                        db_job.lease_token = None
+                        db_job.lease_until = None
+                        db_job.step_index = len(done_numbers) + 1
+                        db_job.step_total = total_eps + 2
+                        db_job.step_label = (
+                            f"第 {written_episode.number}/{total_eps} 集《{written_episode.title}》已保存"
+                        )
+                        db_job.progress = saved_pct
+                        db_job.dispatch_after = now
+                        db_job.next_attempt_at = now
+                    should_enqueue_next = True
+                else:
+                    if db_job is not None:
+                        db_job.input_payload = {
+                            **payload,
+                            "outlineReady": True,
+                            "stepAttempts": 0,
+                        }
+                        db_job.status = "succeeded"
+                        db_job.progress = 100
+                        db_job.step_index = total_eps + 2
+                        db_job.step_total = total_eps + 2
+                        db_job.step_label = "已完成"
+                        db_job.result_payload = {
+                            "projectId": str(project_uuid),
+                            "episodeCount": len(done_numbers),
+                        }
+                        db_job.finished_at = now
+                        db_job.lease_token = None
+                        db_job.lease_until = None
+
+            await write_db.commit()
+            if db_job is not None:
+                await write_db.refresh(db_job)
+                published_job = db_job
+
+        if published_job is not None:
+            await publish_job_event(redis, settings, published_job)
+
+        if should_enqueue_next:
+            try:
+                await dispatch_next(str(job_id))
+            except Exception as exc:
+                # 已持久化 status=queued，Sweeper 将在下一个周期自动补投递。
+                logger.warning(
+                    "script_step_enqueue_failed_will_sweep",
+                    job_id=str(job_id),
+                    step_key=step_key,
+                    error=str(exc),
+                )
+
+    except Exception as exc:
+        code, message = _format_error(exc)
+        max_retries = max(0, int(getattr(settings, "script_step_max_retries", 3) or 0))
+        current_attempts = int(payload.get("stepAttempts") or 0)
+
+        if is_retryable_llm_error(exc) and current_attempts < max_retries:
+            next_attempt = current_attempts + 1
+            delay = retry_backoff_seconds(next_attempt)
+            retry_at = datetime.now(UTC) + timedelta(seconds=delay)
+            step_desc = (
+                "全剧大纲规划"
+                if step_key == "outline"
+                else (f"第 {target_episode_number} 集" if target_episode_number else "当前步骤")
+            )
+            logger.warning(
+                "script_step_retrying",
+                job_id=str(job_id),
+                step_key=step_key,
+                attempt=next_attempt,
+                max_retries=max_retries,
+                delay_seconds=delay,
+                error=message,
+            )
+            async with sessions() as session:
+                db_job = await session.scalar(select(Job).where(Job.id == job_id))
+                if db_job is not None:
+                    db_job.input_payload = {**payload, "stepAttempts": next_attempt}
+                    db_job.status = "queued"
+                    db_job.lease_token = None
+                    db_job.lease_until = None
+                    db_job.dispatch_after = retry_at
+                    db_job.next_attempt_at = retry_at
+                    db_job.step_label = (
+                        f"{step_desc}遇到上游波动，{delay} 秒后自动重试（第 {next_attempt}/{max_retries} 次）"
+                    )
+                await session.commit()
+                if db_job is not None:
+                    await session.refresh(db_job)
+                    await publish_job_event(redis, settings, db_job)
+        else:
+            logger.warning(
+                "llm_job_failed",
+                job_id=str(job_id),
+                step_key=step_key,
+                code=code,
+                error=message,
+            )
+            async with sessions() as session:
+                db_job = await session.scalar(select(Job).where(Job.id == job_id))
+                if db_job is not None:
+                    db_job.status = "failed"
+                    db_job.error_code = code
+                    db_job.error_message = message
+                    db_job.finished_at = datetime.now(UTC)
+                    db_job.lease_token = None
+                    db_job.lease_until = None
+                await session.commit()
+                if db_job is not None:
+                    await session.refresh(db_job)
+                    await publish_job_event(redis, settings, db_job)
+    finally:
+        if run_usage.input_tokens > 0 or run_usage.output_tokens > 0:
+            try:
+                async with sessions() as session:
+                    ledger = await charge_llm_usage(
+                        session,
+                        user_id=job.user_id,
+                        model_id=model_id,
+                        job_id=job.id,
+                        input_tokens=run_usage.input_tokens,
+                        cache_read_tokens=run_usage.cache_read_tokens,
+                        output_tokens=run_usage.output_tokens,
+                        idempotency_key=f"llm:{job.id}:{step_key}:r{crash_no}:a{attempt_no}",
+                        reason=f"LLM 任务消耗 ({job.job_type}:{step_key})",
+                    )
+                    db_job = await session.scalar(select(Job).where(Job.id == job_id))
+                    if db_job is not None and ledger is not None:
+                        db_job.usage_summary = _merge_usage_summary(
+                            db_job.usage_summary, ledger.token_usage
+                        )
+                    await session.commit()
+            except Exception:
+                logger.exception(
+                    "llm_postpaid_charge_failed",
+                    job_id=str(job_id),
+                    step_key=step_key,
+                )
+
+
 async def run_llm_job_core(
     *,
     sessions: async_sessionmaker[AsyncSession],
@@ -126,12 +494,13 @@ async def run_llm_job_core(
     settings: Any,
     job_id: UUID,
     model_override: tuple[Model, str] | None = None,
+    enqueue_next: Callable[[str], Awaitable[None]] | None = None,
 ) -> None:
     """
     执行单条 LLM 任务的核心状态机：
     - 租约抢占 + 30s 心跳续约
-    - 共享 RunUsage 累加所有重试与分集 token
-    - finally 必结算：无论成功还是中途报错，只要有 token 消耗一律按真实单价扣费（允许负余额）
+    - script_generate / script_regenerate 走按集短任务链（零持 DB 连接 + 自动退避重试 + 崩溃自愈）
+    - 其余单步 LLM 任务同样受全局 Redis LLM 并发闸门保护并在 finally 按实结算
     """
     claimed = await claim_job_lease(sessions, job_id)
     if claimed is None:
@@ -140,6 +509,24 @@ async def run_llm_job_core(
     await publish_job_event(redis, settings, job)
 
     heartbeat = asyncio.create_task(heartbeat_job_lease(sessions, job_id, lease_token))
+    if job.job_type in ("script_generate", "script_regenerate"):
+        try:
+            await _run_script_step_job(
+                sessions=sessions,
+                redis=redis,
+                settings=settings,
+                job=job,
+                model_override=model_override,
+                enqueue_next=enqueue_next,
+            )
+        finally:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
+        return
+
     run_usage = RunUsage()
     model_id = DEFAULT_TEXT_MODEL_ID
 
@@ -156,436 +543,373 @@ async def run_llm_job_core(
         )
 
     try:
-        async with sessions() as session:
-            payload = dict(job.input_payload or {})
-            requested_model_id = (
-                str(payload.get("modelId")).strip() if payload.get("modelId") else None
-            )
-            if model_override is not None:
-                model, model_id = model_override
-            else:
-                model, model_id = await resolve_text_model(session, model_id=requested_model_id)
+        payload = dict(job.input_payload or {})
+        requested_model_id = (
+            str(payload.get("modelId")).strip() if payload.get("modelId") else None
+        )
+        if model_override is not None:
+            model, model_id = model_override
+        else:
+            async with sessions() as model_db:
+                model, model_id = await resolve_text_model(model_db, model_id=requested_model_id)
 
-            if job.job_type == "canvas_text":
-                if job.canvas_id is None or not job.target_id:
-                    raise AppError(400, "canvas_target_missing", "画布文本任务缺少关联画布或节点 ID")
-                generated_text = await generate_canvas_text(
-                    model,
-                    prompt=str(payload.get("prompt") or ""),
-                    current_text=(
-                        str(payload["currentText"])
-                        if isinstance(payload.get("currentText"), str)
-                        else None
-                    ),
-                    reference_texts=(
-                        payload.get("referenceTexts")
-                        if isinstance(payload.get("referenceTexts"), list)
-                        else None
-                    ),
-                    reference_urls=(
-                        payload.get("referenceUrls")
-                        if isinstance(payload.get("referenceUrls"), list)
-                        else None
-                    ),
-                    reference_images=(
-                        payload.get("referenceImages")
-                        if isinstance(payload.get("referenceImages"), list)
-                        else None
-                    ),
-                    usage=run_usage,
-                    on_progress=on_progress,
-                )
-                await patch_canvas_node_text(
-                    session,
-                    canvas_id=job.canvas_id,
-                    node_id=job.target_id,
-                    text=generated_text,
-                    base_text=(
-                        str(payload["currentText"])
-                        if isinstance(payload.get("currentText"), str)
-                        else None
-                    ),
-                    job_id=job_id,
-                )
-                result_payload: dict[str, Any] = {
-                    "canvasId": str(job.canvas_id),
-                    "nodeId": job.target_id,
-                    "modelId": model_id,
-                    "text": generated_text,
-                }
-            else:
-                project = (
-                    await session.scalar(select(Project).where(Project.id == job.project_id))
-                    if job.project_id
-                    else None
-                )
-                if project is None:
-                    raise AppError(404, "project_not_found", "关联项目不存在")
-
-                result_payload = {"projectId": str(project.id)}
-
-                if job.job_type in ("script_generate", "script_regenerate"):
-                    proj_settings = ProjectSettings.model_validate(project.settings)
-                    source = Source.from_text(project.mode, project.source_text)  # type: ignore[arg-type]
-                    is_resume = bool(payload.get("resume")) and job.job_type == "script_generate"
-                    existing_outline = None
-                    existing_eps = ()
-                    if is_resume:
-                        existing_script = await build_script_result_from_db(session, project)
-                        existing_outline = existing_script.outline
-                        existing_eps = tuple(existing_script.episodes)
-                    project_uuid = project.id
-                    reset_downstream = job.job_type == "script_regenerate"
-
-                    async def _save_outline(outline_obj) -> None:
-                        async with sessions() as write_db:
-                            proj_row = await write_db.scalar(
-                                select(Project).where(Project.id == project_uuid)
-                            )
-                            if proj_row is not None:
-                                await persist_project_outline(
-                                    write_db,
-                                    proj_row,
-                                    proj_settings,
-                                    outline_obj,
-                                    reset_downstream=reset_downstream,
-                                )
-                                await write_db.commit()
-                        await on_progress(
-                            1,
-                            proj_settings.episodeCount + 2,
-                            f"全剧 {len(outline_obj.episodes)} 集大纲已保存，开始逐集撰写正文",
-                            18,
-                        )
-
-                    async def _save_episode(ep_obj) -> None:
-                        async with sessions() as write_db:
-                            proj_row = await write_db.scalar(
-                                select(Project).where(Project.id == project_uuid)
-                            )
-                            if proj_row is not None:
-                                await persist_single_episode(write_db, proj_row, ep_obj)
-                                await write_db.commit()
-                        total_eps = max(1, proj_settings.episodeCount)
-                        saved_pct = 20 + int(ep_obj.number / total_eps * 75)
-                        await on_progress(
-                            ep_obj.number + 1,
-                            total_eps + 2,
-                            f"第 {ep_obj.number}/{total_eps} 集《{ep_obj.title}》已保存",
-                            min(96, saved_pct),
-                        )
-
-                    generated = await generate_script(
+        async with acquire_llm_slot(redis, settings, model_id):
+            async with sessions() as session:
+                if job.job_type == "canvas_text":
+                    if job.canvas_id is None or not job.target_id:
+                        raise AppError(400, "canvas_target_missing", "画布文本任务缺少关联画布或节点 ID")
+                    generated_text = await generate_canvas_text(
                         model,
-                        proj_settings,
-                        source,
-                        feedback=str(payload.get("feedback", "")),
-                        usage=run_usage,
-                        on_progress=on_progress,
-                        on_outline=_save_outline,
-                        on_episode_ready=_save_episode,
-                        existing_outline=existing_outline,
-                        existing_episodes=existing_eps,
-                    )
-                    result_payload["episodeCount"] = len(generated.episodes)
-
-                elif job.job_type == "episode_rewrite":
-                    ep_num = int(payload["episodeNumber"])
-                    script_result = await build_script_result_from_db(session, project)
-                    source = (
-                        Source.from_text(project.mode, project.source_text)  # type: ignore[arg-type]
-                        if project.source_text.strip()
-                        else None
-                    )
-                    rewritten = await regenerate_episode(
-                        model,
-                        script_result,
-                        ep_num,
-                        source=source,
-                        feedback=str(payload.get("feedback", "")),
+                        prompt=str(payload.get("prompt") or ""),
+                        current_text=(
+                            str(payload["currentText"])
+                            if isinstance(payload.get("currentText"), str)
+                            else None
+                        ),
+                        reference_texts=(
+                            payload.get("referenceTexts")
+                            if isinstance(payload.get("referenceTexts"), list)
+                            else None
+                        ),
+                        reference_urls=(
+                            payload.get("referenceUrls")
+                            if isinstance(payload.get("referenceUrls"), list)
+                            else None
+                        ),
+                        reference_images=(
+                            payload.get("referenceImages")
+                            if isinstance(payload.get("referenceImages"), list)
+                            else None
+                        ),
                         usage=run_usage,
                         on_progress=on_progress,
                     )
-                    await persist_rewritten_episode(session, project, rewritten)
-                    result_payload["episodeNumber"] = rewritten.number
-
-                elif job.job_type == "episode_append":
-                    script_result = await build_script_result_from_db(session, project)
-                    source = (
-                        Source.from_text(project.mode, project.source_text)  # type: ignore[arg-type]
-                        if project.source_text.strip()
-                        else None
-                    )
-                    updated = await append_episode(
-                        model,
-                        script_result,
-                        source=source,
-                        feedback=str(payload.get("feedback", "")),
-                        usage=run_usage,
-                        on_progress=on_progress,
-                    )
-                    appended = await persist_appended_episode(session, project, updated)
-                    result_payload["episodeNumber"] = appended.number
-
-                elif job.job_type == "assets_extract":
-                    mode = str(payload.get("mode", "incremental"))
-                    script_result = await build_script_result_from_db(session, project)
-                    existing_assets = (
-                        (
-                            await build_asset_result_from_db(
-                                session, project, include_variants=True
-                            )
-                        ).assets
-                        if mode == "incremental"
-                        else []
-                    )
-                    extracted = await analyze_assets(
-                        model,
-                        script_result,
-                        existing=existing_assets,
-                        usage=run_usage,
-                        on_progress=on_progress,
-                    )
-                    saved = await persist_extracted_assets(
+                    await patch_canvas_node_text(
                         session,
-                        project,
-                        extracted,
-                        preserve_edits=(mode == "incremental"),
+                        canvas_id=job.canvas_id,
+                        node_id=job.target_id,
+                        text=generated_text,
+                        base_text=(
+                            str(payload["currentText"])
+                            if isinstance(payload.get("currentText"), str)
+                            else None
+                        ),
+                        job_id=job_id,
                     )
-                    result_payload["assetCount"] = len(saved)
+                    result_payload: dict[str, Any] = {
+                        "canvasId": str(job.canvas_id),
+                        "nodeId": job.target_id,
+                        "modelId": model_id,
+                        "text": generated_text,
+                    }
+                else:
+                    project = (
+                        await session.scalar(select(Project).where(Project.id == job.project_id))
+                        if job.project_id
+                        else None
+                    )
+                    if project is None:
+                        raise AppError(404, "project_not_found", "关联项目不存在")
 
-                elif job.job_type == "storyboard_generate":
-                    action = str(payload.get("action") or "episode")
-                    if action == "clip_regenerate":
-                        clip_uuid = UUID(str(payload["clipId"]))
-                        clip_row = await session.scalar(
-                            select(StoryboardClip).where(
-                                StoryboardClip.id == clip_uuid,
-                                StoryboardClip.project_id == project.id,
-                            )
-                        )
-                        if clip_row is None:
-                            raise AppError(404, "clip_not_found", "片段不存在")
-                        ep_row = await session.scalar(
-                            select(Episode).where(
-                                Episode.id == clip_row.episode_id,
-                                Episode.project_id == project.id,
-                            )
-                        )
-                        if ep_row is None:
-                            raise AppError(404, "episode_not_found", "关联分集不存在")
-                        script_result = await build_script_result_from_db(session, project)
-                        llm_ep = next(
-                            (e for e in script_result.episodes if e.number == ep_row.number),
-                            None,
-                        )
-                        if llm_ep is None:
-                            raise AppError(
-                                404, "episode_not_found", f"剧本里缺少第 {ep_row.number} 集"
-                            )
-                        asset_result = await build_asset_result_from_db(
-                            session, project, include_variants=True
-                        )
-                        if not asset_result.assets:
-                            raise AppError(
-                                400, "assets_required", "请先识别并生成项目资产后再重生成分镜"
-                            )
+                    result_payload = {"projectId": str(project.id)}
 
-                        ep_clips = list(
-                            await session.scalars(
-                                select(StoryboardClip)
-                                .where(StoryboardClip.episode_id == ep_row.id)
-                                .order_by(StoryboardClip.clip_index)
-                            )
-                        )
-                        pos = next((i for i, c in enumerate(ep_clips) if c.id == clip_row.id), -1)
-                        prev_row = ep_clips[pos - 1] if pos > 0 else None
-                        next_row = ep_clips[pos + 1] if 0 <= pos < len(ep_clips) - 1 else None
-                        prev_ctx = (
-                            {
-                                "clipIndex": prev_row.clip_index,
-                                "blocking": prev_row.blocking or "",
-                                "promptExcerpt": (prev_row.prompt or "")[:360],
-                            }
-                            if prev_row is not None
-                            else None
-                        )
-                        next_ctx = (
-                            {
-                                "clipIndex": next_row.clip_index,
-                                "blocking": next_row.blocking or "",
-                                "promptExcerpt": (next_row.prompt or "")[:360],
-                            }
-                            if next_row is not None
-                            else None
-                        )
-                        beat_tuple = (
-                            (int(clip_row.beats[0]), int(clip_row.beats[1]))
-                            if isinstance(clip_row.beats, list) and len(clip_row.beats) == 2
-                            else None
-                        )
-                        refresh_refs = bool(payload.get("refreshReferences", True))
-                        spec = await regenerate_clip_storyboard(
-                            model,
-                            script=script_result,
-                            episode=llm_ep,
-                            assets=asset_result,
-                            clip_index=clip_row.clip_index,
-                            clip_beats=beat_tuple,
-                            duration_seconds=clip_row.duration_seconds,
-                            current_prompt=clip_row.prompt or "",
-                            current_references=list(clip_row.references or []),
-                            refresh_references=refresh_refs,
-                            feedback=str(payload.get("feedback", "")),
-                            prev_clip=prev_ctx,
-                            next_clip=next_ctx,
-                            usage=run_usage,
-                            on_progress=on_progress,
-                        )
-                        updated = await apply_regenerated_clip(
-                            session,
-                            project=project,
-                            clip_id=clip_row.id,
-                            prompt_text=spec.prompt,
-                            blocking=spec.blocking,
-                            cuts=[c.model_dump() for c in spec.cuts] if spec.cuts else None,
-                            raw_references=(
-                                [r.model_dump() for r in spec.references] if refresh_refs else None
-                            ),
-                            refresh_references=refresh_refs,
-                        )
-                        result_payload["episodeNumber"] = ep_row.number
-                        result_payload["clipId"] = str(updated.id)
-                        result_payload["clipIndex"] = updated.clip_index
-
-                    elif action == "clip_create":
+                    if job.job_type == "episode_rewrite":
                         ep_num = int(payload["episodeNumber"])
-                        duration_sec = int(payload.get("durationSeconds") or 10)
-                        insert_after_raw = payload.get("insertAfterClipId")
-                        insert_after_id = UUID(str(insert_after_raw)) if insert_after_raw else None
-
-                        ep_row = await session.scalar(
-                            select(Episode).where(
-                                Episode.project_id == project.id,
-                                Episode.number == ep_num,
-                            )
-                        )
-                        if ep_row is None:
-                            raise AppError(404, "episode_not_found", f"第 {ep_num} 集不存在")
                         script_result = await build_script_result_from_db(session, project)
-                        llm_ep = next(
-                            (e for e in script_result.episodes if e.number == ep_num), None
-                        )
-                        if llm_ep is None:
-                            raise AppError(404, "episode_not_found", f"剧本里缺少第 {ep_num} 集")
-                        asset_result = await build_asset_result_from_db(
-                            session, project, include_variants=True
-                        )
-                        if not asset_result.assets:
-                            raise AppError(
-                                400, "assets_required", "请先识别并生成项目资产后再新增片段"
-                            )
-
-                        ep_clips = list(
-                            await session.scalars(
-                                select(StoryboardClip)
-                                .where(StoryboardClip.episode_id == ep_row.id)
-                                .order_by(StoryboardClip.clip_index)
-                            )
-                        )
-                        insert_pos = len(ep_clips)
-                        if insert_after_id is not None:
-                            anchor = next(
-                                (i for i, c in enumerate(ep_clips) if c.id == insert_after_id),
-                                None,
-                            )
-                            if anchor is not None:
-                                insert_pos = anchor + 1
-                        prev_row = ep_clips[insert_pos - 1] if insert_pos > 0 else None
-                        next_row = ep_clips[insert_pos] if insert_pos < len(ep_clips) else None
-                        prev_ctx = (
-                            {
-                                "clipIndex": prev_row.clip_index,
-                                "blocking": prev_row.blocking or "",
-                                "promptExcerpt": (prev_row.prompt or "")[:360],
-                            }
-                            if prev_row is not None
+                        source = (
+                            Source.from_text(project.mode, project.source_text)  # type: ignore[arg-type]
+                            if project.source_text.strip()
                             else None
                         )
-                        next_ctx = (
-                            {
-                                "clipIndex": next_row.clip_index,
-                                "blocking": next_row.blocking or "",
-                                "promptExcerpt": (next_row.prompt or "")[:360],
-                            }
-                            if next_row is not None
-                            else None
-                        )
-                        spec = await generate_new_clip_storyboard(
-                            model,
-                            script=script_result,
-                            episode=llm_ep,
-                            assets=asset_result,
-                            duration_seconds=duration_sec,
-                            feedback=str(payload.get("feedback", "")),
-                            prev_clip=prev_ctx,
-                            next_clip=next_ctx,
-                            usage=run_usage,
-                            on_progress=on_progress,
-                        )
-                        created = await persist_generated_new_clip(
-                            session,
-                            project=project,
-                            episode_number=ep_num,
-                            duration_seconds=duration_sec,
-                            prompt_text=spec.prompt,
-                            blocking=spec.blocking,
-                            cuts=[c.model_dump() for c in spec.cuts] if spec.cuts else None,
-                            raw_references=[r.model_dump() for r in spec.references],
-                            insert_after_clip_id=insert_after_id,
-                        )
-                        result_payload["episodeNumber"] = ep_num
-                        result_payload["clipId"] = str(created.id)
-                        result_payload["clipIndex"] = created.clip_index
-
-                    else:
-                        ep_num = payload.get("episodeNumber")
-                        script_result = await build_script_result_from_db(session, project)
-                        asset_result = await build_asset_result_from_db(
-                            session, project, include_variants=True
-                        )
-                        if not asset_result.assets:
-                            raise AppError(
-                                400, "assets_required", "请先识别并生成项目资产后再生成分镜"
-                            )
-                        board = await storyboard(
+                        rewritten = await regenerate_episode(
                             model,
                             script_result,
-                            asset_result,
-                            only_episode=int(ep_num) if ep_num is not None else None,
+                            ep_num,
+                            source=source,
                             feedback=str(payload.get("feedback", "")),
                             usage=run_usage,
                             on_progress=on_progress,
                         )
-                        await persist_storyboard_result(session, project, board)
-                        result_payload["episodes"] = [item.number for item in board.episodes]
+                        await persist_rewritten_episode(session, project, rewritten)
+                        result_payload["episodeNumber"] = rewritten.number
 
-                else:
-                    raise AppError(400, "unsupported_job_type", f"不支持的 LLM 任务类型：{job.job_type}")
+                    elif job.job_type == "episode_append":
+                        script_result = await build_script_result_from_db(session, project)
+                        source = (
+                            Source.from_text(project.mode, project.source_text)  # type: ignore[arg-type]
+                            if project.source_text.strip()
+                            else None
+                        )
+                        updated = await append_episode(
+                            model,
+                            script_result,
+                            source=source,
+                            feedback=str(payload.get("feedback", "")),
+                            usage=run_usage,
+                            on_progress=on_progress,
+                        )
+                        appended = await persist_appended_episode(session, project, updated)
+                        result_payload["episodeNumber"] = appended.number
 
-            db_job = await session.scalar(select(Job).where(Job.id == job_id))
-            if db_job is not None:
-                db_job.status = "succeeded"
-                db_job.progress = 100
-                db_job.step_index = db_job.step_total
-                db_job.step_label = "已完成"
-                db_job.result_payload = result_payload
-                db_job.finished_at = datetime.now(UTC)
-                db_job.lease_token = None
-            await session.commit()
-            if db_job is not None:
-                await session.refresh(db_job)
-                await publish_job_event(redis, settings, db_job)
+                    elif job.job_type == "assets_extract":
+                        mode = str(payload.get("mode", "incremental"))
+                        script_result = await build_script_result_from_db(session, project)
+                        existing_assets = (
+                            (
+                                await build_asset_result_from_db(
+                                    session, project, include_variants=True
+                                )
+                            ).assets
+                            if mode == "incremental"
+                            else []
+                        )
+                        extracted = await analyze_assets(
+                            model,
+                            script_result,
+                            existing=existing_assets,
+                            usage=run_usage,
+                            on_progress=on_progress,
+                        )
+                        saved = await persist_extracted_assets(
+                            session,
+                            project,
+                            extracted,
+                            preserve_edits=(mode == "incremental"),
+                        )
+                        result_payload["assetCount"] = len(saved)
+
+                    elif job.job_type == "storyboard_generate":
+                        action = str(payload.get("action") or "episode")
+                        if action == "clip_regenerate":
+                            clip_uuid = UUID(str(payload["clipId"]))
+                            clip_row = await session.scalar(
+                                select(StoryboardClip).where(
+                                    StoryboardClip.id == clip_uuid,
+                                    StoryboardClip.project_id == project.id,
+                                )
+                            )
+                            if clip_row is None:
+                                raise AppError(404, "clip_not_found", "片段不存在")
+                            ep_row = await session.scalar(
+                                select(Episode).where(
+                                    Episode.id == clip_row.episode_id,
+                                    Episode.project_id == project.id,
+                                )
+                            )
+                            if ep_row is None:
+                                raise AppError(404, "episode_not_found", "关联分集不存在")
+                            script_result = await build_script_result_from_db(session, project)
+                            llm_ep = next(
+                                (e for e in script_result.episodes if e.number == ep_row.number),
+                                None,
+                            )
+                            if llm_ep is None:
+                                raise AppError(
+                                    404, "episode_not_found", f"剧本里缺少第 {ep_row.number} 集"
+                                )
+                            asset_result = await build_asset_result_from_db(
+                                session, project, include_variants=True
+                            )
+                            if not asset_result.assets:
+                                raise AppError(
+                                    400, "assets_required", "请先识别并生成项目资产后再重生成分镜"
+                                )
+
+                            ep_clips = list(
+                                await session.scalars(
+                                    select(StoryboardClip)
+                                    .where(StoryboardClip.episode_id == ep_row.id)
+                                    .order_by(StoryboardClip.clip_index)
+                                )
+                            )
+                            pos = next((i for i, c in enumerate(ep_clips) if c.id == clip_row.id), -1)
+                            prev_row = ep_clips[pos - 1] if pos > 0 else None
+                            next_row = ep_clips[pos + 1] if 0 <= pos < len(ep_clips) - 1 else None
+                            prev_ctx = (
+                                {
+                                    "clipIndex": prev_row.clip_index,
+                                    "blocking": prev_row.blocking or "",
+                                    "promptExcerpt": (prev_row.prompt or "")[:360],
+                                }
+                                if prev_row is not None
+                                else None
+                            )
+                            next_ctx = (
+                                {
+                                    "clipIndex": next_row.clip_index,
+                                    "blocking": next_row.blocking or "",
+                                    "promptExcerpt": (next_row.prompt or "")[:360],
+                                }
+                                if next_row is not None
+                                else None
+                            )
+                            beat_tuple = (
+                                (int(clip_row.beats[0]), int(clip_row.beats[1]))
+                                if isinstance(clip_row.beats, list) and len(clip_row.beats) == 2
+                                else None
+                            )
+                            refresh_refs = bool(payload.get("refreshReferences", True))
+                            spec = await regenerate_clip_storyboard(
+                                model,
+                                script=script_result,
+                                episode=llm_ep,
+                                assets=asset_result,
+                                clip_index=clip_row.clip_index,
+                                clip_beats=beat_tuple,
+                                duration_seconds=clip_row.duration_seconds,
+                                current_prompt=clip_row.prompt or "",
+                                current_references=list(clip_row.references or []),
+                                refresh_references=refresh_refs,
+                                feedback=str(payload.get("feedback", "")),
+                                prev_clip=prev_ctx,
+                                next_clip=next_ctx,
+                                usage=run_usage,
+                                on_progress=on_progress,
+                            )
+                            updated = await apply_regenerated_clip(
+                                session,
+                                project=project,
+                                clip_id=clip_row.id,
+                                prompt_text=spec.prompt,
+                                blocking=spec.blocking,
+                                cuts=[c.model_dump() for c in spec.cuts] if spec.cuts else None,
+                                raw_references=(
+                                    [r.model_dump() for r in spec.references] if refresh_refs else None
+                                ),
+                                refresh_references=refresh_refs,
+                            )
+                            result_payload["episodeNumber"] = ep_row.number
+                            result_payload["clipId"] = str(updated.id)
+                            result_payload["clipIndex"] = updated.clip_index
+
+                        elif action == "clip_create":
+                            ep_num = int(payload["episodeNumber"])
+                            duration_sec = int(payload.get("durationSeconds") or 10)
+                            insert_after_raw = payload.get("insertAfterClipId")
+                            insert_after_id = UUID(str(insert_after_raw)) if insert_after_raw else None
+
+                            ep_row = await session.scalar(
+                                select(Episode).where(
+                                    Episode.project_id == project.id,
+                                    Episode.number == ep_num,
+                                )
+                            )
+                            if ep_row is None:
+                                raise AppError(404, "episode_not_found", f"第 {ep_num} 集不存在")
+                            script_result = await build_script_result_from_db(session, project)
+                            llm_ep = next(
+                                (e for e in script_result.episodes if e.number == ep_num), None
+                            )
+                            if llm_ep is None:
+                                raise AppError(404, "episode_not_found", f"剧本里缺少第 {ep_num} 集")
+                            asset_result = await build_asset_result_from_db(
+                                session, project, include_variants=True
+                            )
+                            if not asset_result.assets:
+                                raise AppError(
+                                    400, "assets_required", "请先识别并生成项目资产后再新增片段"
+                                )
+
+                            ep_clips = list(
+                                await session.scalars(
+                                    select(StoryboardClip)
+                                    .where(StoryboardClip.episode_id == ep_row.id)
+                                    .order_by(StoryboardClip.clip_index)
+                                )
+                            )
+                            insert_pos = len(ep_clips)
+                            if insert_after_id is not None:
+                                anchor = next(
+                                    (i for i, c in enumerate(ep_clips) if c.id == insert_after_id),
+                                    None,
+                                )
+                                if anchor is not None:
+                                    insert_pos = anchor + 1
+                            prev_row = ep_clips[insert_pos - 1] if insert_pos > 0 else None
+                            next_row = ep_clips[insert_pos] if insert_pos < len(ep_clips) else None
+                            prev_ctx = (
+                                {
+                                    "clipIndex": prev_row.clip_index,
+                                    "blocking": prev_row.blocking or "",
+                                    "promptExcerpt": (prev_row.prompt or "")[:360],
+                                }
+                                if prev_row is not None
+                                else None
+                            )
+                            next_ctx = (
+                                {
+                                    "clipIndex": next_row.clip_index,
+                                    "blocking": next_row.blocking or "",
+                                    "promptExcerpt": (next_row.prompt or "")[:360],
+                                }
+                                if next_row is not None
+                                else None
+                            )
+                            spec = await generate_new_clip_storyboard(
+                                model,
+                                script=script_result,
+                                episode=llm_ep,
+                                assets=asset_result,
+                                duration_seconds=duration_sec,
+                                feedback=str(payload.get("feedback", "")),
+                                prev_clip=prev_ctx,
+                                next_clip=next_ctx,
+                                usage=run_usage,
+                                on_progress=on_progress,
+                            )
+                            created = await persist_generated_new_clip(
+                                session,
+                                project=project,
+                                episode_number=ep_num,
+                                duration_seconds=duration_sec,
+                                prompt_text=spec.prompt,
+                                blocking=spec.blocking,
+                                cuts=[c.model_dump() for c in spec.cuts] if spec.cuts else None,
+                                raw_references=[r.model_dump() for r in spec.references],
+                                insert_after_clip_id=insert_after_id,
+                            )
+                            result_payload["episodeNumber"] = ep_num
+                            result_payload["clipId"] = str(created.id)
+                            result_payload["clipIndex"] = created.clip_index
+
+                        else:
+                            ep_num = payload.get("episodeNumber")
+                            script_result = await build_script_result_from_db(session, project)
+                            asset_result = await build_asset_result_from_db(
+                                session, project, include_variants=True
+                            )
+                            if not asset_result.assets:
+                                raise AppError(
+                                    400, "assets_required", "请先识别并生成项目资产后再生成分镜"
+                                )
+                            board = await storyboard(
+                                model,
+                                script_result,
+                                asset_result,
+                                only_episode=int(ep_num) if ep_num is not None else None,
+                                feedback=str(payload.get("feedback", "")),
+                                usage=run_usage,
+                                on_progress=on_progress,
+                            )
+                            await persist_storyboard_result(session, project, board)
+                            result_payload["episodes"] = [item.number for item in board.episodes]
+
+                    else:
+                        raise AppError(400, "unsupported_job_type", f"不支持的 LLM 任务类型：{job.job_type}")
+
+                db_job = await session.scalar(select(Job).where(Job.id == job_id))
+                if db_job is not None:
+                    db_job.status = "succeeded"
+                    db_job.progress = 100
+                    db_job.step_index = db_job.step_total
+                    db_job.step_label = "已完成"
+                    db_job.result_payload = result_payload
+                    db_job.finished_at = datetime.now(UTC)
+                    db_job.lease_token = None
+                await session.commit()
+                if db_job is not None:
+                    await session.refresh(db_job)
+                    await publish_job_event(redis, settings, db_job)
 
     except Exception as exc:
         code, message = _format_error(exc)
