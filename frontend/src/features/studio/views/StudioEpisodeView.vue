@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, useTemplateRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, useTemplateRef, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   AlertCircle,
@@ -39,8 +39,10 @@ import {
   type PromptReferenceOption,
 } from '@/components/business/prompt-references'
 import ImagePreview from '@/components/ui/ImagePreview.vue'
+import UiAlert from '@/components/ui/UiAlert.vue'
 import UiButton from '@/components/ui/UiButton.vue'
 import UiDialog from '@/components/ui/UiDialog.vue'
+import UiTextarea from '@/components/ui/UiTextarea.vue'
 import VideoPreview from '@/components/ui/VideoPreview.vue'
 import AssetLibraryDialog from '@/features/assets/AssetLibraryDialog.vue'
 import type { AssetLibraryItem } from '@/features/assets/asset-library-types'
@@ -60,7 +62,9 @@ import {
   startBatchGenerateClipVideos,
   startComposeEpisode,
   startGenerateClipVideo,
+  startGenerateNewClip,
   startGenerateStoryboard,
+  startRegenerateClipStoryboard,
   updateClipApi,
   watchJob,
 } from '../api'
@@ -126,6 +130,17 @@ const clipHistoryOpen = ref(false)
 const clipHistorySelecting = ref(false)
 const clipHistoryDeletingId = ref<string | null>(null)
 const dismissedClipJobIds = ref<Set<string>>(new Set())
+const regenFormId = useId()
+const regenOpen = ref(false)
+const regenScope = ref<'clip' | 'episode'>('clip')
+const regenRefreshRefs = ref(true)
+const regenFeedback = ref('')
+const addClipFormId = useId()
+const addClipOpen = ref(false)
+const addClipFeedback = ref('')
+const addClipPosition = ref<'after' | 'end'>('after')
+const addClipDuration = ref(10)
+const addClipBusy = ref(false)
 let deleteTrigger: HTMLButtonElement | undefined
 const clipStrip = useTemplateRef<InstanceType<typeof EpisodeClipStrip>>('clipStrip')
 
@@ -668,7 +683,34 @@ function retryFailedBatchClips() {
   })
 }
 
-async function generateFromScript() {
+const addClipMaxDuration = computed(() => Math.max(4, Math.min(30, cap.value)))
+const addClipDurationPresets = computed(() =>
+  addClipMaxDuration.value >= 30 ? [5, 10, 15, 20, 25, 30] : [5, 8, 10, 12, 15],
+)
+
+async function openRegenDialog() {
+  if (generating.value || generation.isRunning) return
+  if (!props.project.scriptResult) {
+    studio.generateExampleStoryboard(props.project.id, number.value)
+    return
+  }
+  if (!props.project.assetResult) {
+    ui.notify('请先在资产生成页生成资产', 'info')
+    return
+  }
+  try {
+    await flushPromptSave()
+  } catch (error) {
+    ui.notify(apiErrorMessage(error), 'error')
+    return
+  }
+  regenScope.value = clip.value?.backendId ? 'clip' : 'episode'
+  regenRefreshRefs.value = true
+  regenFeedback.value = ''
+  regenOpen.value = true
+}
+
+async function generateFromScript(feedback = '') {
   const { scriptResult, assetResult } = props.project
   if (!scriptResult) {
     studio.generateExampleStoryboard(props.project.id, number.value)
@@ -681,6 +723,7 @@ async function generateFromScript() {
   if (generating.value || generation.isRunning) return
 
   const episodeNumber = number.value
+  const cleanFeedback = feedback.trim()
   await generation.runTask(
     {
       title: `正在生成第 ${episodeNumber} 集分镜`,
@@ -699,7 +742,11 @@ async function generateFromScript() {
     async (controls) => {
       generating.value = true
       try {
-        const accepted = await startGenerateStoryboard(props.project.id, episodeNumber)
+        const accepted = await startGenerateStoryboard(
+          props.project.id,
+          episodeNumber,
+          cleanFeedback ? { feedback: cleanFeedback } : undefined,
+        )
         controls.setJobId(accepted.job.id)
         controls.setProgress(accepted.job.progress)
         await watchJob(accepted.job.id, (job) => {
@@ -711,6 +758,68 @@ async function generateFromScript() {
         studio.hydrateProjectDetail(detail)
         selectedId.value = undefined
         ui.notify(`第 ${episodeNumber} 集分镜已生成`, 'success')
+        return detail
+      } finally {
+        generating.value = false
+        void auth.refreshBalance()
+      }
+    },
+  )
+}
+
+async function submitRegenDialog() {
+  if (generating.value || generation.isRunning) return
+  const feedback = regenFeedback.value.trim()
+  if (regenScope.value === 'episode') {
+    regenOpen.value = false
+    await generateFromScript(feedback)
+    return
+  }
+  const activeClip = clip.value
+  if (!activeClip?.backendId) {
+    regenOpen.value = false
+    await generateFromScript(feedback)
+    return
+  }
+  const clipBackendId = activeClip.backendId
+  const clipNumber = activeClip.id
+  const refreshReferences = regenRefreshRefs.value
+  regenOpen.value = false
+
+  await generation.runTask(
+    {
+      title: `正在重生成片段 ${clipNumber} 分镜`,
+      subtitle: `${props.project.creation.settings.name} · ${episodeIndex.value}`,
+      description: refreshReferences
+        ? '正在重新匹配参考素材并重写本片段镜头与视频提示词'
+        : '正在保留当前参考素材并重写本片段镜头与视频提示词',
+      steps: [
+        '结合前后片段站位与导演意见重设计镜头',
+        '拼装视频提示词并保留已有视频与历史记录',
+      ],
+      hint: '完成后自动刷新当前片段提示词',
+      formatError: apiErrorMessage,
+      canRetryError: isRetryableApiError,
+      successMessage: () => `片段 ${clipNumber} 分镜已重生成`,
+    },
+    async (controls) => {
+      generating.value = true
+      try {
+        const accepted = await startRegenerateClipStoryboard(props.project.id, clipBackendId, {
+          feedback,
+          refreshReferences,
+        })
+        controls.setJobId(accepted.job.id)
+        controls.setProgress(accepted.job.progress)
+        await watchJob(accepted.job.id, (job) => {
+          controls.setProgress(job.progress)
+          if (job.stepLabel) controls.setDescription(job.stepLabel)
+          controls.setStep(job.stepIndex <= 1 ? 0 : 1)
+        })
+        const detail = await getProjectDetail(props.project.id)
+        studio.hydrateProjectDetail(detail)
+        selectedId.value = clipNumber
+        ui.notify(`片段 ${clipNumber} 分镜已重生成`, 'success')
         return detail
       } finally {
         generating.value = false
@@ -990,26 +1099,126 @@ async function composeEpisode() {
 }
 
 async function addClip() {
-  if (props.project.persisted) {
-    try {
-      const created = await createClipApi(props.project.id, number.value, cap.value, '')
-      const detail = await getProjectDetail(props.project.id)
-      studio.hydrateProjectDetail(detail)
-      selectedId.value = created.clipIndex
+  if (!props.project.persisted) {
+    const id = studio.appendClip(props.project.id, number.value)
+    if (id === undefined) return
+    selectedId.value = id
+    await nextTick()
+    clipStrip.value?.scrollToEnd()
+    return
+  }
+  try {
+    await flushPromptSave()
+  } catch (error) {
+    ui.notify(apiErrorMessage(error), 'error')
+    return
+  }
+  addClipFeedback.value = ''
+  addClipPosition.value = clip.value?.backendId ? 'after' : 'end'
+  addClipDuration.value = Math.min(addClipMaxDuration.value, Math.max(4, selectedDuration.value || 10))
+  addClipOpen.value = true
+}
+
+function clampAddClipDuration(raw: number): number {
+  const parsed = Number.isFinite(raw) ? Math.round(raw) : 10
+  return Math.min(addClipMaxDuration.value, Math.max(4, parsed))
+}
+
+async function createBlankClipFromDialog() {
+  if (addClipBusy.value || generating.value) return
+  addClipBusy.value = true
+  const durationSeconds = clampAddClipDuration(addClipDuration.value)
+  const insertAfterClipId =
+    addClipPosition.value === 'after' && clip.value?.backendId ? clip.value.backendId : undefined
+  try {
+    const created = await createClipApi(
+      props.project.id,
+      number.value,
+      durationSeconds,
+      '',
+      insertAfterClipId,
+    )
+    addClipOpen.value = false
+    const detail = await getProjectDetail(props.project.id)
+    studio.hydrateProjectDetail(detail)
+    selectedId.value = created.clipIndex
+    if (!insertAfterClipId) {
       await nextTick()
       clipStrip.value?.scrollToEnd()
-      return
-    } catch (error) {
-      ui.notify(apiErrorMessage(error), 'error')
-      return
     }
+    ui.notify(`已新增空白片段 ${created.clipIndex}`, 'success')
+  } catch (error) {
+    ui.notify(apiErrorMessage(error), 'error')
+  } finally {
+    addClipBusy.value = false
   }
-  const id = studio.appendClip(props.project.id, number.value)
-  if (id === undefined) return
+}
 
-  selectedId.value = id
-  await nextTick()
-  clipStrip.value?.scrollToEnd()
+async function submitAiAddClip() {
+  if (generating.value || generation.isRunning || addClipBusy.value) return
+  if (!props.project.assetResult) {
+    ui.notify('请先在资产生成页生成资产后再使用 AI 新增镜头', 'info')
+    return
+  }
+  const episodeNumber = number.value
+  const durationSeconds = clampAddClipDuration(addClipDuration.value)
+  const feedback = addClipFeedback.value.trim()
+  const insertAfterClipId =
+    addClipPosition.value === 'after' && clip.value?.backendId ? clip.value.backendId : undefined
+  addClipOpen.value = false
+
+  await generation.runTask(
+    {
+      title: `正在为第 ${episodeNumber} 集新增镜头`,
+      subtitle: `${props.project.creation.settings.name} · 目标时长 ${durationSeconds} 秒`,
+      description: '正在结合前后片段上下文与项目资产设计新镜头并拼装视频提示词',
+      steps: [
+        '读取前后片段站位与项目资产/变体列表',
+        '按目标时长规划镜次并生成标准视频提示词',
+      ],
+      hint: '完成后将自动插入并切换到新镜头',
+      formatError: apiErrorMessage,
+      canRetryError: isRetryableApiError,
+      successMessage: () => '新镜头已生成并插入分镜列表',
+    },
+    async (controls) => {
+      generating.value = true
+      try {
+        const accepted = await startGenerateNewClip(props.project.id, episodeNumber, {
+          durationSeconds,
+          feedback,
+          insertAfterClipId,
+        })
+        controls.setJobId(accepted.job.id)
+        controls.setProgress(accepted.job.progress)
+        const finalJob = await watchJob(accepted.job.id, (job) => {
+          controls.setProgress(job.progress)
+          if (job.stepLabel) controls.setDescription(job.stepLabel)
+          controls.setStep(job.stepIndex <= 1 ? 0 : 1)
+        })
+        const detail = await getProjectDetail(props.project.id)
+        studio.hydrateProjectDetail(detail)
+        const createdIndex = Number(finalJob.resultPayload?.clipIndex)
+        if (Number.isInteger(createdIndex) && createdIndex >= 1) {
+          selectedId.value = createdIndex
+        }
+        if (!insertAfterClipId) {
+          await nextTick()
+          clipStrip.value?.scrollToEnd()
+        }
+        ui.notify(
+          Number.isInteger(createdIndex) && createdIndex >= 1
+            ? `已生成新镜头（片段 ${createdIndex}）`
+            : '新镜头已生成',
+          'success',
+        )
+        return detail
+      } finally {
+        generating.value = false
+        void auth.refreshBalance()
+      }
+    },
+  )
 }
 
 function confirmClipDeletion(id: number, event: MouseEvent) {
@@ -1098,7 +1307,7 @@ async function deleteClip() {
           <template #leading><Video :size="14" aria-hidden="true" /></template>
           {{ missingVideoCount > 0 ? `批量生视频 (${missingVideoCount})` : '批量重新生成' }}
         </UiButton>
-        <UiButton v-if="storyboard" variant="outline" size="sm" :loading="generating" :disabled="generating || hasActiveVideoJobs" @click="generateFromScript">
+        <UiButton v-if="storyboard" variant="outline" size="sm" :loading="generating" :disabled="generating || hasActiveVideoJobs" @click="openRegenDialog">
           <template v-if="!generating" #leading><Sparkles :size="14" aria-hidden="true" /></template>重新生成分镜
         </UiButton>
         <UiButton variant="primary" size="sm" :disabled="!canCompose" @click="composeEpisode">
@@ -1378,7 +1587,7 @@ async function deleteClip() {
 
       <EmptyState v-else class="episode-empty" title="待拆分镜" :description="`单片段最长 ${cap} 秒`">
         <template #icon><Clapperboard :size="25" :stroke-width="1.5" /></template>
-        <UiButton variant="primary" :loading="generating" :disabled="generating" @click="generateFromScript">
+        <UiButton variant="primary" :loading="generating" :disabled="generating" @click="generateFromScript()">
           <template v-if="!generating" #leading><Sparkles :size="16" aria-hidden="true" /></template>一键生成本集分镜
         </UiButton>
       </EmptyState>
@@ -1434,6 +1643,170 @@ async function deleteClip() {
       @select="handleSelectClipHistory"
       @delete="handleDeleteClipHistory"
     />
+
+    <UiDialog
+      v-model:open="regenOpen"
+      title="重新生成分镜"
+      :description="regenScope === 'clip' && clip ? `仅重写片段 ${clip.id}，保留其已生成的视频与历史记录。` : `重新按最新剧本生成第 ${number} 集全部分镜。`"
+    >
+      <form :id="regenFormId" class="episode-modal-form" @submit.prevent="submitRegenDialog">
+        <div v-if="clip?.backendId" class="episode-scope-switch" role="radiogroup" aria-label="重生成范围">
+          <button
+            type="button"
+            class="episode-scope-option"
+            :class="{ 'is-active': regenScope === 'clip' }"
+            @click="regenScope = 'clip'"
+          >
+            <strong>仅当前片段（片段 {{ clip.id }}）</strong>
+            <span>保留已有视频，仅重写本段提示词</span>
+          </button>
+          <button
+            type="button"
+            class="episode-scope-option"
+            :class="{ 'is-active': regenScope === 'episode' }"
+            @click="regenScope = 'episode'"
+          >
+            <strong>整集分镜（第 {{ number }} 集）</strong>
+            <span>按最新剧本全量重切并覆盖</span>
+          </button>
+        </div>
+
+        <label v-if="regenScope === 'clip' && clip?.backendId" class="episode-modal-check">
+          <input v-model="regenRefreshRefs" type="checkbox" />
+          <span>同时重新匹配参考素材（自动选用最新资产/变体；取消勾选则保留当前参考素材仅重写提示词）</span>
+        </label>
+
+        <UiAlert
+          v-else
+          tone="warning"
+          :title="
+            readyCount > 0
+              ? `重生成整集将覆盖全部 ${clips.length} 个片段，并清空当前 ${readyCount} 个已生成的视频关联`
+              : `重生成整集将按最新剧本覆盖本集全部 ${clips.length} 个片段及手动编辑内容`
+          "
+        />
+
+        <UiTextarea
+          v-model="regenFeedback"
+          label="修改要求 / 导演意见（可选）"
+          :rows="4"
+          :maxlength="500"
+          :placeholder="
+            regenScope === 'clip'
+              ? '可留空直接重写；或说明修改方向，例如：节奏放慢、多给女主面部特写、光线更压抑、换用手持跟拍'
+              : '可留空按剧本重生成；或说明整集分镜方向，例如：开场前两镜更有压迫感、多用近景特写、林晓回家戏换便装'
+          "
+        />
+      </form>
+      <template #footer>
+        <UiButton variant="ghost" :disabled="generating" @click="regenOpen = false">取消</UiButton>
+        <UiButton
+          type="submit"
+          :form="regenFormId"
+          :variant="regenScope === 'episode' ? 'danger' : 'primary'"
+          :disabled="generating || generation.isRunning"
+        >
+          <template #leading><Sparkles :size="14" aria-hidden="true" /></template>
+          {{ regenScope === 'clip' && clip ? `开始重生成片段 ${clip.id}` : `确认重生成第 ${number} 集分镜` }}
+        </UiButton>
+      </template>
+    </UiDialog>
+
+    <UiDialog
+      v-model:open="addClipOpen"
+      title="新增镜头"
+      :description="`单片段时长支持 4–${addClipMaxDuration} 秒（跟随当前项目上限）。可用 AI 结合上下文生成，或直接创建空白镜头。`"
+    >
+      <form :id="addClipFormId" class="episode-modal-form" @submit.prevent="submitAiAddClip">
+        <UiTextarea
+          v-model="addClipFeedback"
+          label="镜头内容 / 导演要求（可选）"
+          :rows="4"
+          :maxlength="500"
+          placeholder="可留空由 AI 承接上一片段自然续写；或写一句画面意图，例如：补一个 6 秒悬念特写，林晓推开档案室门，手电光扫过墙上的旧照片"
+        />
+
+        <div class="episode-add-grid">
+          <div v-if="clip?.backendId" class="episode-add-field">
+            <span class="ui-label">插入位置</span>
+            <div class="episode-add-pills">
+              <button
+                type="button"
+                class="episode-add-pill"
+                :class="{ 'is-active': addClipPosition === 'after' }"
+                @click="addClipPosition = 'after'"
+              >
+                当前片段后（片段 {{ clip.id + 1 }}）
+              </button>
+              <button
+                type="button"
+                class="episode-add-pill"
+                :class="{ 'is-active': addClipPosition === 'end' }"
+                @click="addClipPosition = 'end'"
+              >
+                本集末尾（片段 {{ clips.length + 1 }}）
+              </button>
+            </div>
+          </div>
+
+          <div class="episode-add-field">
+            <span class="ui-label">目标时长（4–{{ addClipMaxDuration }} 秒）</span>
+            <div class="episode-add-duration-row">
+              <div class="episode-add-pills">
+                <button
+                  v-for="sec in addClipDurationPresets"
+                  :key="sec"
+                  type="button"
+                  class="episode-add-pill"
+                  :class="{ 'is-active': addClipDuration === sec }"
+                  @click="addClipDuration = sec"
+                >
+                  {{ sec }}s
+                </button>
+              </div>
+              <label class="episode-add-duration-input">
+                <input
+                  v-model.number="addClipDuration"
+                  type="number"
+                  min="4"
+                  :max="addClipMaxDuration"
+                  step="1"
+                  aria-label="自定义目标时长（秒）"
+                />
+                <span>秒</span>
+              </label>
+            </div>
+          </div>
+        </div>
+      </form>
+      <template #footer>
+        <div class="episode-add-footer">
+          <UiButton
+            variant="outline"
+            size="sm"
+            :loading="addClipBusy"
+            :disabled="addClipBusy || generating || generation.isRunning"
+            @click="createBlankClipFromDialog"
+          >
+            <template #leading><Plus :size="14" aria-hidden="true" /></template>
+            创建空白镜头
+          </UiButton>
+          <div class="episode-add-footer-right">
+            <UiButton variant="ghost" size="sm" :disabled="addClipBusy || generating" @click="addClipOpen = false">取消</UiButton>
+            <UiButton
+              type="submit"
+              :form="addClipFormId"
+              variant="primary"
+              size="sm"
+              :disabled="addClipBusy || generating || generation.isRunning"
+            >
+              <template #leading><Sparkles :size="14" aria-hidden="true" /></template>
+              AI 生成新镜头
+            </UiButton>
+          </div>
+        </div>
+      </template>
+    </UiDialog>
 
     <UiDialog v-model:open="deleteOpen" title="删除片段" :description="`确定删除本集的片段 ${clipToDelete} 吗？`">
       <template #footer>
@@ -1847,6 +2220,144 @@ button.episode-asset-thumb { width: 100%; cursor: zoom-in; }
   flex: none;
   font-size: 10px;
   color: var(--color-muted);
+}
+.episode-modal-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.episode-scope-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.episode-scope-option {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-control);
+  border-radius: 8px;
+  background: var(--color-canvas);
+  color: var(--color-text);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+.episode-scope-option strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+.episode-scope-option span {
+  font-size: 11px;
+  color: var(--color-muted);
+}
+.episode-scope-option:hover {
+  border-color: rgb(240 184 75 / 45%);
+}
+.episode-scope-option.is-active {
+  border-color: var(--color-gold);
+  background: var(--gold-tint);
+}
+.episode-scope-option.is-active strong {
+  color: var(--color-gold-soft);
+}
+.episode-modal-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--color-canvas);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text);
+  cursor: pointer;
+  user-select: none;
+}
+.episode-modal-check input {
+  width: 15px;
+  height: 15px;
+  margin-top: 2px;
+  flex: none;
+  accent-color: var(--color-gold);
+  cursor: pointer;
+}
+.episode-add-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.episode-add-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.episode-add-duration-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.episode-add-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.episode-add-pill {
+  padding: 4px 10px;
+  border: 1px solid var(--border-control);
+  border-radius: 6px;
+  background: var(--color-canvas);
+  color: var(--color-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 140ms ease, color 140ms ease, background-color 140ms ease;
+}
+.episode-add-pill:hover {
+  border-color: rgb(240 184 75 / 45%);
+  color: var(--color-text);
+}
+.episode-add-pill.is-active {
+  border-color: var(--color-gold);
+  background: var(--gold-tint);
+  color: var(--color-gold-soft);
+  font-weight: 500;
+}
+.episode-add-duration-input {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--border-control);
+  border-radius: 6px;
+  background: var(--color-canvas);
+  font-size: 12px;
+  color: var(--color-muted);
+}
+.episode-add-duration-input input {
+  width: 46px;
+  border: 0;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  outline: none;
+}
+.episode-add-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+}
+.episode-add-footer-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 .is-spin { animation: spin 1s linear infinite; }
 @keyframes spin {

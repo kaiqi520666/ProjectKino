@@ -76,10 +76,26 @@ class ExtractAssetsRequest(CamelModel):
     mode: Literal["full", "incremental"] = "incremental"
 
 
+class GenerateStoryboardRequest(CamelModel):
+    feedback: str = Field(default="", max_length=500)
+
+
+class RegenerateClipRequest(CamelModel):
+    feedback: str = Field(default="", max_length=500)
+    refresh_references: bool = True
+
+
+class GenerateNewClipRequest(CamelModel):
+    duration_seconds: int = Field(default=10, ge=4, le=30)
+    feedback: str = Field(default="", max_length=500)
+    insert_after_clip_id: UUID | None = None
+
+
 class ClipCreateRequest(CamelModel):
     duration_seconds: int = Field(default=15, ge=1, le=30)
     prompt: str = ""
     references: list[dict[str, Any]] = Field(default_factory=list)
+    insert_after_clip_id: UUID | None = None
 
 
 class ClipUpdateRequest(CamelModel):

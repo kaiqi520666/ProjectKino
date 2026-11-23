@@ -45,7 +45,11 @@ from app.modules.llm_engine.script_gen import (
     generate_script,
     regenerate_episode,
 )
-from app.modules.llm_engine.storyboard_gen import storyboard
+from app.modules.llm_engine.storyboard_gen import (
+    generate_new_clip_storyboard,
+    regenerate_clip_storyboard,
+    storyboard,
+)
 from app.modules.media_providers.cangyuan_image import (
     CangyuanImageAdapter,
     MediaProviderError,
@@ -60,14 +64,16 @@ from app.modules.storage.media import (
     probe_video_duration,
 )
 from app.modules.storage.oss import OssStorage, load_storage
-from app.modules.studio.models import Project, ProjectAsset, StoryboardClip
+from app.modules.studio.models import Episode, Project, ProjectAsset, StoryboardClip
 from app.modules.studio.service import (
     append_asset_image_history,
     append_clip_video_history,
+    apply_regenerated_clip,
     build_asset_result_from_db,
     build_script_result_from_db,
     persist_appended_episode,
     persist_extracted_assets,
+    persist_generated_new_clip,
     persist_rewritten_episode,
     persist_script_result,
     persist_storyboard_result,
@@ -302,23 +308,220 @@ async def run_llm_job_core(
                     result_payload["assetCount"] = len(saved)
 
                 elif job.job_type == "storyboard_generate":
-                    ep_num = payload.get("episodeNumber")
-                    script_result = await build_script_result_from_db(session, project)
-                    asset_result = await build_asset_result_from_db(
-                        session, project, include_variants=True
-                    )
-                    if not asset_result.assets:
-                        raise AppError(400, "assets_required", "请先识别并生成项目资产后再生成分镜")
-                    board = await storyboard(
-                        model,
-                        script_result,
-                        asset_result,
-                        only_episode=int(ep_num) if ep_num is not None else None,
-                        usage=run_usage,
-                        on_progress=on_progress,
-                    )
-                    await persist_storyboard_result(session, project, board)
-                    result_payload["episodes"] = [item.number for item in board.episodes]
+                    action = str(payload.get("action") or "episode")
+                    if action == "clip_regenerate":
+                        clip_uuid = UUID(str(payload["clipId"]))
+                        clip_row = await session.scalar(
+                            select(StoryboardClip).where(
+                                StoryboardClip.id == clip_uuid,
+                                StoryboardClip.project_id == project.id,
+                            )
+                        )
+                        if clip_row is None:
+                            raise AppError(404, "clip_not_found", "片段不存在")
+                        ep_row = await session.scalar(
+                            select(Episode).where(
+                                Episode.id == clip_row.episode_id,
+                                Episode.project_id == project.id,
+                            )
+                        )
+                        if ep_row is None:
+                            raise AppError(404, "episode_not_found", "关联分集不存在")
+                        script_result = await build_script_result_from_db(session, project)
+                        llm_ep = next(
+                            (e for e in script_result.episodes if e.number == ep_row.number),
+                            None,
+                        )
+                        if llm_ep is None:
+                            raise AppError(
+                                404, "episode_not_found", f"剧本里缺少第 {ep_row.number} 集"
+                            )
+                        asset_result = await build_asset_result_from_db(
+                            session, project, include_variants=True
+                        )
+                        if not asset_result.assets:
+                            raise AppError(
+                                400, "assets_required", "请先识别并生成项目资产后再重生成分镜"
+                            )
+
+                        ep_clips = list(
+                            await session.scalars(
+                                select(StoryboardClip)
+                                .where(StoryboardClip.episode_id == ep_row.id)
+                                .order_by(StoryboardClip.clip_index)
+                            )
+                        )
+                        pos = next((i for i, c in enumerate(ep_clips) if c.id == clip_row.id), -1)
+                        prev_row = ep_clips[pos - 1] if pos > 0 else None
+                        next_row = ep_clips[pos + 1] if 0 <= pos < len(ep_clips) - 1 else None
+                        prev_ctx = (
+                            {
+                                "clipIndex": prev_row.clip_index,
+                                "blocking": prev_row.blocking or "",
+                                "promptExcerpt": (prev_row.prompt or "")[:360],
+                            }
+                            if prev_row is not None
+                            else None
+                        )
+                        next_ctx = (
+                            {
+                                "clipIndex": next_row.clip_index,
+                                "blocking": next_row.blocking or "",
+                                "promptExcerpt": (next_row.prompt or "")[:360],
+                            }
+                            if next_row is not None
+                            else None
+                        )
+                        beat_tuple = (
+                            (int(clip_row.beats[0]), int(clip_row.beats[1]))
+                            if isinstance(clip_row.beats, list) and len(clip_row.beats) == 2
+                            else None
+                        )
+                        refresh_refs = bool(payload.get("refreshReferences", True))
+                        spec = await regenerate_clip_storyboard(
+                            model,
+                            script=script_result,
+                            episode=llm_ep,
+                            assets=asset_result,
+                            clip_index=clip_row.clip_index,
+                            clip_beats=beat_tuple,
+                            duration_seconds=clip_row.duration_seconds,
+                            current_prompt=clip_row.prompt or "",
+                            current_references=list(clip_row.references or []),
+                            refresh_references=refresh_refs,
+                            feedback=str(payload.get("feedback", "")),
+                            prev_clip=prev_ctx,
+                            next_clip=next_ctx,
+                            usage=run_usage,
+                            on_progress=on_progress,
+                        )
+                        updated = await apply_regenerated_clip(
+                            session,
+                            project=project,
+                            clip_id=clip_row.id,
+                            prompt_text=spec.prompt,
+                            blocking=spec.blocking,
+                            cuts=[c.model_dump() for c in spec.cuts] if spec.cuts else None,
+                            raw_references=(
+                                [r.model_dump() for r in spec.references] if refresh_refs else None
+                            ),
+                            refresh_references=refresh_refs,
+                        )
+                        result_payload["episodeNumber"] = ep_row.number
+                        result_payload["clipId"] = str(updated.id)
+                        result_payload["clipIndex"] = updated.clip_index
+
+                    elif action == "clip_create":
+                        ep_num = int(payload["episodeNumber"])
+                        duration_sec = int(payload.get("durationSeconds") or 10)
+                        insert_after_raw = payload.get("insertAfterClipId")
+                        insert_after_id = UUID(str(insert_after_raw)) if insert_after_raw else None
+
+                        ep_row = await session.scalar(
+                            select(Episode).where(
+                                Episode.project_id == project.id,
+                                Episode.number == ep_num,
+                            )
+                        )
+                        if ep_row is None:
+                            raise AppError(404, "episode_not_found", f"第 {ep_num} 集不存在")
+                        script_result = await build_script_result_from_db(session, project)
+                        llm_ep = next(
+                            (e for e in script_result.episodes if e.number == ep_num), None
+                        )
+                        if llm_ep is None:
+                            raise AppError(404, "episode_not_found", f"剧本里缺少第 {ep_num} 集")
+                        asset_result = await build_asset_result_from_db(
+                            session, project, include_variants=True
+                        )
+                        if not asset_result.assets:
+                            raise AppError(
+                                400, "assets_required", "请先识别并生成项目资产后再新增镜头"
+                            )
+
+                        ep_clips = list(
+                            await session.scalars(
+                                select(StoryboardClip)
+                                .where(StoryboardClip.episode_id == ep_row.id)
+                                .order_by(StoryboardClip.clip_index)
+                            )
+                        )
+                        insert_pos = len(ep_clips)
+                        if insert_after_id is not None:
+                            anchor = next(
+                                (i for i, c in enumerate(ep_clips) if c.id == insert_after_id),
+                                None,
+                            )
+                            if anchor is not None:
+                                insert_pos = anchor + 1
+                        prev_row = ep_clips[insert_pos - 1] if insert_pos > 0 else None
+                        next_row = ep_clips[insert_pos] if insert_pos < len(ep_clips) else None
+                        prev_ctx = (
+                            {
+                                "clipIndex": prev_row.clip_index,
+                                "blocking": prev_row.blocking or "",
+                                "promptExcerpt": (prev_row.prompt or "")[:360],
+                            }
+                            if prev_row is not None
+                            else None
+                        )
+                        next_ctx = (
+                            {
+                                "clipIndex": next_row.clip_index,
+                                "blocking": next_row.blocking or "",
+                                "promptExcerpt": (next_row.prompt or "")[:360],
+                            }
+                            if next_row is not None
+                            else None
+                        )
+                        spec = await generate_new_clip_storyboard(
+                            model,
+                            script=script_result,
+                            episode=llm_ep,
+                            assets=asset_result,
+                            duration_seconds=duration_sec,
+                            feedback=str(payload.get("feedback", "")),
+                            prev_clip=prev_ctx,
+                            next_clip=next_ctx,
+                            usage=run_usage,
+                            on_progress=on_progress,
+                        )
+                        created = await persist_generated_new_clip(
+                            session,
+                            project=project,
+                            episode_number=ep_num,
+                            duration_seconds=duration_sec,
+                            prompt_text=spec.prompt,
+                            blocking=spec.blocking,
+                            cuts=[c.model_dump() for c in spec.cuts] if spec.cuts else None,
+                            raw_references=[r.model_dump() for r in spec.references],
+                            insert_after_clip_id=insert_after_id,
+                        )
+                        result_payload["episodeNumber"] = ep_num
+                        result_payload["clipId"] = str(created.id)
+                        result_payload["clipIndex"] = created.clip_index
+
+                    else:
+                        ep_num = payload.get("episodeNumber")
+                        script_result = await build_script_result_from_db(session, project)
+                        asset_result = await build_asset_result_from_db(
+                            session, project, include_variants=True
+                        )
+                        if not asset_result.assets:
+                            raise AppError(
+                                400, "assets_required", "请先识别并生成项目资产后再生成分镜"
+                            )
+                        board = await storyboard(
+                            model,
+                            script_result,
+                            asset_result,
+                            only_episode=int(ep_num) if ep_num is not None else None,
+                            feedback=str(payload.get("feedback", "")),
+                            usage=run_usage,
+                            on_progress=on_progress,
+                        )
+                        await persist_storyboard_result(session, project, board)
+                        result_payload["episodes"] = [item.number for item in board.episodes]
 
                 else:
                     raise AppError(400, "unsupported_job_type", f"不支持的 LLM 任务类型：{job.job_type}")

@@ -45,11 +45,14 @@ from app.modules.studio.schemas import (
     ExtractAssetsRequest,
     GenerateAssetImageRequest,
     GenerateClipVideoRequest,
+    GenerateNewClipRequest,
     GenerateProjectRequest,
+    GenerateStoryboardRequest,
     ProjectAssetOut,
     ProjectDetailOut,
     ProjectJobAcceptedOut,
     ProjectSummaryOut,
+    RegenerateClipRequest,
     RegenerateStoryRequest,
     RenameProjectRequest,
     RewriteEpisodeRequest,
@@ -423,20 +426,119 @@ async def remove_project_asset(
 async def generate_episode_storyboard(
     project_id: UUID,
     episode_number: int,
+    body: GenerateStoryboardRequest | None = None,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse[ProjectJobAcceptedOut]:
     await assert_llm_balance_positive(session, user.id)
     project = await get_owned_project(session, project_id=project_id, user_id=user.id)
+    feedback = body.feedback.strip() if body else ""
     job = await create_job(
         session,
         user_id=user.id,
         project_id=project.id,
         job_type="storyboard_generate",
         target_id=str(episode_number),
-        input_payload={"episodeNumber": episode_number},
+        input_payload={
+            "episodeNumber": episode_number,
+            **({"feedback": feedback} if feedback else {}),
+        },
         step_total=3,
         step_label=f"第 {episode_number} 集分镜任务已排队",
+    )
+    await session.commit()
+    await execute_llm_job.kiq(str(job.id))
+    return ApiResponse(data=ProjectJobAcceptedOut(project_id=project.id, job=JobOut.model_validate(job)))
+
+
+@router.post(
+    "/{project_id}/clips/{clip_id}/regenerate",
+    response_model=ApiResponse[ProjectJobAcceptedOut],
+    status_code=202,
+)
+async def regenerate_episode_clip(
+    project_id: UUID,
+    clip_id: UUID,
+    body: RegenerateClipRequest,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[ProjectJobAcceptedOut]:
+    await assert_llm_balance_positive(session, user.id)
+    project = await get_owned_project(session, project_id=project_id, user_id=user.id)
+    clip = await session.scalar(
+        select(StoryboardClip).where(
+            StoryboardClip.id == clip_id, StoryboardClip.project_id == project.id
+        )
+    )
+    if clip is None:
+        raise AppError(404, "clip_not_found", "片段不存在")
+    feedback = body.feedback.strip()
+    job = await create_job(
+        session,
+        user_id=user.id,
+        project_id=project.id,
+        job_type="storyboard_generate",
+        target_id=str(clip.id),
+        input_payload={
+            "action": "clip_regenerate",
+            "clipId": str(clip.id),
+            "refreshReferences": body.refresh_references,
+            **({"feedback": feedback} if feedback else {}),
+        },
+        step_total=2,
+        step_label=f"片段 {clip.clip_index} 分镜重生成已排队",
+    )
+    await session.commit()
+    await execute_llm_job.kiq(str(job.id))
+    return ApiResponse(data=ProjectJobAcceptedOut(project_id=project.id, job=JobOut.model_validate(job)))
+
+
+@router.post(
+    "/{project_id}/episodes/{episode_number}/clips/generate",
+    response_model=ApiResponse[ProjectJobAcceptedOut],
+    status_code=202,
+)
+async def generate_new_episode_clip(
+    project_id: UUID,
+    episode_number: int,
+    body: GenerateNewClipRequest,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[ProjectJobAcceptedOut]:
+    await assert_llm_balance_positive(session, user.id)
+    project = await get_owned_project(session, project_id=project_id, user_id=user.id)
+    ep = await session.scalar(
+        select(Episode).where(Episode.project_id == project.id, Episode.number == episode_number)
+    )
+    if ep is None:
+        raise AppError(404, "episode_not_found", f"第 {episode_number} 集不存在")
+    cap = int((project.settings or {}).get("maxSegmentDuration") or 15)
+    if body.duration_seconds > cap:
+        raise AppError(
+            400,
+            "duration_exceeds_project_cap",
+            f"当前项目单片段时长上限为 {cap} 秒，请将目标时长调整至 {cap} 秒以内",
+        )
+    feedback = body.feedback.strip()
+    job = await create_job(
+        session,
+        user_id=user.id,
+        project_id=project.id,
+        job_type="storyboard_generate",
+        target_id=str(episode_number),
+        input_payload={
+            "action": "clip_create",
+            "episodeNumber": episode_number,
+            "durationSeconds": body.duration_seconds,
+            **(
+                {"insertAfterClipId": str(body.insert_after_clip_id)}
+                if body.insert_after_clip_id
+                else {}
+            ),
+            **({"feedback": feedback} if feedback else {}),
+        },
+        step_total=2,
+        step_label=f"第 {episode_number} 集新增镜头任务已排队",
     )
     await session.commit()
     await execute_llm_job.kiq(str(job.id))

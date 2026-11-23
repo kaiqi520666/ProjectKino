@@ -874,6 +874,63 @@ async def delete_project_asset(session: AsyncSession, *, project: Project, asset
     await _promote_children_and_delete_asset(session, project_id=project.id, asset=asset)
 
 
+async def _insert_clip_at_position(
+    session: AsyncSession,
+    *,
+    project: Project,
+    episode: Episode,
+    insert_after_clip_id: UUID | None,
+    duration_seconds: int,
+    prompt: str,
+    prompt_customized: bool,
+    references: list[dict[str, Any]],
+    blocking: str | None = None,
+    cuts: list[dict[str, Any]] | None = None,
+) -> StoryboardClip:
+    existing = list(
+        await session.scalars(
+            select(StoryboardClip)
+            .where(StoryboardClip.episode_id == episode.id)
+            .order_by(StoryboardClip.clip_index)
+        )
+    )
+    insert_pos = len(existing)
+    if insert_after_clip_id is not None:
+        anchor_idx = next(
+            (idx for idx, row in enumerate(existing) if row.id == insert_after_clip_id),
+            None,
+        )
+        if anchor_idx is not None:
+            insert_pos = anchor_idx + 1
+
+    # 先创建在末尾，若需插队则复用正偏移两阶段重排避免 (episode_id, clip_index) 唯一约束碰撞。
+    highest = max((row.clip_index for row in existing), default=0)
+    clip = StoryboardClip(
+        project_id=project.id,
+        episode_id=episode.id,
+        clip_index=highest + 1,
+        duration_seconds=duration_seconds,
+        prompt=prompt,
+        prompt_customized=prompt_customized,
+        references=references,
+        blocking=blocking,
+        cuts=cuts,
+    )
+    session.add(clip)
+    await session.flush()
+
+    if insert_pos < len(existing):
+        ordered = [*existing[:insert_pos], clip, *existing[insert_pos:]]
+        offset = highest + 1000
+        for idx, row in enumerate(ordered, 1):
+            row.clip_index = offset + idx
+        await session.flush()
+        for idx, row in enumerate(ordered, 1):
+            row.clip_index = idx
+        await session.flush()
+    return clip
+
+
 async def create_clip(
     session: AsyncSession, *, project: Project, episode_number: int, body: ClipCreateRequest
 ) -> StoryboardClip:
@@ -882,26 +939,124 @@ async def create_clip(
     )
     if ep is None:
         raise AppError(404, "episode_not_found", f"第 {episode_number} 集不存在")
-    highest = int(
-        await session.scalar(
-            select(func.coalesce(func.max(StoryboardClip.clip_index), 0)).where(
-                StoryboardClip.episode_id == ep.id
-            )
-        )
-        or 0
-    )
-    clip = StoryboardClip(
-        project_id=project.id,
-        episode_id=ep.id,
-        clip_index=highest + 1,
+    return await _insert_clip_at_position(
+        session,
+        project=project,
+        episode=ep,
+        insert_after_clip_id=body.insert_after_clip_id,
         duration_seconds=body.duration_seconds,
         prompt=body.prompt,
         prompt_customized=bool(body.prompt.strip()),
         references=body.references,
     )
-    session.add(clip)
+
+
+async def apply_regenerated_clip(
+    session: AsyncSession,
+    *,
+    project: Project,
+    clip_id: UUID,
+    prompt_text: str,
+    blocking: str,
+    cuts: list[dict[str, Any]] | None,
+    raw_references: list[dict[str, Any]] | None,
+    refresh_references: bool,
+) -> StoryboardClip:
+    clip = await session.scalar(
+        select(StoryboardClip).where(
+            StoryboardClip.id == clip_id, StoryboardClip.project_id == project.id
+        )
+    )
+    if clip is None:
+        raise AppError(404, "clip_not_found", "片段不存在")
+    clip.prompt = prompt_text
+    clip.prompt_customized = False
+    clip.blocking = blocking or None
+    clip.cuts = cuts
+    if refresh_references and raw_references is not None:
+        assets_by_code = {
+            a.asset_code: a
+            for a in await session.scalars(
+                select(ProjectAsset).where(ProjectAsset.project_id == project.id)
+            )
+        }
+        refs: list[dict[str, Any]] = []
+        for ref in raw_references:
+            code = str(ref.get("assetId") or "").strip()
+            matched = assets_by_code.get(code)
+            matched_name = (
+                f"{matched.name} · {matched.variant_label}"
+                if matched and matched.variant_label
+                else (matched.name if matched else str(ref.get("name") or code))
+            )
+            refs.append(
+                {
+                    "index": int(ref.get("index") or len(refs) + 1),
+                    "assetId": str(matched.id) if matched else code,
+                    "assetCode": code,
+                    "name": matched_name,
+                    "kind": str(ref.get("kind") or "character"),
+                }
+            )
+        clip.references = refs
+    # 始终保留已生成的视频与历史记录，绝不清空 video_url / video_history。
     await session.flush()
     return clip
+
+
+async def persist_generated_new_clip(
+    session: AsyncSession,
+    *,
+    project: Project,
+    episode_number: int,
+    duration_seconds: int,
+    prompt_text: str,
+    blocking: str,
+    cuts: list[dict[str, Any]] | None,
+    raw_references: list[dict[str, Any]],
+    insert_after_clip_id: UUID | None = None,
+) -> StoryboardClip:
+    ep = await session.scalar(
+        select(Episode).where(Episode.project_id == project.id, Episode.number == episode_number)
+    )
+    if ep is None:
+        raise AppError(404, "episode_not_found", f"第 {episode_number} 集不存在")
+    assets_by_code = {
+        a.asset_code: a
+        for a in await session.scalars(
+            select(ProjectAsset).where(ProjectAsset.project_id == project.id)
+        )
+    }
+    refs: list[dict[str, Any]] = []
+    for ref in raw_references:
+        code = str(ref.get("assetId") or "").strip()
+        matched = assets_by_code.get(code)
+        matched_name = (
+            f"{matched.name} · {matched.variant_label}"
+            if matched and matched.variant_label
+            else (matched.name if matched else str(ref.get("name") or code))
+        )
+        refs.append(
+            {
+                "index": int(ref.get("index") or len(refs) + 1),
+                "assetId": str(matched.id) if matched else code,
+                "assetCode": code,
+                "name": matched_name,
+                "kind": str(ref.get("kind") or "character"),
+            }
+        )
+    return await _insert_clip_at_position(
+        session,
+        project=project,
+        episode=ep,
+        insert_after_clip_id=insert_after_clip_id,
+        duration_seconds=duration_seconds,
+        prompt=prompt_text,
+        prompt_customized=False,
+        references=refs,
+        blocking=blocking or None,
+        cuts=cuts,
+    )
 
 
 async def update_clip(

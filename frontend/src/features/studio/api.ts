@@ -206,9 +206,37 @@ export function startBatchGenerateAssetImages(
   )
 }
 
-export function startGenerateStoryboard(projectId: string, episodeNumber: number) {
+export function startGenerateStoryboard(
+  projectId: string,
+  episodeNumber: number,
+  body?: { feedback?: string },
+) {
   return unwrap<ProjectJobAcceptedOut>(
-    http.post(`/projects/${projectId}/episodes/${episodeNumber}/storyboard/generate`),
+    http.post(`/projects/${projectId}/episodes/${episodeNumber}/storyboard/generate`, body ?? {}),
+  )
+}
+
+export function startRegenerateClipStoryboard(
+  projectId: string,
+  clipId: string,
+  body: { feedback?: string; refreshReferences: boolean },
+) {
+  return unwrap<ProjectJobAcceptedOut>(
+    http.post(`/projects/${projectId}/clips/${clipId}/regenerate`, body),
+  )
+}
+
+export function startGenerateNewClip(
+  projectId: string,
+  episodeNumber: number,
+  body: {
+    durationSeconds: number
+    feedback?: string
+    insertAfterClipId?: string
+  },
+) {
+  return unwrap<ProjectJobAcceptedOut>(
+    http.post(`/projects/${projectId}/episodes/${episodeNumber}/clips/generate`, body),
   )
 }
 
@@ -249,9 +277,19 @@ export function startComposeEpisode(projectId: string, episodeNumber: number) {
   )
 }
 
-export function createClipApi(projectId: string, episodeNumber: number, durationSeconds: number, prompt = '') {
+export function createClipApi(
+  projectId: string,
+  episodeNumber: number,
+  durationSeconds: number,
+  prompt = '',
+  insertAfterClipId?: string,
+) {
   return unwrap<PersistedClipOut>(
-    http.post(`/projects/${projectId}/episodes/${episodeNumber}/clips`, { durationSeconds, prompt }),
+    http.post(`/projects/${projectId}/episodes/${episodeNumber}/clips`, {
+      durationSeconds,
+      prompt,
+      ...(insertAfterClipId ? { insertAfterClipId } : {}),
+    }),
   )
 }
 

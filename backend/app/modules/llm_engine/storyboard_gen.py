@@ -418,6 +418,8 @@ async def write_designs(
     script: ScriptResult,
     *,
     assets: AssetResult | None = None,
+    feedback: str = "",
+    initial_blocking: dict | None = None,
     usage: RunUsage | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> dict[int, SegmentDesign]:
@@ -483,7 +485,7 @@ async def write_designs(
     agent.output_validator(verify_designs)
 
     designs: dict[int, SegmentDesign] = {}
-    previous_blocking: dict | None = None
+    previous_blocking: dict | None = initial_blocking
     total_batches = (len(segments) + DESIGN_BATCH_SEGMENTS - 1) // DESIGN_BATCH_SEGMENTS
     for batch_idx, start in enumerate(range(0, len(segments), DESIGN_BATCH_SEGMENTS), 1):
         batch = segments[start : start + DESIGN_BATCH_SEGMENTS]
@@ -533,6 +535,8 @@ async def write_designs(
         }
         if previous_blocking is not None:
             payload["previousBlocking"] = previous_blocking
+        if feedback.strip():
+            payload["directorFeedback"] = feedback.strip()
         result = await agent.run(
             prompt(payload),
             deps=DesignContext(
@@ -562,13 +566,21 @@ async def storyboard_episode(
     script: ScriptResult,
     assets: AssetResult,
     *,
+    feedback: str = "",
     usage: RunUsage | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> EpisodeStoryboard:
     cap = script.settings.maxSegmentDuration
     segments = split_episode(episode, cap)
     designs = await write_designs(
-        model, episode, segments, script, assets=assets, usage=usage, on_progress=on_progress
+        model,
+        episode,
+        segments,
+        script,
+        assets=assets,
+        feedback=feedback,
+        usage=usage,
+        on_progress=on_progress,
     )
 
     catalog = {asset.id: asset for asset in assets.assets}
@@ -642,14 +654,506 @@ async def storyboard(
     assets: AssetResult,
     only_episode: int | None = None,
     *,
+    feedback: str = "",
     usage: RunUsage | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> StoryboardResult:
     episodes = [
-        await storyboard_episode(model, ep, script, assets, usage=usage, on_progress=on_progress)
+        await storyboard_episode(
+            model,
+            ep,
+            script,
+            assets,
+            feedback=feedback,
+            usage=usage,
+            on_progress=on_progress,
+        )
         for ep in script.episodes
         if only_episode is None or ep.number == only_episode
     ]
     if not episodes:
         raise ValueError(f"剧本里没有第 {only_episode} 集。")
     return StoryboardResult(settings=script.settings, episodes=episodes)
+
+
+@dataclass(frozen=True)
+class GeneratedClipSpec:
+    prompt: str
+    references: list[StoryboardReference]
+    blocking: str
+    cuts: list[StoryboardCut]
+    duration_seconds: int
+
+
+class FreeformCutDesign(Record):
+    index: int
+    seconds: Annotated[float, Field(gt=0, le=10)]
+    shotSize: ShotSize
+    camera: CameraMove
+    lens: Text
+    cameraPosition: Text
+    composition: Text
+    shot: Text
+    dialogue: str = ""
+    eyeline: Text
+    focus: Text
+    stability: Stability
+    framePrompt: Text
+    sfx: str = ""
+    lighting: str = ""
+
+
+class FreeformClipDesign(Record):
+    references: list[str] = Field(default_factory=list, max_length=6)
+    blocking: Text
+    soundscape: str = ""
+    music: str = ""
+    cuts: Annotated[list[FreeformCutDesign], Field(min_length=1, max_length=12)]
+
+
+@dataclass(frozen=True)
+class FreeformClipContext:
+    allowed_refs: frozenset[str]
+    require_refs: bool
+    root_by_id: dict[str, str]
+    forbidden_names: tuple[str, ...]
+    min_cuts: int
+    max_cuts: int
+
+
+_FREEFORM_CLIP_INSTRUCTIONS = (
+    "你是 FrameDrama 影视短剧分镜导演，负责为单集分镜重写或新增一个高质量视频片段的镜头设计。\n"
+    "请严格按输入中的目标时长（durationSeconds）、推荐镜次范围（cutCountRange）、"
+    "上下文片段与导演要求输出 JSON：\n"
+    "- 若输入提供了 availableAssets（非空），请从中选出本片段真正出镜的 1–6 个资产/变体编号填入 references；"
+    "同一角色/场景/道具严禁同时选中主设定与变体，尽量包含场景与出镜人物。\n"
+    "- 若输入提供了 lockedReferenceSlots（锁定当前参考素材），则 references 留空数组 []，"
+    "画面与人物调度必须严格围绕已锁定的参考素材展开。\n"
+    "- cuts 数量必须在 cutCountRange 内，各镜 seconds 之和应接近 durationSeconds（每镜约 2–5 秒）。\n"
+    "- shot（画面）中严禁出现角色姓名、秒数/时间范围、镜头编号或 @[图片N] 协议标记，"
+    "用外观/身份描述动作细节。\n"
+    "- 若本镜有对白，在 dialogue 填「台词（角色，情绪）：对白内容」；无对白则 dialogue 留空字符串。\n"
+    "- 若存在 prevClip / nextClip，blocking 与画面需自然承接前后镜头的人物站位与情绪节奏。\n"
+    "- 若输入有 directorFeedback，必须优先落实其中的构图、运镜、光影、节奏或服装/变体要求。"
+)
+
+
+def _verify_freeform_clip(
+    ctx: RunContext[FreeformClipContext], design: FreeformClipDesign
+) -> FreeformClipDesign:
+    if ctx.deps.require_refs:
+        if not design.references:
+            raise ModelRetry("references 不能为空，请至少选择本段需要的场景或角色资产。")
+        unknown = [aid for aid in design.references if aid not in ctx.deps.allowed_refs]
+        if unknown:
+            raise ModelRetry(f"references 包含不存在的资产编号：{unknown}")
+        if len(set(design.references)) != len(design.references):
+            raise ModelRetry("references 存在重复项，请去重。")
+        roots = [ctx.deps.root_by_id.get(aid, aid) for aid in design.references]
+        if len(set(roots)) != len(roots):
+            raise ModelRetry("同一角色/场景/道具在单段内只能选 1 个版本（主图或其中一个变体），不能同时选。")
+    if not (ctx.deps.min_cuts <= len(design.cuts) <= ctx.deps.max_cuts):
+        raise ModelRetry(
+            f"镜头数量（cuts）需在 {ctx.deps.min_cuts}–{ctx.deps.max_cuts} 之间以匹配目标时长，"
+            f"当前为 {len(design.cuts)}。"
+        )
+    for cut in design.cuts:
+        for name in ctx.deps.forbidden_names:
+            if name and name in cut.shot:
+                raise ModelRetry(f"镜头 {cut.index} 的 shot 中出现了角色名「{name}」，请改成身份或外观描述。")
+        if _SHOT_TIME_POLLUTION.search(cut.shot):
+            raise ModelRetry(f"镜头 {cut.index} 的 shot 中出现了时间/秒数，请删掉。")
+        if _SHOT_PROTOCOL_POLLUTION.search(cut.shot):
+            raise ModelRetry(f"镜头 {cut.index} 的 shot 中出现了协议标记，请删掉。")
+    return design
+
+
+def _cut_count_range(duration_seconds: int) -> tuple[int, int]:
+    clamped = max(4, min(30, int(duration_seconds)))
+    min_cuts = max(1, round(clamped / 5.0))
+    max_cuts = max(min_cuts + 1, min(10, round(clamped / 2.2)))
+    return min_cuts, max_cuts
+
+
+def _compose_freeform_seedance(
+    design: FreeformClipDesign,
+    *,
+    script: ScriptResult,
+    assets: AssetResult,
+    slot_headers: list[str],
+    ordered_asset_ids: list[str],
+) -> str:
+    catalog = {asset.id: asset for asset in assets.assets}
+    names = {
+        **{card.id: card.name for card in script.outline.characters},
+        **{card.id: card.name for card in script.outline.scenes},
+        **{prop.id: prop.name for prop in script.outline.props},
+    }
+    voices = {asset.id: asset.voice for asset in assets.assets if asset.voice}
+
+    blocks: list[str] = list(slot_headers)
+    voiced: list[str] = []
+    seen_voice_roots: set[str] = set()
+    for idx, aid in enumerate(ordered_asset_ids, 1):
+        root_id = _root_id(aid, catalog)
+        if _asset_kind(aid, catalog) != "character" or root_id in seen_voice_roots:
+            continue
+        voice_text = voices.get(aid) or voices.get(root_id)
+        if voice_text:
+            seen_voice_roots.add(root_id)
+            voiced.append(f"@[图片{idx}] {names.get(root_id, root_id)}：{voice_text}")
+    if voiced:
+        blocks.extend(["", "【角色音色】", *voiced])
+
+    blocks.extend(["", "【人物关系与构图逻辑】", design.blocking])
+
+    for idx, shot in enumerate(sorted(design.cuts, key=lambda item: item.index), 1):
+        dialogue_line = shot.dialogue.strip() or "台词：{}"
+        if dialogue_line != "台词：{}" and not dialogue_line.startswith("台词"):
+            dialogue_line = f"台词：{dialogue_line}"
+        blocks.extend(
+            [
+                "",
+                f"【镜头{idx}】",
+                f"焦距：{shot.lens}",
+                f"机位：{shot.cameraPosition}",
+                f"构图：{shot.composition}",
+                f"运镜：{shot.camera}",
+                f"景别：{shot.shotSize}",
+                f"画面：{shot.shot}",
+                dialogue_line,
+                f"视线落点：{shot.eyeline}",
+                f"焦点：{shot.focus}",
+                f"稳定性：{shot.stability}",
+            ]
+        )
+        if shot.sfx:
+            blocks.append(f"音效：{shot.sfx}")
+        if shot.lighting:
+            blocks.append(f"光影：{shot.lighting}")
+
+    if design.soundscape:
+        blocks.extend(["", f"<{design.soundscape}>"])
+    if design.music and script.settings.backgroundMusic:
+        blocks.extend(["", f"（{design.music}）"])
+
+    world = script.outline.world
+    constraints = list(CONSTRAINTS)
+    if not script.settings.backgroundMusic:
+        constraints.append("不生成背景音乐；只保留对白、环境音与动作音效")
+    if world:
+        blocks.extend(["", _world_line(world)])
+        constraints.extend(_world_exclusions(world))
+    style = script.settings.visualStyleLabel or script.settings.visualStyle
+    blocks.extend(["", f"视觉风格：{style}", "", "【约束】"])
+    blocks.extend(f"{number}. {line}" for number, line in enumerate(dict.fromkeys(constraints), 1))
+    return "\n".join(blocks).lstrip("\n")
+
+
+def _build_all_asset_options(
+    assets: AssetResult, script: ScriptResult
+) -> tuple[list[dict], frozenset[str], dict[str, str]]:
+    outline_names = {
+        **{card.id: card.name for card in script.outline.characters},
+        **{card.id: card.name for card in script.outline.scenes},
+        **{prop.id: prop.name for prop in script.outline.props},
+    }
+    catalog = {a.id: a for a in assets.assets}
+    root_by_id = {a.id: _root_id(a.id, catalog) for a in assets.assets}
+    options: list[dict] = []
+    for a in assets.assets:
+        entry: dict = {
+            "id": a.id,
+            "name": outline_names.get(a.parentId or a.id, a.name),
+            "kind": a.kind,
+            "description": a.description,
+        }
+        if a.parentId:
+            entry["parentId"] = a.parentId
+            entry["variantLabel"] = a.variantLabel
+        options.append(entry)
+    return options, frozenset(catalog.keys()), root_by_id
+
+
+async def _run_freeform_clip_agent(
+    model: Model,
+    *,
+    script: ScriptResult,
+    episode: Episode,
+    assets: AssetResult,
+    duration_seconds: int,
+    feedback: str,
+    locked_references: list[dict] | None,
+    current_prompt: str = "",
+    prev_clip: dict | None = None,
+    next_clip: dict | None = None,
+    usage: RunUsage | None = None,
+) -> GeneratedClipSpec:
+    catalog = {a.id: a for a in assets.assets}
+    outline_names = {
+        **{card.id: card.name for card in script.outline.characters},
+        **{card.id: card.name for card in script.outline.scenes},
+        **{prop.id: prop.name for prop in script.outline.props},
+    }
+    min_cuts, max_cuts = _cut_count_range(duration_seconds)
+    use_locked = locked_references is not None
+
+    if use_locked:
+        available_options: list[dict] = []
+        allowed_refs: frozenset[str] = frozenset()
+        root_by_id: dict[str, str] = {}
+        img_n = vid_n = aud_n = 0
+        locked_slot_headers: list[str] = []
+        locked_slot_payload: list[dict] = []
+        locked_image_codes: list[str] = []
+        for raw_ref in locked_references:
+            if not isinstance(raw_ref, dict):
+                continue
+            media_kind = str(raw_ref.get("mediaKind") or "").strip().lower()
+            if media_kind not in ("image", "video", "audio"):
+                raw_kind = str(raw_ref.get("kind") or "").strip().lower()
+                media_kind = raw_kind if raw_kind in ("video", "audio") else "image"
+            ref_name = str(raw_ref.get("name") or raw_ref.get("assetCode") or "参考素材").strip()
+            ref_code = str(raw_ref.get("assetCode") or raw_ref.get("assetId") or "").strip()
+            if media_kind == "video":
+                vid_n += 1
+                slot = f"@[视频{vid_n}]"
+            elif media_kind == "audio":
+                aud_n += 1
+                slot = f"@[音频{aud_n}]"
+            else:
+                img_n += 1
+                slot = f"@[图片{img_n}]"
+                if ref_code in catalog:
+                    locked_image_codes.append(ref_code)
+            locked_slot_headers.append(f"{slot} = {ref_name}")
+            locked_slot_payload.append({"slot": slot, "name": ref_name, "mediaKind": media_kind})
+    else:
+        available_options, allowed_refs, root_by_id = _build_all_asset_options(assets, script)
+        locked_slot_headers = []
+        locked_slot_payload = []
+        locked_image_codes = []
+
+    payload: dict = {
+        "episode": episode.number,
+        "episodeTitle": episode.title,
+        "episodeSummary": episode.summary,
+        "durationSeconds": duration_seconds,
+        "cutCountRange": {"min": min_cuts, "max": max_cuts},
+        "settings": {
+            **script.settings.model_dump(),
+            "world": script.outline.world.model_dump() if script.outline.world else None,
+        },
+    }
+    if use_locked:
+        payload["lockedReferenceSlots"] = locked_slot_payload
+    else:
+        payload["availableAssets"] = available_options
+    if current_prompt.strip():
+        payload["currentPrompt"] = current_prompt.strip()
+    if prev_clip:
+        payload["prevClip"] = prev_clip
+    if next_clip:
+        payload["nextClip"] = next_clip
+    if feedback.strip():
+        payload["directorFeedback"] = feedback.strip()
+
+    agent = Agent(
+        model,
+        deps_type=FreeformClipContext,
+        output_type=PromptedOutput(FreeformClipDesign),
+        instructions=_FREEFORM_CLIP_INSTRUCTIONS,
+        model_settings=MODEL_SETTINGS,
+        retries=3,
+    )
+    agent.output_validator(_verify_freeform_clip)
+    result = await agent.run(
+        prompt(payload),
+        deps=FreeformClipContext(
+            allowed_refs=allowed_refs,
+            require_refs=not use_locked and bool(allowed_refs),
+            root_by_id=root_by_id,
+            forbidden_names=tuple(c.name for c in script.outline.characters),
+            min_cuts=min_cuts,
+            max_cuts=max_cuts,
+        ),
+        usage=usage,
+    )
+    design = result.output
+
+    if use_locked:
+        slot_headers = locked_slot_headers
+        ordered_ids = locked_image_codes
+        refs_out: list[StoryboardReference] = []
+    else:
+        ordered_ids = _reference_order(design.references, catalog)
+        slot_headers = [
+            f"@[图片{num}] = {_display_asset_name(aid, catalog, outline_names)}"
+            for num, aid in enumerate(ordered_ids, 1)
+        ]
+        refs_out = [
+            StoryboardReference(
+                index=pos + 1,
+                assetId=aid,
+                name=_display_asset_name(aid, catalog, outline_names),
+                kind=_asset_kind(aid, catalog),
+            )
+            for pos, aid in enumerate(ordered_ids)
+        ]
+
+    final_prompt = _compose_freeform_seedance(
+        design,
+        script=script,
+        assets=assets,
+        slot_headers=slot_headers,
+        ordered_asset_ids=ordered_ids,
+    )
+    cuts_out = [
+        StoryboardCut(
+            index=idx,
+            seconds=round(float(cut.seconds), 1),
+            shotSize=cut.shotSize,
+            camera=cut.camera,
+            framePrompt=cut.framePrompt,
+            beats=(1, 1),
+        )
+        for idx, cut in enumerate(sorted(design.cuts, key=lambda c: c.index), 1)
+    ]
+    return GeneratedClipSpec(
+        prompt=final_prompt,
+        references=refs_out,
+        blocking=design.blocking,
+        cuts=cuts_out,
+        duration_seconds=duration_seconds,
+    )
+
+
+async def regenerate_clip_storyboard(
+    model: Model,
+    *,
+    script: ScriptResult,
+    episode: Episode,
+    assets: AssetResult,
+    clip_index: int,
+    clip_beats: tuple[int, int] | None,
+    duration_seconds: int,
+    current_prompt: str,
+    current_references: list[dict],
+    refresh_references: bool = True,
+    feedback: str = "",
+    prev_clip: dict | None = None,
+    next_clip: dict | None = None,
+    usage: RunUsage | None = None,
+    on_progress: ProgressCallback | None = None,
+) -> GeneratedClipSpec:
+    await _notify(on_progress, 1, 2, f"正在重生成片段 {clip_index} 分镜设计", 35)
+    cap = script.settings.maxSegmentDuration
+    segments = split_episode(episode, cap)
+    matched_segment: Segment | None = None
+    if clip_beats is not None:
+        matched_segment = next((s for s in segments if s.beat_range == clip_beats), None)
+    if matched_segment is None and 1 <= clip_index <= len(segments) and clip_beats is not None:
+        matched_segment = segments[clip_index - 1]
+
+    if refresh_references and matched_segment is not None:
+        catalog = {a.id: a for a in assets.assets}
+        names = {
+            **{card.id: card.name for card in script.outline.characters},
+            **{card.id: card.name for card in script.outline.scenes},
+            **{prop.id: prop.name for prop in script.outline.props},
+        }
+        initial_blocking = (
+            {
+                "segmentId": max(1, matched_segment.index - 1),
+                "sceneId": matched_segment.scene.sceneId,
+                "scene": names.get(matched_segment.scene.sceneId, matched_segment.scene.sceneId),
+                "blocking": prev_clip.get("blocking", ""),
+            }
+            if prev_clip and prev_clip.get("blocking")
+            else None
+        )
+        designs = await write_designs(
+            model,
+            episode,
+            [matched_segment],
+            script,
+            assets=assets,
+            feedback=feedback,
+            initial_blocking=initial_blocking,
+            usage=usage,
+        )
+        design = designs[matched_segment.index]
+        by_index = {cut.index: cut for cut in design.cuts}
+        ordered = _reference_order(design.references, catalog)
+        await _notify(on_progress, 2, 2, f"片段 {clip_index} 分镜重生成完成", 95)
+        return GeneratedClipSpec(
+            prompt=compose_seedance(matched_segment, design, script, assets),
+            references=[
+                StoryboardReference(
+                    index=pos + 1,
+                    assetId=aid,
+                    name=_display_asset_name(aid, catalog, names),
+                    kind=_asset_kind(aid, catalog),
+                )
+                for pos, aid in enumerate(ordered)
+            ],
+            blocking=design.blocking,
+            cuts=[
+                StoryboardCut(
+                    index=cut.index,
+                    seconds=cut.seconds,
+                    shotSize=by_index[cut.index].shotSize,
+                    camera=by_index[cut.index].camera,
+                    framePrompt=by_index[cut.index].framePrompt,
+                    beats=cut.beat_range,
+                )
+                for cut in matched_segment.cuts
+            ],
+            duration_seconds=duration_seconds,
+        )
+
+    spec = await _run_freeform_clip_agent(
+        model,
+        script=script,
+        episode=episode,
+        assets=assets,
+        duration_seconds=duration_seconds,
+        feedback=feedback,
+        locked_references=None if refresh_references else current_references,
+        current_prompt=current_prompt,
+        prev_clip=prev_clip,
+        next_clip=next_clip,
+        usage=usage,
+    )
+    await _notify(on_progress, 2, 2, f"片段 {clip_index} 分镜重生成完成", 95)
+    return spec
+
+
+async def generate_new_clip_storyboard(
+    model: Model,
+    *,
+    script: ScriptResult,
+    episode: Episode,
+    assets: AssetResult,
+    duration_seconds: int,
+    feedback: str = "",
+    prev_clip: dict | None = None,
+    next_clip: dict | None = None,
+    usage: RunUsage | None = None,
+    on_progress: ProgressCallback | None = None,
+) -> GeneratedClipSpec:
+    await _notify(on_progress, 1, 2, "正在结合上下文与资产设计新镜头", 35)
+    spec = await _run_freeform_clip_agent(
+        model,
+        script=script,
+        episode=episode,
+        assets=assets,
+        duration_seconds=duration_seconds,
+        feedback=feedback,
+        locked_references=None,
+        prev_clip=prev_clip,
+        next_clip=next_clip,
+        usage=usage,
+    )
+    await _notify(on_progress, 2, 2, "新镜头分镜设计已完成", 95)
+    return spec

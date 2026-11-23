@@ -1,4 +1,5 @@
 import json
+from uuid import uuid4
 
 import pytest
 from pydantic_ai import RunUsage
@@ -8,9 +9,15 @@ from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.usage import RequestUsage
 
 from app.modules.llm_engine.asset_gen import analyze_assets
-from app.modules.llm_engine.schema import Asset, ProjectSettings
+from app.modules.llm_engine.schema import Asset, AssetResult, ProjectSettings
 from app.modules.llm_engine.script_gen import Source, append_episode, generate_script
-from app.modules.llm_engine.storyboard_gen import storyboard
+from app.modules.llm_engine.storyboard_gen import (
+    generate_new_clip_storyboard,
+    regenerate_clip_storyboard,
+    storyboard,
+)
+from app.modules.studio.models import Episode, Project, ProjectAsset, StoryboardClip
+from app.modules.studio.service import _insert_clip_at_position, apply_regenerated_clip
 
 
 def _valid_outline(count: int = 1) -> dict:
@@ -439,3 +446,503 @@ async def test_analyze_assets_auto_variants_and_storyboard_variant_binding():
     assert "@[图片1] = 林晚（便装雨衣）" in clip0.prompt
     assert "@[图片2] = 302室卧室（深夜停电）" in clip0.prompt
     assert "@[图片1] 林晚：二十六岁女性；清冷女中音；语速稳；普通话" in clip0.prompt
+
+
+def _script_responder(*, count: int = 1):
+    def respond(messages, _info):
+        user = next(p for m in messages for p in m.parts if isinstance(p, UserPromptPart))
+        data = json.loads(user.content)
+        body = (
+            _valid_outline(count)
+            if "episode" not in data
+            else _valid_episode(data["episode"]["number"])
+        )
+        return ModelResponse(parts=[TextPart(json.dumps(body, ensure_ascii=False))])
+
+    return respond
+
+
+def _make_sample_assets(settings: ProjectSettings) -> AssetResult:
+    return AssetResult(
+        settings=settings,
+        assets=[
+            Asset(
+                id="C01",
+                kind="character",
+                name="林晚",
+                description="二十六岁女性",
+                prompt="纯白背景角色设定图",
+                voice="二十六岁女性；清冷女中音；语速稳；普通话",
+                episodeNumbers=[1],
+            ),
+            Asset(
+                id="C01_v1",
+                kind="character",
+                name="林晚",
+                description="黑色雨衣造型",
+                prompt="严格参考参考图1，保持面部与体型一致，换穿黑色长款雨衣",
+                voice="",
+                episodeNumbers=[1],
+                parentId="C01",
+                variantLabel="便装雨衣",
+            ),
+            Asset(
+                id="S01",
+                kind="scene",
+                name="302室卧室",
+                description="旧卧室白天",
+                prompt="无人空景，旧卧室白天自然光",
+                voice="",
+                episodeNumbers=[1],
+            ),
+            Asset(
+                id="S01_v1",
+                kind="scene",
+                name="302室卧室",
+                description="深夜停电卧室",
+                prompt="严格参考参考图1，切换为深夜停电冷蓝月光",
+                voice="",
+                episodeNumbers=[1],
+                parentId="S01",
+                variantLabel="深夜停电",
+            ),
+            Asset(
+                id="P01",
+                kind="prop",
+                name="木质晾衣杆",
+                description="旧木质晾衣杆",
+                prompt="纯白背景，无手，旧木质晾衣杆",
+                voice="",
+                episodeNumbers=[1],
+            ),
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_storyboard_passes_director_feedback():
+    settings = ProjectSettings(
+        name="搬进新家",
+        ratio="16:9",
+        visualStyle="live-action",
+        episodeCount=1,
+        maxSegmentDuration=15,
+    )
+    script = await generate_script(
+        FunctionModel(_script_responder(count=1)),
+        settings,
+        Source.from_text("story", "半夜墙体传出诡异敲击声。"),
+    )
+    assets = _make_sample_assets(settings)
+    captured_feedback: list[str] = []
+
+    def sb_respond(messages, _info):
+        user = next(p for m in messages for p in m.parts if isinstance(p, UserPromptPart))
+        data = json.loads(user.content)
+        captured_feedback.append(data.get("directorFeedback", ""))
+        segs = [
+            {
+                "id": seg["id"],
+                "references": ["S01", "C01"],
+                "blocking": "女性面向右侧墙面站立。",
+                "soundscape": "深夜钟表滴答声",
+                "music": "",
+                "cuts": [
+                    {
+                        "index": cut["index"],
+                        "shotSize": "特写",
+                        "camera": "缓慢推镜",
+                        "lens": "85mm",
+                        "cameraPosition": "平视",
+                        "composition": "中心构图",
+                        "shot": "穿深色家居服的年轻女性微皱眉头贴近斑驳墙面。",
+                        "eyeline": "右侧墙面",
+                        "focus": "女性眼神",
+                        "stability": "稳定",
+                        "framePrompt": "电影写实特写，深夜卧室，年轻女性侧耳听墙。",
+                    }
+                    for cut in seg["cuts"]
+                ],
+            }
+            for seg in data["segments"]
+        ]
+        return ModelResponse(parts=[TextPart(json.dumps({"segments": segs}, ensure_ascii=False))])
+
+    await storyboard(
+        FunctionModel(sb_respond),
+        script,
+        assets,
+        only_episode=1,
+        feedback="加强悬疑压迫感，多用特写镜头",
+    )
+    assert captured_feedback and all(fb == "加强悬疑压迫感，多用特写镜头" for fb in captured_feedback)
+
+
+@pytest.mark.asyncio
+async def test_regenerate_clip_locked_refs_and_refreshed_refs():
+    settings = ProjectSettings(
+        name="搬进新家",
+        ratio="16:9",
+        visualStyle="live-action",
+        episodeCount=1,
+        maxSegmentDuration=15,
+    )
+    script = await generate_script(
+        FunctionModel(_script_responder(count=1)),
+        settings,
+        Source.from_text("story", "半夜墙体传出诡异敲击声。"),
+    )
+    assets = _make_sample_assets(settings)
+    episode = script.episodes[0]
+
+    # 1) refresh_references=False: locks existing image + custom video slots, rewrites prompt only
+    locked_payloads: list[dict] = []
+
+    def locked_responder(messages, _info):
+        user = next(p for m in messages for p in m.parts if isinstance(p, UserPromptPart))
+        data = json.loads(user.content)
+        locked_payloads.append(data)
+        return ModelResponse(
+            parts=[
+                TextPart(
+                    json.dumps(
+                        {
+                            "references": [],
+                            "blocking": "女性立于床尾左侧，右手扶墙。",
+                            "soundscape": "雨点拍打玻璃与低沉敲墙声",
+                            "music": "",
+                            "cuts": [
+                                {
+                                    "index": 1,
+                                    "seconds": 4.0,
+                                    "shotSize": "近景",
+                                    "camera": "缓慢推镜",
+                                    "lens": "50mm",
+                                    "cameraPosition": "平视",
+                                    "composition": "三分法",
+                                    "shot": "穿深色家居服的年轻女性缓慢靠近昏暗墙面侧耳倾听。",
+                                    "dialogue": "台词：{}",
+                                    "eyeline": "右侧墙面",
+                                    "focus": "女性侧脸",
+                                    "stability": "稳定",
+                                    "framePrompt": "电影写实中近景，年轻女性贴近墙面。",
+                                },
+                                {
+                                    "index": 2,
+                                    "seconds": 4.0,
+                                    "shotSize": "特写",
+                                    "camera": "固定镜头",
+                                    "lens": "85mm",
+                                    "cameraPosition": "平视",
+                                    "composition": "中心构图",
+                                    "shot": "斑驳墙皮微微震动，灰尘飘落。",
+                                    "dialogue": "台词：{}",
+                                    "eyeline": "画右",
+                                    "focus": "墙面裂缝",
+                                    "stability": "稳定",
+                                    "framePrompt": "电影写实特写，老旧墙面裂缝微震。",
+                                },
+                            ],
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            ]
+        )
+
+    locked_spec = await regenerate_clip_storyboard(
+        FunctionModel(locked_responder),
+        script=script,
+        episode=episode,
+        assets=assets,
+        clip_index=1,
+        clip_beats=(1, 3),
+        duration_seconds=8,
+        current_prompt="旧提示词",
+        current_references=[
+            {"index": 1, "assetCode": "C01", "name": "林晚", "kind": "character", "mediaKind": "image"},
+            {"index": 2, "assetCode": "custom-v1", "name": "运镜参考", "kind": "video", "mediaKind": "video"},
+        ],
+        refresh_references=False,
+        feedback="改为冷峻缓慢节奏",
+    )
+    assert len(locked_payloads) == 1
+    assert "lockedReferenceSlots" in locked_payloads[0]
+    assert "availableAssets" not in locked_payloads[0]
+    assert locked_payloads[0]["directorFeedback"] == "改为冷峻缓慢节奏"
+    assert locked_spec.references == []
+    assert "@[图片1] = 林晚" in locked_spec.prompt
+    assert "@[视频1] = 运镜参考" in locked_spec.prompt
+
+    # 2) refresh_references=True on script-backed segment: re-binds latest variants and passes feedback
+    refreshed_payloads: list[dict] = []
+
+    def refreshed_responder(messages, _info):
+        user = next(p for m in messages for p in m.parts if isinstance(p, UserPromptPart))
+        data = json.loads(user.content)
+        refreshed_payloads.append(data)
+        seg = data["segments"][0]
+        return ModelResponse(
+            parts=[
+                TextPart(
+                    json.dumps(
+                        {
+                            "segments": [
+                                {
+                                    "id": seg["id"],
+                                    "references": ["S01_v1", "C01_v1"],
+                                    "blocking": "女性立于门侧，面向黑暗卧室。",
+                                    "soundscape": "停电后的死寂与窗外风声",
+                                    "music": "",
+                                    "cuts": [
+                                        {
+                                            "index": cut["index"],
+                                            "shotSize": "中景",
+                                            "camera": "固定镜头",
+                                            "lens": "35mm",
+                                            "cameraPosition": "平视",
+                                            "composition": "三分法",
+                                            "shot": "穿黑色雨衣的年轻女性停步于深夜停电卧室门口。",
+                                            "eyeline": "右侧床铺",
+                                            "focus": "女性轮廓",
+                                            "stability": "稳定",
+                                            "framePrompt": "电影写实中景，深夜停电卧室。",
+                                        }
+                                        for cut in seg["cuts"]
+                                    ],
+                                }
+                            ]
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            ]
+        )
+
+    refreshed_spec = await regenerate_clip_storyboard(
+        FunctionModel(refreshed_responder),
+        script=script,
+        episode=episode,
+        assets=assets,
+        clip_index=1,
+        clip_beats=(1, 1),
+        duration_seconds=10,
+        current_prompt="旧提示词",
+        current_references=[],
+        refresh_references=True,
+        feedback="改用深夜停电与雨衣变体",
+    )
+    assert refreshed_payloads[0]["directorFeedback"] == "改用深夜停电与雨衣变体"
+    assert [ref.assetId for ref in refreshed_spec.references] == ["C01_v1", "S01_v1"]
+    assert "@[图片1] = 林晚（便装雨衣）" in refreshed_spec.prompt
+
+
+@pytest.mark.asyncio
+async def test_generate_new_clip_supports_30s_duration_pacing():
+    settings = ProjectSettings(
+        name="搬进新家",
+        ratio="16:9",
+        visualStyle="live-action",
+        episodeCount=1,
+        maxSegmentDuration=30,
+    )
+    script = await generate_script(
+        FunctionModel(_script_responder(count=1)),
+        settings,
+        Source.from_text("story", "半夜墙体传出诡异敲击声。"),
+    )
+    assets = _make_sample_assets(settings)
+    captured: list[dict] = []
+
+    def new_clip_responder(messages, _info):
+        user = next(p for m in messages for p in m.parts if isinstance(p, UserPromptPart))
+        data = json.loads(user.content)
+        captured.append(data)
+        cuts = [
+            {
+                "index": idx,
+                "seconds": 5.0,
+                "shotSize": "中景" if idx % 2 else "特写",
+                "camera": "缓慢推镜",
+                "lens": "50mm",
+                "cameraPosition": "平视",
+                "composition": "三分法",
+                "shot": f"第 {idx} 镜：穿黑色雨衣的年轻女性在冷蓝月光下检查墙体裂缝。",
+                "dialogue": "台词：{}",
+                "eyeline": "右侧墙面",
+                "focus": "女性侧脸",
+                "stability": "稳定",
+                "framePrompt": f"电影写实，深夜停电卧室第 {idx} 镜。",
+            }
+            for idx in range(1, 7)
+        ]
+        return ModelResponse(
+            parts=[
+                TextPart(
+                    json.dumps(
+                        {
+                            "references": ["C01_v1", "S01_v1"],
+                            "blocking": "女性沿右侧墙面缓慢移动至门框附近。",
+                            "soundscape": "窗外细雨与墙内回响",
+                            "music": "",
+                            "cuts": cuts,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            ]
+        )
+
+    spec = await generate_new_clip_storyboard(
+        FunctionModel(new_clip_responder),
+        script=script,
+        episode=script.episodes[0],
+        assets=assets,
+        duration_seconds=30,
+        feedback="插入一段30秒深夜排查空镜与特写连贯推进",
+        prev_clip={"clipIndex": 1, "durationSeconds": 15, "blocking": "女性站在床边", "prompt": "前段提示词"},
+    )
+    assert captured[0]["durationSeconds"] == 30
+    assert captured[0]["cutCountRange"] == {"min": 6, "max": 10}
+    assert spec.duration_seconds == 30
+    assert len(spec.cuts) == 6
+    assert [ref.assetId for ref in spec.references] == ["C01_v1", "S01_v1"]
+    assert "@[图片1] = 林晚（便装雨衣）" in spec.prompt
+    assert "@[图片2] = 302室卧室（深夜停电）" in spec.prompt
+
+
+@pytest.mark.asyncio
+async def test_apply_regenerated_clip_preserves_video_and_insert_at_position_renumbers():
+    project_id = uuid4()
+    episode_id = uuid4()
+    project = Project(id=project_id, user_id=uuid4(), name="测试项目")
+    episode = Episode(id=episode_id, project_id=project_id, number=1, title="第1集")
+
+    asset_v1 = ProjectAsset(
+        id=uuid4(),
+        project_id=project_id,
+        asset_code="C01_v1",
+        kind="character",
+        name="林晚",
+        variant_label="便装雨衣",
+        description="",
+        prompt="",
+    )
+    existing_history = [
+        {
+            "id": "h1",
+            "url": "https://oss.example.com/v1.mp4",
+            "createdAt": "2026-01-01T00:00:00Z",
+        }
+    ]
+    clip1 = StoryboardClip(
+        id=uuid4(),
+        project_id=project_id,
+        episode_id=episode_id,
+        clip_index=1,
+        duration_seconds=8,
+        prompt="原提示词1",
+        references=[{"index": 1, "assetId": "old", "assetCode": "C01", "name": "林晚", "kind": "character"}],
+        video_url="https://oss.example.com/v1.mp4",
+        video_key="videos/v1.mp4",
+        video_status="ready",
+        video_history=list(existing_history),
+    )
+    clip2 = StoryboardClip(
+        id=uuid4(),
+        project_id=project_id,
+        episode_id=episode_id,
+        clip_index=2,
+        duration_seconds=10,
+        prompt="原提示词2",
+        references=[],
+    )
+    clip3 = StoryboardClip(
+        id=uuid4(),
+        project_id=project_id,
+        episode_id=episode_id,
+        clip_index=3,
+        duration_seconds=12,
+        prompt="原提示词3",
+        references=[],
+    )
+
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.clips = [clip1, clip2, clip3]
+            self.assets = [asset_v1]
+            self.flush_snapshots: list[list[int]] = []
+
+        async def scalar(self, _stmt):
+            return clip1
+
+        async def scalars(self, stmt):
+            text_sql = str(stmt)
+            if "project_assets" in text_sql:
+                return list(self.assets)
+            return sorted(self.clips, key=lambda item: item.clip_index)
+
+        def add(self, obj) -> None:
+            if isinstance(obj, StoryboardClip):
+                if obj.id is None:
+                    obj.id = uuid4()
+                self.clips.append(obj)
+
+        async def flush(self) -> None:
+            indices = [item.clip_index for item in self.clips]
+            # 每次 flush 都必须满足 (episode_id, clip_index) 唯一约束与 >= 1 约束
+            assert len(indices) == len(set(indices))
+            assert all(idx >= 1 for idx in indices)
+            self.flush_snapshots.append(indices)
+
+    session = _FakeSession()
+
+    # 1) refresh_references=False 保留原有 references 与视频/历史
+    updated_locked = await apply_regenerated_clip(
+        session,  # type: ignore[arg-type]
+        project=project,
+        clip_id=clip1.id,
+        prompt_text="新提示词（锁定参考）",
+        blocking="新调度",
+        cuts=[{"index": 1, "seconds": 8.0}],
+        raw_references=[],
+        refresh_references=False,
+    )
+    assert updated_locked.prompt == "新提示词（锁定参考）"
+    assert updated_locked.references[0]["assetCode"] == "C01"
+    assert updated_locked.video_url == "https://oss.example.com/v1.mp4"
+    assert updated_locked.video_key == "videos/v1.mp4"
+    assert updated_locked.video_status == "ready"
+    assert updated_locked.video_history == existing_history
+
+    # 2) refresh_references=True 更新 references 到新变体，依然保留视频/历史
+    updated_refreshed = await apply_regenerated_clip(
+        session,  # type: ignore[arg-type]
+        project=project,
+        clip_id=clip1.id,
+        prompt_text="新提示词（刷新参考）",
+        blocking="新调度2",
+        cuts=[{"index": 1, "seconds": 8.0}],
+        raw_references=[{"index": 1, "assetId": "C01_v1", "name": "林晚", "kind": "character"}],
+        refresh_references=True,
+    )
+    assert updated_refreshed.references[0]["assetId"] == str(asset_v1.id)
+    assert updated_refreshed.references[0]["name"] == "林晚 · 便装雨衣"
+    assert updated_refreshed.video_url == "https://oss.example.com/v1.mp4"
+    assert updated_refreshed.video_history == existing_history
+
+    # 3) 在 clip1 后面插队新增片段，验证两阶段无冲突重排为 [clip1=1, new=2, clip2=3, clip3=4]
+    inserted = await _insert_clip_at_position(
+        session,  # type: ignore[arg-type]
+        project=project,
+        episode=episode,
+        insert_after_clip_id=clip1.id,
+        duration_seconds=20,
+        prompt="AI 新插入的 20 秒镜头",
+        prompt_customized=False,
+        references=[],
+    )
+    ordered = sorted(session.clips, key=lambda item: item.clip_index)
+    assert [item.id for item in ordered] == [clip1.id, inserted.id, clip2.id, clip3.id]
+    assert [item.clip_index for item in ordered] == [1, 2, 3, 4]
+    assert inserted.duration_seconds == 20
