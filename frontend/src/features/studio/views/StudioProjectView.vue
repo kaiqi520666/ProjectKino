@@ -261,12 +261,12 @@ function handleNameEscape(event: KeyboardEvent) {
 .studio-project-rename input { min-width: 0; height: 34px; padding-inline: 8px; }
 .studio-project-rename-action { flex: 0 0 32px; padding-inline: 0; }
 .studio-project-nav { grid-area: steps; width: min(100%, 416px); justify-self: center; }
-.studio-project-meta { grid-area: meta; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; margin: 0; font-size: 12px; }
+.studio-project-meta { grid-area: meta; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; max-width: 100%; overflow: hidden; margin: 0; font-size: 12px; }
 .studio-project-meta > div { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .studio-project-meta dt { flex-shrink: 0; color: var(--color-muted); }
 .studio-project-meta dd { min-width: 0; margin: 0; color: var(--color-text); overflow-wrap: anywhere; }
 .studio-project-style dd { display: flex; align-items: center; gap: 4px; }
-.studio-project-world dd { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.studio-project-world dd { max-width: 148px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .studio-project-style img { flex-shrink: 0; width: 24px; height: 16px; border-radius: 3px; object-fit: cover; }
 .studio-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0; padding: 0; list-style: none; }
 .studio-step { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; height: 100%; padding: 6px 8px; border: 1px solid var(--border-control); border-radius: var(--radius-control); background: var(--color-surface); color: var(--color-text); font-size: 13px; font-weight: 600; line-height: 1.35; text-align: center; word-break: keep-all; }
@@ -282,10 +282,14 @@ function handleNameEscape(event: KeyboardEvent) {
   .studio-project-meta { justify-content: flex-end; }
 }
 @container (min-width: 1040px) {
-  .studio-project-head { grid-template-columns: minmax(0, 1fr) 336px minmax(0, 1fr); grid-template-areas: "name steps meta"; }
+  .studio-project-head { grid-template-columns: minmax(150px, 0.72fr) 336px minmax(0, 1.28fr); grid-template-areas: "name steps meta"; }
+  .studio-project-meta { justify-content: flex-end; flex-wrap: wrap; }
+  .studio-project-meta > div:not(.studio-project-style):not(.studio-project-world) { flex-shrink: 0; }
+  .studio-project-style span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
+@container (min-width: 1440px) {
   .studio-project-meta { flex-wrap: nowrap; white-space: nowrap; }
-  .studio-project-meta > div:not(.studio-project-style) { flex-shrink: 0; }
-  .studio-project-style span { overflow: hidden; text-overflow: ellipsis; }
+  .studio-project-world dd { max-width: 180px; }
 }
 @media (max-width: 760px) {
   .studio-project--script,
