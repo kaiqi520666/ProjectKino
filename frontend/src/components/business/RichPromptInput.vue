@@ -178,40 +178,25 @@ async function insertMention(event: MouseEvent) {
   const instance = sender
   if (!instance || !id || !props.references.some((item) => item.tokenKey === id)) return
   const cursor = instance.getCurrentNode()
-  if (!cursor) return
-  const write = cursor.node instanceof Element ? cursor.node : cursor.node.parentElement
-  const mark = write?.closest('.chat-write-wrap')
-  const row = mark?.closest('.chat-grid-wrap')
-  if (!row || !mark || !row.parentElement) return
-  const rowIndex = Array.from(row.parentElement.children).indexOf(row)
-  const tagIndex = Array.from(row.children).indexOf(mark)
-  const model = instance.getModel()
-  const tags = model[rowIndex]
-  const tag = tags?.[tagIndex]
-  if (!tags || tag?.type !== 'Write') return
-  const start = tag.text.lastIndexOf('@', cursor.offset - 1)
+  if (!cursor || cursor.instance.type !== 'Write') return
+  const textBefore = (cursor.node.textContent ?? '').slice(0, cursor.offset)
+  const start = textBefore.lastIndexOf('@')
   if (start < 0 || start >= cursor.offset) return
   event.preventDefault()
   event.stopPropagation()
   close()
-  tags.splice(
-    tagIndex,
-    1,
-    { type: 'Write', text: tag.text.slice(0, start) },
-    { type: 'Custom', html: referenceHtml(id) },
-    { type: 'Write', text: tag.text.slice(cursor.offset) },
-  )
-  await instance.reset({ chatNode: model, clearHistory: false })
+  const del = cursor.offset - start
+  const scrollTop = instance.chatElement.rollBox.scrollTop
+  await new Promise<void>((resolve) => {
+    instance.bus.emit(
+      XSender.EventSet.EVENT_EDITOR_INSERT_CUSTOM,
+      { html: referenceHtml(id), del },
+      resolve,
+    )
+  })
   if (sender === instance) {
-    prompt.value = toText(model)
-    const replacement =
-      instance.chatElement.richText.children[rowIndex]?.children[tagIndex + 2]?.querySelector(
-        '.chat-write-input',
-      )?.firstChild
-    if (replacement) {
-      instance.chatElement.richText.focus()
-      window.getSelection()?.collapse(replacement, 0)
-    }
+    prompt.value = toText(instance.getModel())
+    instance.chatElement.rollBox.scrollTop = scrollTop
   }
 }
 
@@ -219,54 +204,21 @@ async function insertReference(tokenKey: string) {
   const instance = sender
   if (!instance || props.disabled) return
   if (!props.references.some((item) => item.tokenKey === tokenKey)) return
-
-  const model = instance.getModel()
   const cursor = instance.getCurrentNode()
-  let rowIndex = Math.max(0, model.length - 1)
-  let tagIndex = -1
-  let offset = 0
-
-  if (cursor) {
-    const write = cursor.node instanceof Element ? cursor.node : cursor.node.parentElement
-    const mark = write?.closest('.chat-write-wrap')
-    const row = mark?.closest('.chat-grid-wrap')
-    if (row && mark && row.parentElement) {
-      rowIndex = Array.from(row.parentElement.children).indexOf(row)
-      tagIndex = Array.from(row.children).indexOf(mark)
-      offset = cursor.offset
-    }
+  if (!cursor || cursor.instance.type !== 'Write') {
+    instance.focus('last')
   }
-
-  const tags = model[rowIndex] ?? [{ type: 'Write' as const, text: '' }]
-  if (!model[rowIndex]) model[rowIndex] = tags
-
-  const targetTag = tagIndex >= 0 ? tags[tagIndex] : undefined
-  if (targetTag?.type === 'Write') {
-    const currentText = targetTag.text ?? ''
-    tags.splice(
-      tagIndex,
-      1,
-      { type: 'Write', text: currentText.slice(0, offset) },
-      { type: 'Custom', html: referenceHtml(tokenKey) },
-      { type: 'Write', text: currentText.slice(offset) },
+  const scrollTop = instance.chatElement.rollBox.scrollTop
+  await new Promise<void>((resolve) => {
+    instance.bus.emit(
+      XSender.EventSet.EVENT_EDITOR_INSERT_CUSTOM,
+      { html: referenceHtml(tokenKey), del: 0 },
+      resolve,
     )
-  } else {
-    if (tags.at(-1)?.type !== 'Write') tags.push({ type: 'Write', text: '' })
-    tags.push({ type: 'Custom', html: referenceHtml(tokenKey) }, { type: 'Write', text: '' })
-    tagIndex = tags.length - 3
-  }
-
-  await instance.reset({ chatNode: model, clearHistory: false })
+  })
   if (sender === instance) {
-    prompt.value = toText(model)
-    const replacement =
-      instance.chatElement.richText.children[rowIndex]?.children[tagIndex + 2]?.querySelector(
-        '.chat-write-input',
-      )?.firstChild
-    if (replacement) {
-      instance.chatElement.richText.focus()
-      window.getSelection()?.collapse(replacement, 0)
-    }
+    prompt.value = toText(instance.getModel())
+    instance.chatElement.rollBox.scrollTop = scrollTop
   }
 }
 
@@ -377,6 +329,10 @@ onMounted(async () => {
     if (prompt.value !== value) prompt.value = value
   })
   await instance.reset({ chatNode: toModel(prompt.value), clearHistory: true })
+  instance.chatElement.rollBox.scrollTop = 0
+  if (document.activeElement === instance.chatElement.richText) {
+    instance.chatElement.richText.blur()
+  }
   syncEditableState()
 })
 
