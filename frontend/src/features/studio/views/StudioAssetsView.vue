@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, useTemplateRef } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, useTemplateRef, watch } from 'vue'
 import {
   AlertCircle,
   Boxes,
@@ -28,7 +28,6 @@ import UiButton from '@/components/ui/UiButton.vue'
 import UiDialog from '@/components/ui/UiDialog.vue'
 import UiTabs from '@/components/ui/UiTabs.vue'
 import { useAuthStore } from '@/stores/auth'
-import { useGenerationStore } from '@/stores/generation'
 import { useUiStore } from '@/stores/ui'
 import {
   apiErrorMessage,
@@ -37,20 +36,19 @@ import {
   deleteAssetImageHistoryApi,
   getJob,
   getProjectDetail,
-  isRetryableApiError,
   selectAssetImageHistoryApi,
   startBatchGenerateAssetImages,
   startExtractAssets,
   startGenerateAssetImage,
   updateAssetApi,
-  watchJob,
 } from '../api'
-import type { ProjectDetailOut } from '../api-types'
+import { useAssetExtractStore } from '../asset-extract-store'
 import { assetKindIcons } from '../asset-icons'
 import StudioAssetEditor from '../components/StudioAssetEditor.vue'
 import StudioBatchImageDialog from '../components/StudioBatchImageDialog.vue'
 import { useBatchJobTracker } from '../composables/useBatchJobTracker'
 import { useModelCatalog } from '../composables/useModelCatalog'
+import { formatElapsedSeconds } from '../script-job-helpers'
 import {
   assetDisplayName,
   assetKindOptions,
@@ -71,7 +69,7 @@ interface ImageBatchMeta {
 const props = defineProps<{ project: StudioProject }>()
 const auth = useAuthStore()
 const studio = useStudioStore()
-const generation = useGenerationStore()
+const assetExtractJobs = useAssetExtractStore()
 const ui = useUiStore()
 const { imageModels, ensureLoaded: ensureModelCatalog } = useModelCatalog()
 const category = ref<StudioAssetKind>('character')
@@ -85,12 +83,52 @@ const submittingAssetId = ref<string | null>(null)
 const selectMode = ref(false)
 const checkedAssetIds = ref<string[]>([])
 const assetToDelete = ref<StudioAsset>()
-const generating = ref(false)
+const submittingExtract = ref(false)
 const historyAssetId = ref<string | null>(null)
 const historySelecting = ref(false)
 const historyDeletingId = ref<string | null>(null)
 const dismissedJobIds = ref<Set<string>>(new Set())
 const activeVariantByRoot = ref<Record<string, string>>({})
+const nowTick = ref(Date.now())
+let elapsedTimer: ReturnType<typeof setInterval> | null = null
+
+const activeExtractJob = computed(() => assetExtractJobs.getJob(props.project.id))
+const extractRunning = computed(() => activeExtractJob.value?.status === 'running')
+const extractFailed = computed(() => activeExtractJob.value?.status === 'failed')
+const extractBusy = computed(() => extractRunning.value || submittingExtract.value)
+const extractElapsedLabel = computed(() => {
+  if (!activeExtractJob.value) return '00:00'
+  return formatElapsedSeconds((nowTick.value - activeExtractJob.value.startedAt) / 1000)
+})
+
+function stopElapsedTimer() {
+  if (elapsedTimer !== null) {
+    clearInterval(elapsedTimer)
+    elapsedTimer = null
+  }
+}
+
+watch(
+  extractRunning,
+  (running) => {
+    if (running) {
+      selectMode.value = false
+      checkedAssetIds.value = []
+      editor.value?.close()
+      nowTick.value = Date.now()
+      if (elapsedTimer === null) {
+        elapsedTimer = setInterval(() => {
+          nowTick.value = Date.now()
+        }, 1000)
+      }
+    } else {
+      stopElapsedTimer()
+    }
+  },
+  { immediate: true },
+)
+
+onBeforeUnmount(stopElapsedTimer)
 
 function rootKeyOf(asset: StudioAsset): string {
   return asset.backendId || asset.id
@@ -394,6 +432,7 @@ const canIncrementalSync = computed(() => !!props.project.scriptResult && hasExi
 const checkedSet = computed(() => new Set(checkedAssetIds.value))
 
 function openBatchDialog(presetIds: string[] = []) {
+  if (extractBusy.value) return
   if (!props.project.persisted) {
     ui.notify('示例项目暂不支持批量生图', 'info')
     return
@@ -403,6 +442,7 @@ function openBatchDialog(presetIds: string[] = []) {
 }
 
 function toggleSelectMode() {
+  if (extractBusy.value) return
   selectMode.value = !selectMode.value
   if (!selectMode.value) checkedAssetIds.value = []
 }
@@ -518,67 +558,25 @@ async function generateFromScript(mode: 'full' | 'incremental' = 'full') {
     studio.loadExampleAssets(props.project.id)
     return
   }
-  if (generating.value || generation.isRunning) return
+  if (extractBusy.value) return
 
   const incremental = mode === 'incremental'
-  const missingCount = missingScriptAssetIds.value.length
-
   refreshOpen.value = false
-  await generation.runTask(
-    incremental
-      ? {
-          title: `正在增量补充 ${missingCount} 项新资产`,
-          subtitle: `${props.project.creation.settings.name} · 保留已有资产与图片`,
-          description: '仅针对剧本新增出场的角色、场景或道具生成设定与提示词',
-          steps: [
-            '比对当前剧本与已有资产列表，定位新增编号',
-            '并发为新增资产生成设定、静态音色与生图提示词',
-            '合并回项目资产表并刷新出场集数',
-          ],
-          hint: '已有资产的图片与手动修改将完整保留',
-          formatError: apiErrorMessage,
-          canRetryError: isRetryableApiError,
-          successMessage: () => `已补充 ${missingCount} 项新资产`,
-        }
-      : {
-          title: hasExistingAssets.value ? '正在重新识别项目资产' : '正在批量生成项目资产',
-          subtitle: `${props.project.creation.settings.name} · 共 ${scriptResult.episodes.length} 集剧本`,
-          description: '正在从已确认剧本汇总出场角色、场景与道具，并并发生成设定与提示词',
-          steps: [
-            '汇总全剧实际出场的角色、场景与道具清单',
-            '并发生成角色三视图提示词、静态音色与场景/道具设定',
-            '执行资产完整性与禁人名质量门校验',
-          ],
-          hint: '后台队列正在并发识别资产，完成后自动刷新列表',
-          formatError: apiErrorMessage,
-          canRetryError: isRetryableApiError,
-          successMessage: (detail: ProjectDetailOut) => `已生成 ${detail.assets.length} 项项目资产`,
-        },
-    async (controls) => {
-      generating.value = true
-      try {
-        const accepted = await startExtractAssets(props.project.id, mode)
-        controls.setJobId(accepted.job.id)
-        controls.setProgress(accepted.job.progress)
-        await watchJob(accepted.job.id, (job) => {
-          controls.setProgress(job.progress)
-          if (job.stepLabel) controls.setDescription(job.stepLabel)
-          controls.setStep(Math.min(2, Math.max(0, job.stepIndex - 1)))
-        })
-        const detail = await getProjectDetail(props.project.id)
-        studio.hydrateProjectDetail(detail)
-        if (!incremental) category.value = 'character'
-        ui.notify(
-          incremental ? `已增量补充 ${missingCount} 项新资产` : `已生成 ${detail.assets.length} 项资产`,
-          'success',
-        )
-        return detail
-      } finally {
-        generating.value = false
-        void auth.refreshBalance()
-      }
-    },
-  )
+  submittingExtract.value = true
+  try {
+    const accepted = await startExtractAssets(props.project.id, mode)
+    assetExtractJobs.trackExtractJob(props.project.id, accepted.job, { mode })
+    ui.notify(
+      incremental
+        ? '已开始增量识别新增资产，完成后自动补充到列表'
+        : '已开始识别项目资产，角色、场景与道具完成一类将实时呈现',
+      'info',
+    )
+  } catch (error) {
+    ui.notify(apiErrorMessage(error), 'error')
+  } finally {
+    submittingExtract.value = false
+  }
 }
 
 async function generateAssetImage(
@@ -638,7 +636,7 @@ async function generateAssetImage(
 }
 
 function quickGenerateAssetImage(asset: StudioAsset, event: MouseEvent) {
-  if (isAssetGenerating(asset)) return
+  if (extractBusy.value || isAssetGenerating(asset)) return
   if (!asset.prompt.trim()) {
     editAsset(asset, event)
     ui.notify('请先填写该资产的文生图提示词', 'info')
@@ -668,11 +666,13 @@ function quickGenerateAssetImage(asset: StudioAsset, event: MouseEvent) {
 }
 
 function addAsset(event: MouseEvent) {
+  if (extractBusy.value) return
   const kind = assetKindOptions.find(({ value }) => value === category.value)?.value ?? 'character'
   editor.value?.create(kind, event.currentTarget as HTMLButtonElement)
 }
 
 function addVariant(root: StudioAsset, event: MouseEvent) {
+  if (extractBusy.value) return
   if (!props.project.persisted || !root.backendId) {
     ui.notify('示例项目暂不支持创建资产变体', 'info')
     return
@@ -707,6 +707,7 @@ async function createAsset(kind: StudioAssetKind, draft: StudioAssetDraft) {
 }
 
 function editAsset(asset: StudioAsset, event: MouseEvent) {
+  if (extractBusy.value) return
   editor.value?.edit(asset, event.currentTarget as HTMLButtonElement)
 }
 
@@ -728,7 +729,7 @@ async function saveAsset(assetId: string, draft: StudioAssetDraft) {
 }
 
 function confirmAssetDeletion(asset: StudioAsset) {
-  if (isAssetGenerating(asset)) return
+  if (extractBusy.value || isAssetGenerating(asset)) return
   assetToDelete.value = asset
   deleteOpen.value = true
 }
@@ -761,6 +762,52 @@ async function deleteAsset() {
 <template>
   <section class="studio-assets" aria-label="资产生成">
     <p v-if="project.scriptEdited" class="studio-hint">剧本已手动修改，资产仍基于生成时的结构化剧本。</p>
+
+    <div v-if="extractRunning && activeExtractJob" class="assets-extract-bar" role="status" aria-live="polite">
+      <div class="assets-extract-bar-main">
+        <div class="assets-extract-bar-left">
+          <Loader2 class="is-spin assets-extract-spinner" :size="15" aria-hidden="true" />
+          <strong class="assets-extract-title">
+            {{ activeExtractJob.mode === 'incremental' ? '正在增量识别新增资产' : '正在识别项目资产' }}
+          </strong>
+          <span class="assets-extract-sep" aria-hidden="true">·</span>
+          <span class="assets-extract-step">{{ activeExtractJob.stepLabel }}</span>
+        </div>
+        <div class="assets-extract-bar-right">
+          <span class="assets-extract-pct">{{ activeExtractJob.progress }}%</span>
+          <span class="assets-extract-timer">
+            <Clock :size="13" aria-hidden="true" />
+            {{ extractElapsedLabel }}
+          </span>
+        </div>
+      </div>
+      <div class="assets-extract-track" aria-hidden="true">
+        <div class="assets-extract-fill" :style="{ width: `${Math.max(5, Math.min(100, activeExtractJob.progress))}%` }" />
+      </div>
+    </div>
+
+    <div v-else-if="extractFailed && activeExtractJob" class="assets-extract-error" role="alert">
+      <div class="assets-extract-error-body">
+        <AlertCircle class="assets-extract-error-icon" :size="16" aria-hidden="true" />
+        <div class="assets-extract-error-text">
+          <strong>资产识别未能完成</strong>
+          <span>{{ activeExtractJob.errorMessage || '后台识别中断，请重新发起。' }}</span>
+        </div>
+      </div>
+      <div class="assets-extract-error-actions">
+        <UiButton variant="outline" size="sm" :disabled="extractBusy" @click="generateFromScript(activeExtractJob.mode)">
+          <template #leading><RefreshCw :size="14" aria-hidden="true" /></template>重新识别
+        </UiButton>
+        <button
+          type="button"
+          class="studio-batch-close"
+          aria-label="关闭失败提示"
+          @click="assetExtractJobs.dismiss(project.id)"
+        >
+          <X :size="14" aria-hidden="true" />
+        </button>
+      </div>
+    </div>
 
     <div v-if="selectMode" class="studio-select-bar">
       <span class="studio-select-bar-text">
@@ -836,13 +883,13 @@ async function deleteAsset() {
       </div>
     </div>
 
-    <div class="studio-assets-catalog" :class="{ 'is-empty': !project.assets?.length }">
+    <div class="studio-assets-catalog" :class="{ 'is-empty': !project.assets?.length && !extractRunning }">
       <div class="studio-assets-toolbar">
         <UiButton
           v-if="project.persisted && hasExistingAssets"
           :variant="missingImageCount > 0 ? 'primary' : 'outline'"
           size="sm"
-          :disabled="generating"
+          :disabled="extractBusy"
           @click="openBatchDialog()"
         >
           <template #leading><Sparkles :size="14" aria-hidden="true" /></template>
@@ -852,6 +899,7 @@ async function deleteAsset() {
           v-if="project.persisted && hasExistingAssets"
           :variant="selectMode ? 'secondary' : 'outline'"
           size="sm"
+          :disabled="extractBusy"
           @click="toggleSelectMode"
         >
           <template #leading><CheckSquare :size="14" aria-hidden="true" /></template>
@@ -860,25 +908,25 @@ async function deleteAsset() {
         <UiButton
           :variant="canIncrementalSync ? 'primary' : 'outline'"
           size="sm"
-          :loading="generating"
-          :disabled="generating"
+          :loading="extractBusy"
+          :disabled="extractBusy"
           @click="handleRecognizeClick"
         >
-          <template #leading>
+          <template v-if="!extractBusy" #leading>
             <RefreshCw v-if="hasExistingAssets && !canIncrementalSync" :size="14" aria-hidden="true" />
             <ScanText v-else :size="15" aria-hidden="true" />
           </template>
           {{ canIncrementalSync ? `补充新资产 (${missingScriptAssetIds.length})` : hasExistingAssets ? '重新识别' : '从剧本识别' }}
         </UiButton>
-        <UiButton variant="outline" size="sm" @click="addAsset">
+        <UiButton variant="outline" size="sm" :disabled="extractBusy" @click="addAsset">
           <template #leading><Plus :size="15" aria-hidden="true" /></template>增加资产
         </UiButton>
       </div>
 
-      <EmptyState v-if="!project.assets?.length" class="studio-assets-empty" title="暂无资产">
+      <EmptyState v-if="!project.assets?.length && !extractRunning" class="studio-assets-empty" title="暂无资产">
         <template #icon><Boxes :size="25" :stroke-width="1.5" /></template>
-        <UiButton variant="primary" :loading="generating" :disabled="generating" @click="handleRecognizeClick">
-          <template v-if="!generating" #leading><ScanText :size="16" aria-hidden="true" /></template>从剧本识别
+        <UiButton variant="primary" :loading="extractBusy" :disabled="extractBusy" @click="handleRecognizeClick">
+          <template v-if="!extractBusy" #leading><ScanText :size="16" aria-hidden="true" /></template>从剧本识别
         </UiButton>
       </EmptyState>
       <UiTabs v-else v-model="category" label="资产分类" :tabs="groups">
@@ -929,6 +977,7 @@ async function deleteAsset() {
                         v-if="card.items.length === 1 && project.persisted && card.root.backendId && !selectMode"
                         type="button"
                         class="studio-variant-add-inline"
+                        :disabled="extractBusy"
                         :title="`为「${card.root.name}」新增换装/时段/状态变体`"
                         @click="addVariant(card.root, $event)"
                       >
@@ -959,6 +1008,7 @@ async function deleteAsset() {
                     v-if="project.persisted && card.root.backendId"
                     type="button"
                     class="studio-variant-pill is-add"
+                    :disabled="extractBusy"
                     :title="`为「${card.root.name}」新增状态变体`"
                     @click="addVariant(card.root, $event)"
                   >
@@ -1030,21 +1080,21 @@ async function deleteAsset() {
                       variant="outline"
                       size="sm"
                       :loading="submittingAssetId === card.active.backendId"
-                      :disabled="generating || submittingAssetId === card.active.backendId || isAssetGenerating(card.active)"
+                      :disabled="extractBusy || submittingAssetId === card.active.backendId || isAssetGenerating(card.active)"
                       :aria-label="`AI生成${assetDisplayName(card.active)}图片`"
                       @click="quickGenerateAssetImage(card.active, $event)"
                     >
                       <template v-if="submittingAssetId !== card.active.backendId" #leading><Sparkles :size="14" aria-hidden="true" /></template>
                       {{ card.active.imageUrl ? '重绘' : 'AI 生图' }}
                     </UiButton>
-                    <UiButton variant="outline" size="sm" :aria-label="`编辑${assetDisplayName(card.active)}`" @click="editAsset(card.active, $event)">
+                    <UiButton variant="outline" size="sm" :disabled="extractBusy" :aria-label="`编辑${assetDisplayName(card.active)}`" @click="editAsset(card.active, $event)">
                       <template #leading><Pencil :size="14" aria-hidden="true" /></template>编辑
                     </UiButton>
                     <UiButton
                       class="studio-asset-delete"
                       variant="secondary"
                       size="sm"
-                      :disabled="isAssetGenerating(card.active)"
+                      :disabled="extractBusy || isAssetGenerating(card.active)"
                       :aria-label="`删除${assetDisplayName(card.active)}`"
                       title="删除当前状态"
                       @click="confirmAssetDeletion(card.active)"
@@ -1056,6 +1106,26 @@ async function deleteAsset() {
               </article>
             </li>
           </ul>
+          <div v-else-if="extractRunning" class="studio-asset-skeleton-wrap">
+            <p class="studio-asset-skeleton-hint">
+              <Loader2 class="is-spin" :size="14" aria-hidden="true" />
+              正在后台设计{{ group.label }}设定与文生图提示词，完成后将实时呈现；你可以自由切换其他分类或返回阅读剧本。
+            </p>
+            <ul class="studio-asset-list" aria-hidden="true">
+              <li v-for="idx in 3" :key="idx">
+                <div class="studio-asset-card studio-asset-skeleton-card">
+                  <div class="studio-asset-main">
+                    <div class="studio-asset-thumb studio-asset-skeleton-box" />
+                    <div class="studio-asset-skeleton-lines">
+                      <span class="studio-asset-skeleton-line is-title" />
+                      <span class="studio-asset-skeleton-line is-wide" />
+                      <span class="studio-asset-skeleton-line is-medium" />
+                    </div>
+                  </div>
+                </div>
+              </li>
+            </ul>
+          </div>
           <EmptyState v-else :title="`暂无${group.label}`">
             <template #icon><component :is="group.icon" :size="25" :stroke-width="1.5" /></template>
           </EmptyState>
@@ -1125,9 +1195,9 @@ async function deleteAsset() {
         title="重新识别会刷新 AI 生成的设定、静态音色与生图提示词；已上传的图片与手动新增的资产将会保留。"
       />
       <template #footer>
-        <UiButton variant="ghost" :disabled="generating" @click="refreshOpen = false">取消</UiButton>
-        <UiButton variant="primary" :disabled="generating" @click="generateFromScript('full')">
-          <template #leading><RefreshCw :size="14" aria-hidden="true" /></template>重新识别
+        <UiButton variant="ghost" :disabled="submittingExtract" @click="refreshOpen = false">取消</UiButton>
+        <UiButton variant="primary" :loading="submittingExtract" :disabled="extractBusy" @click="generateFromScript('full')">
+          <template v-if="!submittingExtract" #leading><RefreshCw :size="14" aria-hidden="true" /></template>重新识别
         </UiButton>
       </template>
     </UiDialog>
@@ -1142,6 +1212,74 @@ async function deleteAsset() {
 .studio-assets-toolbar { position: absolute; inset: 2px 0 auto auto; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .studio-assets-catalog.is-empty .studio-assets-toolbar { position: static; }
 .studio-hint { margin: 0 0 10px; color: var(--color-muted); font-size: 12px; }
+.assets-extract-bar {
+  position: relative;
+  overflow: hidden;
+  margin-bottom: 12px;
+  border: 1px solid rgb(240 184 75 / 26%);
+  border-radius: 8px;
+  background: linear-gradient(90deg, rgb(240 184 75 / 9%), rgb(255 255 255 / 2.5%) 55%, rgb(255 255 255 / 2%));
+}
+.assets-extract-bar-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 10px 14px;
+}
+.assets-extract-bar-left { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 260px; }
+.assets-extract-spinner { flex-shrink: 0; color: var(--color-gold-soft); }
+.assets-extract-title { flex-shrink: 0; color: var(--color-gold-soft); font-size: 13px; font-weight: 600; }
+.assets-extract-sep { flex-shrink: 0; color: var(--color-muted); }
+.assets-extract-step { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text); font-size: 13px; }
+.assets-extract-bar-right { display: flex; flex-shrink: 0; align-items: center; gap: 10px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.assets-extract-pct { color: var(--color-text); font-weight: 600; }
+.assets-extract-timer { display: inline-flex; align-items: center; gap: 4px; color: var(--color-muted); }
+.assets-extract-track { height: 2px; background: rgb(255 255 255 / 7%); }
+.assets-extract-fill { height: 100%; background: linear-gradient(90deg, var(--color-gold), #ffe09a); transition: width .35s ease; }
+.assets-extract-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 14px;
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border: 1px solid rgb(239 68 68 / 34%);
+  border-radius: 8px;
+  background: rgb(239 68 68 / 9%);
+}
+.assets-extract-error-body { display: flex; align-items: flex-start; gap: 10px; min-width: 0; flex: 1 1 260px; }
+.assets-extract-error-icon { flex-shrink: 0; margin-top: 2px; color: #f87171; }
+.assets-extract-error-text { display: grid; gap: 2px; min-width: 0; }
+.assets-extract-error-text strong { color: #fecaca; font-size: 13px; font-weight: 600; }
+.assets-extract-error-text span { color: var(--color-text); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.assets-extract-error-actions { display: flex; flex-shrink: 0; align-items: center; gap: 8px; }
+.studio-asset-skeleton-wrap { display: grid; gap: 14px; padding-top: 6px; }
+.studio-asset-skeleton-hint { display: inline-flex; align-items: center; gap: 8px; margin: 0; color: var(--color-muted); font-size: 13px; }
+.studio-asset-skeleton-card { pointer-events: none; min-height: 112px; }
+.studio-asset-skeleton-box {
+  background: linear-gradient(90deg, rgb(255 255 255 / 4%), rgb(255 255 255 / 9%), rgb(255 255 255 / 4%));
+  background-size: 200% 100%;
+  animation: assets-shimmer 1.6s ease-in-out infinite;
+}
+.studio-asset-skeleton-lines { display: grid; align-content: center; gap: 8px; flex: 1; min-width: 0; }
+.studio-asset-skeleton-line {
+  display: block;
+  height: 10px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, rgb(255 255 255 / 4%), rgb(255 255 255 / 10%), rgb(255 255 255 / 4%));
+  background-size: 200% 100%;
+  animation: assets-shimmer 1.6s ease-in-out infinite;
+}
+.studio-asset-skeleton-line.is-title { width: 38%; height: 13px; }
+.studio-asset-skeleton-line.is-wide { width: 92%; }
+.studio-asset-skeleton-line.is-medium { width: 68%; }
+@keyframes assets-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
 .studio-select-bar {
   display: flex;
   flex-wrap: wrap;

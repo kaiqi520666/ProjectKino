@@ -16,7 +16,7 @@ from app.modules.studio.models import ProjectAsset, StoryboardClip
 logger = structlog.get_logger(__name__)
 
 _MEDIA_JOB_TYPES = {"asset_image", "clip_video", "canvas_image", "canvas_video"}
-_SCRIPT_STEP_JOB_TYPES = {"script_generate", "script_regenerate"}
+_AUTO_RECOVER_LLM_JOB_TYPES = {"script_generate", "script_regenerate", "assets_extract"}
 _LLM_JOB_TYPES = {
     "script_generate",
     "script_regenerate",
@@ -126,7 +126,7 @@ async def sweep_stale_jobs_once(
                     )
                 to_publish.append(job)
                 counts["reviewed"] += 1
-            elif job.job_type in _SCRIPT_STEP_JOB_TYPES:
+            elif job.job_type in _AUTO_RECOVER_LLM_JOB_TYPES:
                 payload = dict(job.input_payload or {})
                 recoveries = int(payload.get("crashRecoveries") or 0)
                 max_recoveries = max(

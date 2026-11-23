@@ -558,6 +558,7 @@ async def persist_extracted_assets(
     result: AssetResult,
     *,
     preserve_edits: bool = False,
+    prune_missing: bool = True,
 ) -> list[ProjectAsset]:
     existing_rows = list(
         await session.scalars(select(ProjectAsset).where(ProjectAsset.project_id == project.id))
@@ -568,13 +569,14 @@ async def persist_extracted_assets(
     result_root_codes = {item.id for item in root_items}
 
     # 删除已不在剧本中出现的旧脚本主资产（保留用户自定义资产与所有变体，并通过共享提拔逻辑防止孤儿变体）。
-    for row in existing_rows:
-        if (
-            row.parent_asset_id is None
-            and row.asset_code not in result_root_codes
-            and _SCRIPT_CODE_RE.match(row.asset_code)
-        ):
-            await _promote_children_and_delete_asset(session, project_id=project.id, asset=row)
+    if prune_missing:
+        for row in existing_rows:
+            if (
+                row.parent_asset_id is None
+                and row.asset_code not in result_root_codes
+                and _SCRIPT_CODE_RE.match(row.asset_code)
+            ):
+                await _promote_children_and_delete_asset(session, project_id=project.id, asset=row)
 
     saved: list[ProjectAsset] = []
     root_by_code: dict[str, ProjectAsset] = {}

@@ -39,7 +39,7 @@ from app.modules.jobs.service import (
 )
 from app.modules.llm_engine.asset_gen import analyze_assets
 from app.modules.llm_engine.provider import DEFAULT_TEXT_MODEL_ID, resolve_text_model
-from app.modules.llm_engine.schema import ProjectSettings
+from app.modules.llm_engine.schema import AssetResult, ProjectSettings
 from app.modules.llm_engine.script_gen import (
     Source,
     append_episode,
@@ -487,6 +487,255 @@ async def _run_script_step_job(
                 )
 
 
+async def _run_assets_extract_job(
+    *,
+    sessions: async_sessionmaker[AsyncSession],
+    redis: Any,
+    settings: Any,
+    job: Job,
+    model_override: tuple[Model, str] | None = None,
+) -> None:
+    """
+    资产识别专用执行器（零持 DB 连接 + 按大类边提边落库 + 指数退避重试 + 全局并发闸门）：
+    - 角色/场景/道具三路并发设计，哪一类先完成立刻增量写库并推 SSE；
+    - LLM 调用期间不持有 PostgreSQL 连接；
+    - 遇到上游 429/5xx/超时自动退避重试（已落库分类在重试时自动复用不重复耗费 token）。
+    """
+    job_id = job.id
+    payload = dict(job.input_payload or {})
+    mode = str(payload.get("mode", "incremental"))
+    attempt_no = int(payload.get("stepAttempts") or 0) + 1
+    crash_no = int(payload.get("crashRecoveries") or 0)
+    completed_kinds: list[str] = [
+        str(k) for k in (payload.get("completedKinds") or []) if str(k) in ("character", "scene", "prop")
+    ]
+    kind_labels = {"character": "角色", "scene": "场景", "prop": "道具"}
+    run_usage = RunUsage()
+    model_id = DEFAULT_TEXT_MODEL_ID
+
+    async def on_progress(step_index: int, step_total: int, label: str, progress: int) -> None:
+        await update_job_progress(
+            sessions,
+            redis,
+            settings,
+            job_id=job_id,
+            step_index=step_index,
+            step_total=step_total,
+            step_label=label,
+            progress=progress,
+        )
+
+    try:
+        # Phase A: 短 DB 会话读取剧本与需要复用的已有资产，读完立即释放连接。
+        async with sessions() as read_db:
+            requested_model_id = (
+                str(payload.get("modelId")).strip() if payload.get("modelId") else None
+            )
+            if model_override is not None:
+                model, model_id = model_override
+            else:
+                model, model_id = await resolve_text_model(read_db, model_id=requested_model_id)
+
+            project = (
+                await read_db.scalar(select(Project).where(Project.id == job.project_id))
+                if job.project_id
+                else None
+            )
+            if project is None:
+                raise AppError(404, "project_not_found", "关联项目不存在")
+
+            project_uuid = project.id
+            script_result = await build_script_result_from_db(read_db, project)
+            all_existing_assets = (
+                await build_asset_result_from_db(read_db, project, include_variants=True)
+            ).assets
+            if mode == "incremental":
+                existing_assets = all_existing_assets
+            elif completed_kinds:
+                # 全量模式重试/崩溃恢复时，自动复用本任务已落库的分类，避免重复消耗 token。
+                completed_set = set(completed_kinds)
+                existing_assets = [a for a in all_existing_assets if a.kind in completed_set]
+            else:
+                existing_assets = []
+
+        # Phase B: 零 DB 连接 + 全局 Redis LLM 并发闸门保护下并发设计三大类，完成一类立刻落库。
+        async def _on_kind_ready(kind: str, kind_assets: list[Any]) -> None:
+            if kind not in completed_kinds:
+                completed_kinds.append(kind)
+            root_count = sum(1 for a in kind_assets if not a.parentId)
+            variant_count = len(kind_assets) - root_count
+            count_text = (
+                f"{root_count} 项 + {variant_count} 个变体"
+                if variant_count > 0
+                else f"{root_count} 项"
+            )
+            done_pct = min(92, 30 + len(completed_kinds) * 20)
+            remaining_labels = [
+                kind_labels[k] for k in ("character", "scene", "prop") if k not in completed_kinds
+            ]
+            label = (
+                f"{kind_labels[kind]}设定已保存（{count_text}），其余分类（{'/'.join(remaining_labels)}）设计中"
+                if remaining_labels
+                else f"{kind_labels[kind]}设定已保存（{count_text}），正在最终同步"
+            )
+            published_job: Job | None = None
+            async with sessions() as write_db:
+                proj_row = await write_db.scalar(
+                    select(Project).where(Project.id == project_uuid)
+                )
+                if proj_row is not None:
+                    await persist_extracted_assets(
+                        write_db,
+                        proj_row,
+                        AssetResult(settings=script_result.settings, assets=kind_assets),
+                        preserve_edits=(mode == "incremental"),
+                        prune_missing=False,
+                    )
+                db_job = await write_db.scalar(select(Job).where(Job.id == job_id))
+                if db_job is not None:
+                    db_job.input_payload = {
+                        **payload,
+                        "completedKinds": list(completed_kinds),
+                    }
+                    db_job.step_index = min(3, 1 + len(completed_kinds))
+                    db_job.step_total = 4
+                    db_job.step_label = label[:200]
+                    db_job.progress = done_pct
+                await write_db.commit()
+                if db_job is not None:
+                    await write_db.refresh(db_job)
+                    published_job = db_job
+            if published_job is not None:
+                await publish_job_event(redis, settings, published_job)
+
+        async with acquire_llm_slot(redis, settings, model_id):
+            extracted = await analyze_assets(
+                model,
+                script_result,
+                existing=existing_assets,
+                usage=run_usage,
+                on_progress=on_progress,
+                on_kind_ready=_on_kind_ready,
+            )
+
+        # Phase C: 最终同步落库（清理已从剧本删除的旧脚本主资产）并标记成功。
+        now = datetime.now(UTC)
+        published_done: Job | None = None
+        async with sessions() as write_db:
+            proj_row = await write_db.scalar(select(Project).where(Project.id == project_uuid))
+            if proj_row is None:
+                raise AppError(404, "project_not_found", "关联项目不存在")
+            saved = await persist_extracted_assets(
+                write_db,
+                proj_row,
+                extracted,
+                preserve_edits=(mode == "incremental"),
+                prune_missing=True,
+            )
+            db_job = await write_db.scalar(select(Job).where(Job.id == job_id))
+            if db_job is not None:
+                db_job.input_payload = {
+                    **payload,
+                    "completedKinds": ["character", "scene", "prop"],
+                    "stepAttempts": 0,
+                }
+                db_job.status = "succeeded"
+                db_job.progress = 100
+                db_job.step_index = 4
+                db_job.step_total = 4
+                db_job.step_label = "已完成"
+                db_job.result_payload = {
+                    "projectId": str(project_uuid),
+                    "assetCount": len(saved),
+                }
+                db_job.finished_at = now
+                db_job.lease_token = None
+                db_job.lease_until = None
+            await write_db.commit()
+            if db_job is not None:
+                await write_db.refresh(db_job)
+                published_done = db_job
+
+        if published_done is not None:
+            await publish_job_event(redis, settings, published_done)
+
+    except Exception as exc:
+        code, message = _format_error(exc)
+        max_retries = max(0, int(getattr(settings, "script_step_max_retries", 3) or 0))
+        current_attempts = int(payload.get("stepAttempts") or 0)
+
+        if is_retryable_llm_error(exc) and current_attempts < max_retries:
+            next_attempt = current_attempts + 1
+            delay = retry_backoff_seconds(next_attempt)
+            retry_at = datetime.now(UTC) + timedelta(seconds=delay)
+            logger.warning(
+                "assets_extract_retrying",
+                job_id=str(job_id),
+                attempt=next_attempt,
+                max_retries=max_retries,
+                delay_seconds=delay,
+                error=message,
+            )
+            async with sessions() as session:
+                db_job = await session.scalar(select(Job).where(Job.id == job_id))
+                if db_job is not None:
+                    db_job.input_payload = {
+                        **payload,
+                        "completedKinds": list(completed_kinds),
+                        "stepAttempts": next_attempt,
+                    }
+                    db_job.status = "queued"
+                    db_job.lease_token = None
+                    db_job.lease_until = None
+                    db_job.dispatch_after = retry_at
+                    db_job.next_attempt_at = retry_at
+                    db_job.step_label = (
+                        f"资产识别遇到上游波动，{delay} 秒后自动重试（第 {next_attempt}/{max_retries} 次）"
+                    )
+                await session.commit()
+                if db_job is not None:
+                    await session.refresh(db_job)
+                    await publish_job_event(redis, settings, db_job)
+        else:
+            logger.warning("llm_job_failed", job_id=str(job_id), code=code, error=message)
+            async with sessions() as session:
+                db_job = await session.scalar(select(Job).where(Job.id == job_id))
+                if db_job is not None:
+                    db_job.status = "failed"
+                    db_job.error_code = code
+                    db_job.error_message = message
+                    db_job.finished_at = datetime.now(UTC)
+                    db_job.lease_token = None
+                    db_job.lease_until = None
+                await session.commit()
+                if db_job is not None:
+                    await session.refresh(db_job)
+                    await publish_job_event(redis, settings, db_job)
+    finally:
+        if run_usage.input_tokens > 0 or run_usage.output_tokens > 0:
+            try:
+                async with sessions() as session:
+                    ledger = await charge_llm_usage(
+                        session,
+                        user_id=job.user_id,
+                        model_id=model_id,
+                        job_id=job.id,
+                        input_tokens=run_usage.input_tokens,
+                        cache_read_tokens=run_usage.cache_read_tokens,
+                        output_tokens=run_usage.output_tokens,
+                        idempotency_key=f"llm:{job.id}:assets:r{crash_no}:a{attempt_no}",
+                        reason="LLM 任务消耗 (assets_extract)",
+                    )
+                    db_job = await session.scalar(select(Job).where(Job.id == job_id))
+                    if db_job is not None and ledger is not None:
+                        db_job.usage_summary = _merge_usage_summary(
+                            db_job.usage_summary, ledger.token_usage
+                        )
+                    await session.commit()
+            except Exception:
+                logger.exception("llm_postpaid_charge_failed", job_id=str(job_id))
+
+
 async def run_llm_job_core(
     *,
     sessions: async_sessionmaker[AsyncSession],
@@ -518,6 +767,23 @@ async def run_llm_job_core(
                 job=job,
                 model_override=model_override,
                 enqueue_next=enqueue_next,
+            )
+        finally:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
+        return
+
+    if job.job_type == "assets_extract":
+        try:
+            await _run_assets_extract_job(
+                sessions=sessions,
+                redis=redis,
+                settings=settings,
+                job=job,
+                model_override=model_override,
             )
         finally:
             heartbeat.cancel()
@@ -650,33 +916,6 @@ async def run_llm_job_core(
                         )
                         appended = await persist_appended_episode(session, project, updated)
                         result_payload["episodeNumber"] = appended.number
-
-                    elif job.job_type == "assets_extract":
-                        mode = str(payload.get("mode", "incremental"))
-                        script_result = await build_script_result_from_db(session, project)
-                        existing_assets = (
-                            (
-                                await build_asset_result_from_db(
-                                    session, project, include_variants=True
-                                )
-                            ).assets
-                            if mode == "incremental"
-                            else []
-                        )
-                        extracted = await analyze_assets(
-                            model,
-                            script_result,
-                            existing=existing_assets,
-                            usage=run_usage,
-                            on_progress=on_progress,
-                        )
-                        saved = await persist_extracted_assets(
-                            session,
-                            project,
-                            extracted,
-                            preserve_edits=(mode == "incremental"),
-                        )
-                        result_payload["assetCount"] = len(saved)
 
                     elif job.job_type == "storyboard_generate":
                         action = str(payload.get("action") or "episode")

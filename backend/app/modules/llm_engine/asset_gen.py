@@ -1,6 +1,6 @@
 import asyncio
 import re
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
 from pydantic import Field
@@ -409,54 +409,17 @@ async def suggest_variant_prompt(
     )
 
 
-async def analyze_assets(
-    model: Model,
-    script: ScriptResult,
+KindReadyCallback = Callable[[AssetKind, list[Asset]], Awaitable[None]]
+
+
+def _assemble_kind_assets(
+    items: Sequence[InventoryItem],
     *,
-    existing: Sequence[Asset] = (),
-    usage: RunUsage | None = None,
-    on_progress: ProgressCallback | None = None,
-) -> AssetResult:
-    await _notify(on_progress, 1, 3, "正在汇总全剧出场的角色、场景与道具", 15)
-    items = inventory(script)
-    names = [card.name for card in script.outline.characters]
-    world = script.outline.world
-    settings_payload = {**script.settings.model_dump(), "world": world.model_dump() if world else None}
-    existing_roots = [asset for asset in existing if not asset.parentId]
-    existing_by_id = {asset.id: asset for asset in existing_roots}
-    existing_variants_by_parent: dict[str, list[Asset]] = {}
-    for asset in existing:
-        if asset.parentId:
-            existing_variants_by_parent.setdefault(asset.parentId, []).append(asset)
-    reused_ids = {
-        item.id for item in items if item.id in existing_by_id and existing_by_id[item.id].kind == item.kind
-    }
-    to_design = [item for item in items if item.id not in reused_ids]
-
-    designs: dict[str, AssetDesign] = {}
-    if to_design:
-        label = (
-            f"正在并发增量设计 {len(to_design)} 项新资产（保留已有 {len(reused_ids)} 项）"
-            if reused_ids
-            else f"正在并发设计 {len(to_design)} 项角色、场景与道具设定（含自动变体识别）"
-        )
-        await _notify(on_progress, 2, 3, label, 45)
-        batches = await asyncio.gather(
-            *(
-                design_kind(
-                    model,
-                    kind,
-                    [item for item in to_design if item.kind == kind],
-                    settings_payload,
-                    names,
-                    usage=usage,
-                )
-                for kind in ("character", "scene", "prop")
-            )
-        )
-        for batch in batches:
-            designs.update(batch)
-
+    reused_ids: set[str],
+    existing_by_id: dict[str, Asset],
+    existing_variants_by_parent: dict[str, list[Asset]],
+    designs: dict[str, AssetDesign],
+) -> list[Asset]:
     assets: list[Asset] = []
     for item in items:
         if item.id in reused_ids:
@@ -528,6 +491,91 @@ async def analyze_assets(
                     variantLabel=v_label,
                 )
             )
+    return assets
+
+
+async def analyze_assets(
+    model: Model,
+    script: ScriptResult,
+    *,
+    existing: Sequence[Asset] = (),
+    usage: RunUsage | None = None,
+    on_progress: ProgressCallback | None = None,
+    on_kind_ready: KindReadyCallback | None = None,
+) -> AssetResult:
+    await _notify(on_progress, 1, 4, "正在汇总全剧出场的角色、场景与道具", 12)
+    items = inventory(script)
+    names = [card.name for card in script.outline.characters]
+    world = script.outline.world
+    settings_payload = {**script.settings.model_dump(), "world": world.model_dump() if world else None}
+    existing_roots = [asset for asset in existing if not asset.parentId]
+    existing_by_id = {asset.id: asset for asset in existing_roots}
+    existing_variants_by_parent: dict[str, list[Asset]] = {}
+    for asset in existing:
+        if asset.parentId:
+            existing_variants_by_parent.setdefault(asset.parentId, []).append(asset)
+    reused_ids = {
+        item.id for item in items if item.id in existing_by_id and existing_by_id[item.id].kind == item.kind
+    }
+    to_design = [item for item in items if item.id not in reused_ids]
+
+    items_by_kind: dict[AssetKind, list[InventoryItem]] = {
+        "character": [item for item in items if item.kind == "character"],
+        "scene": [item for item in items if item.kind == "scene"],
+        "prop": [item for item in items if item.kind == "prop"],
+    }
+    designs: dict[str, AssetDesign] = {}
+
+    if to_design:
+        label = (
+            f"正在并发增量设计 {len(to_design)} 项新资产（保留已有 {len(reused_ids)} 项）"
+            if reused_ids
+            else f"正在并发设计 {len(to_design)} 项角色、场景与道具设定（含自动变体识别）"
+        )
+        await _notify(on_progress, 2, 4, label, 28)
+
+        async def _run_kind(kind: AssetKind) -> tuple[AssetKind, dict[str, AssetDesign]]:
+            kind_to_design = [item for item in to_design if item.kind == kind]
+            batch = await design_kind(
+                model,
+                kind,
+                kind_to_design,
+                settings_payload,
+                names,
+                usage=usage,
+            )
+            return kind, batch
+
+        tasks: list[asyncio.Task[tuple[AssetKind, dict[str, AssetDesign]]]] = [
+            asyncio.create_task(_run_kind(kind)) for kind in ("character", "scene", "prop")
+        ]
+        try:
+            for done_fut in asyncio.as_completed(tasks):
+                kind, batch = await done_fut
+                designs.update(batch)
+                if on_kind_ready is not None and items_by_kind[kind]:
+                    kind_assets = _assemble_kind_assets(
+                        items_by_kind[kind],
+                        reused_ids=reused_ids,
+                        existing_by_id=existing_by_id,
+                        existing_variants_by_parent=existing_variants_by_parent,
+                        designs=designs,
+                    )
+                    await on_kind_ready(kind, kind_assets)
+        except BaseException:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+    assets = _assemble_kind_assets(
+        items,
+        reused_ids=reused_ids,
+        existing_by_id=existing_by_id,
+        existing_variants_by_parent=existing_variants_by_parent,
+        designs=designs,
+    )
     root_count = sum(1 for a in assets if not a.parentId)
     variant_count = len(assets) - root_count
     done_label = (
@@ -535,5 +583,5 @@ async def analyze_assets(
         if variant_count > 0
         else f"已完成 {root_count} 项资产识别"
     )
-    await _notify(on_progress, 3, 3, done_label, 98)
+    await _notify(on_progress, 4, 4, done_label, 98)
     return AssetResult(settings=script.settings, assets=assets)

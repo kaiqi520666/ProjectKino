@@ -8,6 +8,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useGenerationStore } from '@/stores/generation'
 import { useUiStore } from '@/stores/ui'
 import { apiErrorMessage, getProjectDetail, isRetryableApiError, renameProjectApi, watchJob } from '../api'
+import { useAssetExtractStore } from '../asset-extract-store'
 import { artStyles } from '../components/art-styles'
 import { contentLanguages, formatDurationLabel } from '../components/drama-creation'
 import { isScriptJobType } from '../script-job-helpers'
@@ -19,6 +20,7 @@ const router = useRouter()
 const auth = useAuthStore()
 const studio = useStudioStore()
 const scriptJobs = useScriptJobStore()
+const assetExtractJobs = useAssetExtractStore()
 const generation = useGenerationStore()
 const ui = useUiStore()
 const loadingProject = ref(false)
@@ -26,6 +28,7 @@ const loadError = ref('')
 const projectId = computed(() => String(route.params.projectId))
 const project = computed(() => studio.getProject(projectId.value))
 const scriptJobRunning = computed(() => Boolean(project.value && scriptJobs.isRunning(project.value.id)))
+const assetExtractRunning = computed(() => Boolean(project.value && assetExtractJobs.isRunning(project.value.id)))
 const settings = computed(() => project.value?.creation.settings)
 const draftName = ref<string>()
 const nameInput = useTemplateRef<HTMLInputElement>('nameInput')
@@ -48,6 +51,10 @@ async function ensureProjectLoaded(id: string) {
     if (existingScriptJob) {
       scriptJobs.trackScriptJob(existing.id, existingScriptJob)
     }
+    const existingAssetJob = existing.activeJobs?.find((item) => item.jobType === 'assets_extract')
+    if (existingAssetJob) {
+      assetExtractJobs.trackExtractJob(existing.id, existingAssetJob)
+    }
     return
   }
   loadingProject.value = true
@@ -59,8 +66,16 @@ async function ensureProjectLoaded(id: string) {
     if (activeScriptJob) {
       scriptJobs.trackScriptJob(detail.id, activeScriptJob)
     }
+    const activeAssetJob = hydrated.activeJobs?.find((item) => item.jobType === 'assets_extract')
+    if (activeAssetJob) {
+      assetExtractJobs.trackExtractJob(detail.id, activeAssetJob)
+    }
     const runningJob = hydrated.activeJobs?.find(
-      (item) => !isScriptJobType(item.jobType) && item.jobType !== 'asset_image' && item.jobType !== 'clip_video',
+      (item) =>
+        !isScriptJobType(item.jobType)
+        && item.jobType !== 'assets_extract'
+        && item.jobType !== 'asset_image'
+        && item.jobType !== 'clip_video',
     )
     if (runningJob && !generation.isRunning) {
       void generation.runTask(
@@ -105,16 +120,32 @@ watch([() => project.value?.id, () => route.name === 'studio-episode'], () => {
   draftName.value = undefined
 })
 
-watch([project, active, scriptJobRunning], ([value, step, running]) => {
-  if (value && value.loadedDetail !== false && step !== 'studio-script' && (!value.scriptConfirmed || running)) {
+watch([project, active, scriptJobRunning, assetExtractRunning], ([value, step, scriptRunning, assetsRunning]) => {
+  if (!value || value.loadedDetail === false) return
+  if (step !== 'studio-script' && (!value.scriptConfirmed || scriptRunning)) {
     void router.replace({ name: 'studio-script', params: { projectId: value.id } })
+    return
+  }
+  if (step === 'studio-storyboard' && assetsRunning) {
+    void router.replace({ name: 'studio-assets', params: { projectId: value.id } })
   }
 }, { immediate: true })
+
+function isStepLocked(stepName: (typeof steps)[number]['name']) {
+  if (stepName !== 'studio-script' && scriptJobRunning.value) return true
+  if (stepName === 'studio-storyboard' && assetExtractRunning.value) return true
+  return false
+}
 
 function handleStepClick(event: MouseEvent, stepName: (typeof steps)[number]['name']) {
   if (stepName !== 'studio-script' && scriptJobRunning.value) {
     event.preventDefault()
     ui.notify('剧本正在后台生成中，请等本轮完成后再进入下一步', 'info')
+    return
+  }
+  if (stepName === 'studio-storyboard' && assetExtractRunning.value) {
+    event.preventDefault()
+    ui.notify('资产正在后台识别中，请等识别完成后再进入分镜制作', 'info')
   }
 }
 
@@ -183,11 +214,11 @@ function handleNameEscape(event: KeyboardEvent) {
             <li v-for="(step, index) in steps" :key="step.name">
               <RouterLink
                 class="studio-step"
-                :class="{ 'is-locked': step.name !== 'studio-script' && scriptJobRunning }"
+                :class="{ 'is-locked': isStepLocked(step.name) }"
                 :to="{ name: step.name, params: { projectId: project.id } }"
                 aria-current-value="step"
                 :aria-current="active === step.name ? 'step' : undefined"
-                :aria-disabled="step.name !== 'studio-script' && scriptJobRunning ? 'true' : undefined"
+                :aria-disabled="isStepLocked(step.name) ? 'true' : undefined"
                 @click="handleStepClick($event, step.name)"
               >
                 <span class="studio-step-number" aria-hidden="true"><Check v-if="index === 0 && project.scriptConfirmed && active !== step.name && !scriptJobRunning" :size="14" /><template v-else>{{ index + 1 }}</template></span>

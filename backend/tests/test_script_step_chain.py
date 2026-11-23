@@ -535,3 +535,110 @@ def test_retry_classification_and_backoff():
     assert retry_backoff_seconds(2) == 15
     assert retry_backoff_seconds(3) == 30
     assert retry_backoff_seconds(4) == 30
+
+
+async def test_assets_extract_streams_per_kind_with_zero_db_hold_and_retries(monkeypatch):
+    from app.modules.llm_engine.schema import Asset, AssetResult
+
+    proj_settings = _sample_settings(episode_count=1)
+    project = Project(
+        id=uuid4(),
+        user_id=1,
+        name=proj_settings.name,
+        mode="story",
+        source_text="故事梗概",
+        settings=proj_settings.model_dump(),
+    )
+    now = datetime.now(UTC)
+    job = Job(
+        id=uuid4(),
+        user_id=1,
+        project_id=project.id,
+        job_type="assets_extract",
+        status="queued",
+        step_index=0,
+        step_total=4,
+        step_label="排队中",
+        progress=0,
+        input_payload={"mode": "full"},
+        created_at=now,
+        dispatch_after=now,
+        next_attempt_at=now,
+    )
+    db = FakeStepChainDB(project, job)
+    db.outline = _sample_outline(1)
+    db.episodes[1] = _sample_episode(1)
+    redis = FakeEventRedis()
+    settings = Settings(environment="test", script_step_max_retries=2)
+    persist_calls: list[tuple[bool, list[str]]] = []
+    active_sessions_during_llm: list[int] = []
+
+    async def fake_build_script(session, proj):
+        return ScriptResult(settings=proj_settings, outline=db.outline, episodes=[db.episodes[1]])
+
+    async def fake_build_assets(session, proj, *, include_variants=True):
+        return AssetResult(settings=proj_settings, assets=[])
+
+    async def fake_persist_assets(session, proj, res, *, preserve_edits=False, prune_missing=True):
+        persist_calls.append((prune_missing, [a.id for a in res.assets]))
+        return res.assets
+
+    attempts = 0
+
+    async def fake_analyze(
+        model, script, *, existing=(), usage=None, on_progress=None, on_kind_ready=None
+    ):
+        nonlocal attempts
+        attempts += 1
+        active_sessions_during_llm.append(db.active_sessions)
+        char_asset = Asset(
+            id="C01", kind="character", name="陈默", description="司机", prompt="p1", episodeNumbers=[1]
+        )
+        scene_asset = Asset(
+            id="S01", kind="scene", name="出租车", description="车内", prompt="p2", episodeNumbers=[1]
+        )
+        if attempts == 1:
+            if on_kind_ready is not None:
+                await on_kind_ready("character", [char_asset])
+            raise ModelHTTPError(status_code=429, model_name="test-model", body="rate limit")
+
+        if on_kind_ready is not None:
+            await on_kind_ready("scene", [scene_asset])
+        return AssetResult(settings=proj_settings, assets=[char_asset, scene_asset])
+
+    monkeypatch.setattr(ai_tasks, "build_script_result_from_db", fake_build_script)
+    monkeypatch.setattr(ai_tasks, "build_asset_result_from_db", fake_build_assets)
+    monkeypatch.setattr(ai_tasks, "persist_extracted_assets", fake_persist_assets)
+    monkeypatch.setattr(ai_tasks, "analyze_assets", fake_analyze)
+
+    # Attempt 1: character saves incrementally, then 429 triggers backoff retry
+    await ai_tasks.run_llm_job_core(
+        sessions=db.session_factory,
+        redis=redis,
+        settings=settings,
+        job_id=job.id,
+        model_override=(TestModel(), "test-model"),
+    )
+    assert job.status == "queued"
+    assert job.input_payload["stepAttempts"] == 1
+    assert "character" in job.input_payload["completedKinds"]
+    assert persist_calls == [(False, ["C01"])]
+
+    # Attempt 2: fast-forward backoff, succeeds and runs final prune_missing=True
+    job.dispatch_after = datetime.now(UTC) - timedelta(seconds=1)
+    await ai_tasks.run_llm_job_core(
+        sessions=db.session_factory,
+        redis=redis,
+        settings=settings,
+        job_id=job.id,
+        model_override=(TestModel(), "test-model"),
+    )
+    assert job.status == "succeeded"
+    assert job.progress == 100
+    assert active_sessions_during_llm == [0, 0]
+    assert persist_calls == [
+        (False, ["C01"]),
+        (False, ["S01"]),
+        (True, ["C01", "S01"]),
+    ]
+
