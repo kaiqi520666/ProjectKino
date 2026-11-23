@@ -152,6 +152,8 @@ def serialize_asset_out(asset: ProjectAsset, last_job: Job | None = None) -> Pro
         prompt=asset.prompt,
         voice=asset.voice,
         episode_numbers=list(asset.episode_numbers or []),
+        parent_asset_id=asset.parent_asset_id,
+        variant_label=asset.variant_label or "",
         image_url=asset.image_url,
         image_model_id=asset.image_model_id,
         image_tier=asset.image_tier,
@@ -475,9 +477,13 @@ async def persist_extracted_assets(
     by_code = {row.asset_code: row for row in existing_rows}
     result_codes = {item.id for item in result.assets}
 
-    # 删除已不在剧本中出现的旧脚本资产（保留用户手动创建的非 C/S/P 自定义资产）。
+    # 删除已不在剧本中出现的旧脚本主资产（保留用户手动创建的自定义资产及所有状态变体）。
     for row in existing_rows:
-        if row.asset_code not in result_codes and _SCRIPT_CODE_RE.match(row.asset_code):
+        if (
+            row.parent_asset_id is None
+            and row.asset_code not in result_codes
+            and _SCRIPT_CODE_RE.match(row.asset_code)
+        ):
             await session.delete(row)
 
     saved: list[ProjectAsset] = []
@@ -640,8 +646,27 @@ async def save_structured_episode(
 async def create_project_asset(
     session: AsyncSession, *, project: Project, body: AssetCreateRequest
 ) -> ProjectAsset:
+    variant_label = body.variant_label.strip()
+    parent_asset_id = body.parent_asset_id
+    if parent_asset_id is not None:
+        parent = await session.scalar(
+            select(ProjectAsset).where(
+                ProjectAsset.id == parent_asset_id, ProjectAsset.project_id == project.id
+            )
+        )
+        if parent is None:
+            raise AppError(404, "parent_asset_not_found", "归属主资产不存在")
+        if parent.parent_asset_id is not None:
+            raise AppError(400, "nested_variant_not_allowed", "变体只能归属到主资产，不支持多级嵌套")
+        if parent.kind != body.kind:
+            raise AppError(400, "variant_kind_mismatch", "变体类型必须与主资产一致")
+        if not variant_label:
+            raise AppError(400, "variant_label_required", "请为变体填写状态标签（如 晚宴礼服、深夜、碎裂）")
+
     asset = ProjectAsset(
         project_id=project.id,
+        parent_asset_id=parent_asset_id,
+        variant_label=variant_label,
         asset_code=uuid4().hex[:12],
         kind=body.kind,
         name=body.name.strip(),
@@ -680,6 +705,11 @@ async def update_project_asset(
         asset.prompt = body.prompt.strip()
     if body.voice is not None:
         asset.voice = body.voice.strip() if asset.kind == "character" else ""
+    if body.variant_label is not None:
+        cleaned_label = body.variant_label.strip()
+        if asset.parent_asset_id is not None and not cleaned_label:
+            raise AppError(400, "variant_label_required", "变体的状态标签不能为空")
+        asset.variant_label = cleaned_label
     if body.clear_image:
         asset.image_url = None
         asset.image_key = None
@@ -746,6 +776,23 @@ async def delete_project_asset(session: AsyncSession, *, project: Project, asset
     )
     if asset is None:
         raise AppError(404, "asset_not_found", "资产不存在")
+    children = list(
+        await session.scalars(
+            select(ProjectAsset)
+            .where(
+                ProjectAsset.project_id == project.id,
+                ProjectAsset.parent_asset_id == asset.id,
+            )
+            .order_by(ProjectAsset.created_at, ProjectAsset.id)
+        )
+    )
+    if children:
+        # 删除主资产时自动将最早创建的变体提升为新主资产，避免误删用户已生成的变体图。
+        new_root = children[0]
+        new_root.parent_asset_id = None
+        for sibling in children[1:]:
+            sibling.parent_asset_id = new_root.id
+        await session.flush()
     await session.delete(asset)
     await session.flush()
 

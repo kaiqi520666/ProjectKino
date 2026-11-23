@@ -678,10 +678,35 @@ async def batch_generate_asset_images(
             ),
         )
 
+    parent_ids_needed = {
+        a.parent_asset_id
+        for a in eligible
+        if body.use_parent_reference
+        and a.parent_asset_id is not None
+        and a.parent_asset_id not in assets_by_id
+    }
+    if parent_ids_needed:
+        parent_rows = list(
+            await session.scalars(
+                select(ProjectAsset).where(
+                    ProjectAsset.project_id == project.id,
+                    ProjectAsset.id.in_(parent_ids_needed),
+                )
+            )
+        )
+        for prow in parent_rows:
+            assets_by_id[prow.id] = prow
+
     batch_id = uuid4().hex[:16]
     created_jobs: list[Job] = []
     for asset in eligible:
         ratio = override_ratio or asset_aspect_ratio(asset.kind)
+        ref_urls: list[str] = []
+        if body.use_parent_reference and asset.parent_asset_id is not None:
+            parent_row = assets_by_id.get(asset.parent_asset_id)
+            parent_url = (parent_row.image_url or "").strip() if parent_row is not None else ""
+            if parent_url.startswith(("http://", "https://")):
+                ref_urls = [parent_url]
         job = await create_job(
             session,
             user_id=user.id,
@@ -695,6 +720,7 @@ async def batch_generate_asset_images(
                 "tier": body.tier,
                 "ratio": ratio,
                 "prompt": asset.prompt.strip(),
+                **({"referenceUrls": ref_urls} if ref_urls else {}),
             },
             step_total=4,
             step_label=f"资产「{asset.name}」批量生图已排队",

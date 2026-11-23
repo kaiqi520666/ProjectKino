@@ -57,6 +57,8 @@ class AssetCreateRequest(CamelModel):
     voice: str = ""
     image_url: str | None = None
     image_key: str | None = None
+    parent_asset_id: UUID | None = None
+    variant_label: str = Field(default="", max_length=48)
 
 
 class AssetUpdateRequest(CamelModel):
@@ -67,6 +69,7 @@ class AssetUpdateRequest(CamelModel):
     image_url: str | None = None
     image_key: str | None = None
     clear_image: bool = False
+    variant_label: str | None = Field(default=None, max_length=48)
 
 
 class ExtractAssetsRequest(CamelModel):
@@ -101,6 +104,7 @@ class BatchGenerateAssetImagesRequest(CamelModel):
     model_id: str = Field(default="gpt-image-2", min_length=1, max_length=48)
     tier: Literal["web", "1k", "2k", "4k"] = "1k"
     ratio: str | None = Field(default=None, max_length=16)
+    use_parent_reference: bool = True
 
 
 class BatchSkippedAssetOut(CamelModel):
@@ -194,6 +198,8 @@ class ProjectAssetOut(CamelModel):
     prompt: str
     voice: str
     episode_numbers: list[int]
+    parent_asset_id: UUID | None = None
+    variant_label: str = ""
     image_url: str | None = None
     image_model_id: str | None = None
     image_tier: str | None = None

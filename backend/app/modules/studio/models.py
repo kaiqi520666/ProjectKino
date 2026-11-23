@@ -87,12 +87,21 @@ class ProjectAsset(TimestampMixin, Base):
             "image_tier IS NULL OR image_tier IN ('web', '1k', '2k', '4k')",
             name="image_tier_allowed",
         ),
+        CheckConstraint(
+            "parent_asset_id IS NULL OR parent_asset_id <> id",
+            name="parent_not_self",
+        ),
+        Index("ix_project_assets_parent_id", "parent_asset_id"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     project_id: Mapped[UUID] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    parent_asset_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("project_assets.id", ondelete="SET NULL"), nullable=True
+    )
+    variant_label: Mapped[str] = mapped_column(String(48), nullable=False, default="", server_default="")
     asset_code: Mapped[str] = mapped_column(String(64), nullable=False)
     kind: Mapped[str] = mapped_column(String(16), nullable=False)
     name: Mapped[str] = mapped_column(String(120), nullable=False)

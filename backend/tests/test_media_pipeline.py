@@ -1242,5 +1242,140 @@ async def test_image_worker_uses_edits_for_submit_and_generations_for_poll():
     assert len(db.assets[asset_id].image_history) == 1
 
 
+async def test_asset_variant_lifecycle_validation_and_parent_promotion():
+    from app.core.errors import AppError
+    from app.modules.studio.models import Project
+    from app.modules.studio.schemas import AssetCreateRequest, AssetUpdateRequest
+    from app.modules.studio.service import (
+        create_project_asset,
+        delete_project_asset,
+        serialize_asset_out,
+        update_project_asset,
+    )
+
+    project = Project(id=uuid4(), user_id=1, name="悬疑剧")
+    store: dict[UUID, ProjectAsset] = {}
+
+    class _AssetSession:
+        def add(self, obj: ProjectAsset) -> None:
+            if obj.id is None:
+                obj.id = uuid4()
+            store[obj.id] = obj
+
+        async def delete(self, obj: ProjectAsset) -> None:
+            store.pop(obj.id, None)
+
+        async def flush(self) -> None:
+            return None
+
+        async def scalar(self, stmt):
+            params = list(stmt.compile().params.values())
+            aid = params[0]
+            pid = params[1] if len(params) > 1 else project.id
+            row = store.get(aid)
+            if row is not None and row.project_id == pid:
+                return row
+            return None
+
+        async def scalars(self, stmt):
+            params = list(stmt.compile().params.values())
+            pid, parent_id = params[0], params[1]
+            return [
+                row
+                for row in store.values()
+                if row.project_id == pid and row.parent_asset_id == parent_id
+            ]
+
+    session = _AssetSession()
+    root = await create_project_asset(
+        session,  # type: ignore[arg-type]
+        project=project,
+        body=AssetCreateRequest(kind="character", name="林薇", description="主造型", prompt="默认提示词"),
+    )
+
+    # 变体必须填写 variant_label
+    with pytest.raises(AppError) as label_err:
+        await create_project_asset(
+            session,  # type: ignore[arg-type]
+            project=project,
+            body=AssetCreateRequest(
+                kind="character",
+                name="林薇",
+                parent_asset_id=root.id,
+                variant_label="   ",
+            ),
+        )
+    assert label_err.value.code == "variant_label_required"
+
+    # 变体必须与主资产同类型
+    with pytest.raises(AppError) as kind_err:
+        await create_project_asset(
+            session,  # type: ignore[arg-type]
+            project=project,
+            body=AssetCreateRequest(
+                kind="scene",
+                name="林薇",
+                parent_asset_id=root.id,
+                variant_label="夜戏",
+            ),
+        )
+    assert kind_err.value.code == "variant_kind_mismatch"
+
+    v1 = await create_project_asset(
+        session,  # type: ignore[arg-type]
+        project=project,
+        body=AssetCreateRequest(
+            kind="character",
+            name="林薇",
+            parent_asset_id=root.id,
+            variant_label="晚宴礼服",
+            prompt="深蓝晚礼服",
+        ),
+    )
+    v2 = await create_project_asset(
+        session,  # type: ignore[arg-type]
+        project=project,
+        body=AssetCreateRequest(
+            kind="character",
+            name="林薇",
+            parent_asset_id=root.id,
+            variant_label="战损",
+            prompt="受伤战损",
+        ),
+    )
+    assert serialize_asset_out(v1).parent_asset_id == root.id
+    assert serialize_asset_out(v1).variant_label == "晚宴礼服"
+
+    # 禁止二级嵌套变体
+    with pytest.raises(AppError) as nested_err:
+        await create_project_asset(
+            session,  # type: ignore[arg-type]
+            project=project,
+            body=AssetCreateRequest(
+                kind="character",
+                name="林薇",
+                parent_asset_id=v1.id,
+                variant_label="二级",
+            ),
+        )
+    assert nested_err.value.code == "nested_variant_not_allowed"
+
+    # 变体更新时不允许清空状态标签
+    with pytest.raises(AppError) as empty_update_err:
+        await update_project_asset(
+            session,  # type: ignore[arg-type]
+            project=project,
+            asset_id=v1.id,
+            body=AssetUpdateRequest(variant_label="  "),
+        )
+    assert empty_update_err.value.code == "variant_label_required"
+
+    # 删除主资产时，自动将首个变体提升为新主资产并重挂兄弟变体
+    await delete_project_asset(session, project=project, asset_id=root.id)  # type: ignore[arg-type]
+    assert root.id not in store
+    assert v1.parent_asset_id is None
+    assert v2.parent_asset_id == v1.id
+
+
 async def _async_return(value):
     return value
