@@ -33,10 +33,14 @@ import {
 import EmptyState from '@/components/business/EmptyState.vue'
 import MediaHistoryDialog from '@/components/business/MediaHistoryDialog.vue'
 import type { MediaHistoryItem } from '@/components/business/MediaHistoryDialog.vue'
+import RichPromptInput from '@/components/business/RichPromptInput.vue'
+import {
+  remapStudioPromptOnSlotRemove,
+  type PromptReferenceOption,
+} from '@/components/business/prompt-references'
 import ImagePreview from '@/components/ui/ImagePreview.vue'
 import UiButton from '@/components/ui/UiButton.vue'
 import UiDialog from '@/components/ui/UiDialog.vue'
-import UiTextarea from '@/components/ui/UiTextarea.vue'
 import VideoPreview from '@/components/ui/VideoPreview.vue'
 import AssetLibraryDialog from '@/features/assets/AssetLibraryDialog.vue'
 import type { AssetLibraryItem } from '@/features/assets/asset-library-types'
@@ -339,12 +343,14 @@ const references = computed(() => {
         ? 'image'
         : reference.mediaKind
           ?? (reference.kind === 'video' || reference.kind === 'audio' ? reference.kind : 'image')
+      const modalityIndex =
+        mediaKind === 'video' ? ++vidIdx : mediaKind === 'audio' ? ++audIdx : ++imgIdx
       const slotLabel =
         mediaKind === 'video'
-          ? `视频${++vidIdx}`
+          ? `视频${modalityIndex}`
           : mediaKind === 'audio'
-            ? `音频${++audIdx}`
-            : `图片${++imgIdx}`
+            ? `音频${modalityIndex}`
+            : `图片${modalityIndex}`
       const icon =
         mediaKind === 'video'
           ? Film
@@ -361,6 +367,7 @@ const references = computed(() => {
         stateLabel: live ? assetStateLabel(live) : '',
         kind: reference.kind,
         mediaKind,
+        modalityIndex,
         mediaUrl,
         slotLabel,
         index: reference.index as number | undefined,
@@ -375,6 +382,7 @@ const references = computed(() => {
     assets.filter((asset) => clip.value?.assetIds.includes(asset.id)).map((asset) => {
       const live = projectAssetsById.value.get(asset.id)
       const siblings = live ? findAssetSiblings(allAssets, live) : []
+      const modalityIndex = ++imgIdx
       return {
         id: asset.id,
         name: live?.name || asset.name,
@@ -382,8 +390,9 @@ const references = computed(() => {
         stateLabel: live ? assetStateLabel(live) : '',
         kind: asset.kind,
         mediaKind: 'image' as const,
+        modalityIndex,
         mediaUrl: asset.imageUrl,
-        slotLabel: `图片${++imgIdx}`,
+        slotLabel: `图片${modalityIndex}`,
         icon,
         imageUrl: asset.imageUrl,
         index: undefined as number | undefined,
@@ -392,6 +401,15 @@ const references = computed(() => {
     }),
   )
 })
+
+const promptReferences = computed<PromptReferenceOption[]>(() =>
+  references.value.map((item) => ({
+    tokenKey: item.slotLabel,
+    label: `${item.slotLabel} · ${item.displayName}`,
+    kind: item.mediaKind,
+    thumbnailUrl: item.mediaKind === 'image' ? item.imageUrl : undefined,
+  })),
+)
 
 const currentVideoModel = computed(
   () => videoModels.value.find((m) => m.id === selectedVideoModelId.value) ?? videoModels.value[0] ?? null,
@@ -734,10 +752,22 @@ function updatePrompt(value: string) {
   }
 }
 
-async function persistClipReferences(nextRefs: PersistedClipReference[]) {
+watch(
+  () => clip.value?.backendId,
+  (nextId, prevId) => {
+    if (prevId && nextId !== prevId) {
+      void flushPromptSave().catch(() => {})
+    }
+  },
+)
+
+async function persistClipReferences(nextRefs: PersistedClipReference[], updatedPrompt?: string) {
   if (!clip.value?.backendId || !props.project.persisted) return
   try {
-    await updateClipApi(props.project.id, clip.value.backendId, { references: nextRefs })
+    await flushPromptSave()
+    const patch: { references: PersistedClipReference[]; prompt?: string } = { references: nextRefs }
+    if (updatedPrompt !== undefined) patch.prompt = updatedPrompt
+    await updateClipApi(props.project.id, clip.value.backendId, patch)
     const detail = await getProjectDetail(props.project.id)
     studio.hydrateProjectDetail(detail)
   } catch (error) {
@@ -786,13 +816,27 @@ async function addReferenceLibraryItems(items: AssetLibraryItem[]) {
   await persistClipReferences(current)
 }
 
-async function removeReferenceAsset(assetCode: string) {
+async function removeReferenceAsset(slotIndex: number) {
   if (!clip.value) return
-  if (playingRefAudioId.value === assetCode) stopRefAudio()
+  const removed = references.value[slotIndex]
+  if (!removed) return
+  if (playingRefAudioId.value === removed.id) stopRefAudio()
+  const remap = remapStudioPromptOnSlotRemove(
+    clip.value.prompt,
+    removed.mediaKind,
+    removed.modalityIndex,
+    removed.displayName,
+  )
   const next = serializeExistingRefs()
-    .filter((_, idx) => references.value[idx]?.id !== assetCode)
+    .filter((_, idx) => idx !== slotIndex)
     .map((ref, idx) => ({ ...ref, index: idx + 1 }))
-  await persistClipReferences(next)
+  if (remap.changed) {
+    studio.saveClipPrompt(props.project.id, number.value, clip.value.id, remap.prompt)
+  }
+  await persistClipReferences(next, remap.changed ? remap.prompt : undefined)
+  if (remap.changed) {
+    ui.notify('已同步更新提示词引用编号', 'info')
+  }
 }
 
 function stopRefAudio() {
@@ -824,6 +868,7 @@ function openRefVideoPreview(url: string, title: string) {
 
 onBeforeUnmount(() => {
   stopRefAudio()
+  void flushPromptSave().catch(() => {})
 })
 
 async function switchReferenceVariant(slotIndex: number, target: StudioAsset) {
@@ -1157,7 +1202,7 @@ async function deleteClip() {
                     class="episode-reference-remove"
                     :aria-label="`移除参考 ${asset.displayName}`"
                     title="移除"
-                    @click="removeReferenceAsset(asset.id)"
+                    @click="removeReferenceAsset(slotIndex)"
                   >
                     <X :size="11" aria-hidden="true" />
                   </button>
@@ -1229,13 +1274,21 @@ async function deleteClip() {
               <X :size="13" aria-hidden="true" />
             </button>
           </div>
-          <UiTextarea
-            :key="clip.id"
-            :model-value="clip.prompt"
-            label="视频提示词"
-            :rows="5"
-            @update:model-value="updatePrompt"
-          />
+          <div class="episode-prompt-field">
+            <span class="ui-label">视频提示词</span>
+            <RichPromptInput
+              :key="`${number}-${clip.backendId || clip.id}`"
+              :model-value="clip.prompt"
+              syntax="studio"
+              :references="promptReferences"
+              bordered
+              :min-height="132"
+              max-height="320px"
+              placeholder="输入视频提示词，输入 @ 引用上方图片、视频或音频素材"
+              mention-title="引用素材"
+              @update:model-value="updatePrompt"
+            />
+          </div>
           <div class="episode-prompt-actions">
             <div class="episode-video-controls">
               <VideoModelPicker
@@ -1680,6 +1733,11 @@ button.episode-asset-thumb { width: 100%; cursor: zoom-in; }
 .episode-clip-job-close:hover { opacity: 1; background: rgb(255 255 255 / 8%); }
 .episode-clip-empty { grid-row: 1 / 3; align-self: center; }
 .episode-empty { align-self: center; }
+.episode-prompt-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
 .episode-asset-thumb--video { position: relative; cursor: pointer; }
 .episode-asset-thumb--video video { width: 100%; height: 100%; object-fit: cover; display: block; }
 .episode-ref-play-dot {
