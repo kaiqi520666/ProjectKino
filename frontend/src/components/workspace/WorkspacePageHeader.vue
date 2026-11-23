@@ -14,7 +14,6 @@ defineProps<{
         <slot name="icon" />
       </span>
       <div class="ws-page-header-copy">
-        <span v-if="eyebrow" class="ws-page-header-eyebrow">{{ eyebrow }}</span>
         <div class="ws-page-header-title-row">
           <h1 :id="titleId" class="ws-page-header-title">{{ title }}</h1>
           <span v-if="badge !== undefined && badge !== ''" class="ws-page-header-badge">
@@ -50,10 +49,10 @@ defineProps<{
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 36px;
   flex-shrink: 0;
-  border-radius: 10px;
+  border-radius: 9px;
   border: 1px solid rgb(240 184 75 / 24%);
   background: linear-gradient(145deg, rgb(240 184 75 / 14%), rgb(240 184 75 / 4%));
   color: var(--color-gold-soft);
@@ -62,19 +61,7 @@ defineProps<{
 .ws-page-header-copy {
   display: flex;
   flex-direction: column;
-  gap: 3px;
   min-width: 0;
-}
-
-.ws-page-header-eyebrow {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.04em;
-  color: var(--color-gold-soft);
-  line-height: 1.2;
 }
 
 .ws-page-header-title-row {

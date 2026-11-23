@@ -77,7 +77,7 @@ async function deleteCanvas() {
 
 <template>
   <section class="canvas-page" aria-labelledby="canvas-page-title">
-    <WorkspacePageHeader eyebrow="创作工具" title="画布" title-id="canvas-page-title" :badge="store.canvases.length">
+    <WorkspacePageHeader title="画布" title-id="canvas-page-title" :badge="store.canvases.length">
       <template #icon><LayoutDashboard :size="19" :stroke-width="1.7" /></template>
       <template #actions>
         <UiButton variant="primary" size="sm" @click="openCreate">

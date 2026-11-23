@@ -10,7 +10,6 @@ const userAssets = useUserAssetsStore()
 <template>
   <section class="assets-page" aria-labelledby="assets-library-title">
     <WorkspacePageHeader
-      eyebrow="创作素材"
       title="素材库"
       title-id="assets-library-title"
       :badge="userAssets.items.length"
