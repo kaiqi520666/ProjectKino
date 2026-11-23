@@ -326,6 +326,65 @@ def test_resolve_canvas_generation_inputs_unified_at_slot_syntax():
     img_resolved = resolve_canvas_generation_inputs(img_req)
     assert img_resolved.resolved_prompt == "把 @[图片1] 调整为 新中式工笔画 风格"
 
+    # Canvas text generation: @[文本1] inlined in prompt must not be duplicated in reference_texts
+    text_dedup_req = CanvasGenerateRequest.model_validate(
+        {
+            "kind": "text",
+            "prompt": "把 @[文本1] 扩写成电影分镜",
+            "references": [
+                {
+                    "nodeId": "txt-1",
+                    "kind": "text",
+                    "title": "大纲",
+                    "text": "雨夜街头追逐",
+                },
+                {
+                    "nodeId": "txt-2",
+                    "kind": "text",
+                    "title": "画风要求",
+                    "text": "冷峻写实",
+                },
+            ],
+        }
+    )
+    text_dedup = resolve_canvas_generation_inputs(text_dedup_req)
+    assert text_dedup.resolved_prompt == "把 雨夜街头追逐 扩写成电影分镜"
+    assert text_dedup.reference_texts == [{"title": "画风要求", "text": "冷峻写实"}]
+
+
+def test_resolve_canvas_generation_inputs_blocks_removed_reference_tokens():
+    from app.core.errors import AppError
+    from app.modules.canvas.generation import (
+        find_removed_prompt_refs,
+        resolve_canvas_generation_inputs,
+    )
+    from app.modules.canvas.schemas import CanvasGenerateRequest
+
+    assert find_removed_prompt_refs("@[已移除:陈国栋] 与 @[已移除:旧道具] 和 @[已移除:陈国栋]") == [
+        "陈国栋",
+        "旧道具",
+    ]
+    assert find_removed_prompt_refs("正常提示词 @[图片1]") == []
+
+    bad_req = CanvasGenerateRequest.model_validate(
+        {
+            "kind": "video",
+            "prompt": "@[已移除:陈国栋] 走进大厅，看向 @[图片1]",
+            "references": [
+                {
+                    "nodeId": "img-1",
+                    "kind": "image",
+                    "title": "大厅",
+                    "mediaUrl": "https://image.nodepass.net/framedrama/1/images/hall.png",
+                }
+            ],
+        }
+    )
+    with pytest.raises(AppError) as err:
+        resolve_canvas_generation_inputs(bad_req)
+    assert err.value.code == "prompt_has_removed_reference"
+    assert "陈国栋" in err.value.message
+
 
 @pytest.mark.asyncio
 async def test_generate_canvas_text_passes_image_urls_as_multimodal_parts() -> None:

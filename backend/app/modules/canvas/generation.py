@@ -11,6 +11,18 @@ from app.modules.canvas.schemas import CanvasGenerateReference, CanvasGenerateRe
 
 _LEGACY_REF_TOKEN_RE = re.compile(r"\{\{ref:([\w-]+)\}\}")
 _TEXT_SLOT_TOKEN_RE = re.compile(r"@\[文本(\d+)\]")
+_REMOVED_REF_TOKEN_RE = re.compile(r"@\[已移除:([^\]]+)\]")
+
+
+def find_removed_prompt_refs(prompt: str) -> list[str]:
+    if not prompt or "@[已移除:" not in prompt:
+        return []
+    seen: list[str] = []
+    for match in _REMOVED_REF_TOKEN_RE.finditer(prompt):
+        label = match.group(1).strip() or "素材"
+        if label not in seen:
+            seen.append(label)
+    return seen
 
 _CANVAS_TEXT_INSTRUCTIONS = (
     "你是 FrameDrama 画布创作助手，擅长视觉画面分析、影视短剧大纲、角色设定、分镜提示词润色与视觉画面描述。"
@@ -31,6 +43,15 @@ class ResolvedCanvasGeneration:
 
 
 def resolve_canvas_generation_inputs(body: CanvasGenerateRequest) -> ResolvedCanvasGeneration:
+    removed_refs = find_removed_prompt_refs(body.prompt or "")
+    if removed_refs:
+        labels = "、".join(removed_refs[:3])
+        raise AppError(
+            400,
+            "prompt_has_removed_reference",
+            f"提示词包含已移除的引用（{labels}），请先删除或重新 @ 引用素材后再生成",
+        )
+
     refs_by_id: dict[str, CanvasGenerateReference] = {ref.node_id: ref for ref in body.references}
     image_refs: list[CanvasGenerateReference] = []
     video_refs: list[CanvasGenerateReference] = []
@@ -39,7 +60,6 @@ def resolve_canvas_generation_inputs(body: CanvasGenerateRequest) -> ResolvedCan
     image_index_by_node: dict[str, int] = {}
     video_index_by_node: dict[str, int] = {}
     audio_index_by_node: dict[str, int] = {}
-    reference_texts: list[dict[str, str]] = []
 
     if body.kind == "image":
         for ref in body.references:
@@ -54,10 +74,6 @@ def resolve_canvas_generation_inputs(body: CanvasGenerateRequest) -> ResolvedCan
                 image_index_by_node[ref.node_id] = len(image_refs)
             elif ref.kind == "text":
                 text_refs.append(ref)
-                if (ref.text or "").strip():
-                    reference_texts.append(
-                        {"title": ref.title or "参考文本", "text": (ref.text or "").strip()}
-                    )
     elif body.kind == "video":
         for ref in body.references:
             if ref.kind == "image" and ref.media_url:
@@ -71,10 +87,6 @@ def resolve_canvas_generation_inputs(body: CanvasGenerateRequest) -> ResolvedCan
                 audio_index_by_node[ref.node_id] = len(audio_refs)
             elif ref.kind == "text":
                 text_refs.append(ref)
-                if (ref.text or "").strip():
-                    reference_texts.append(
-                        {"title": ref.title or "参考文本", "text": (ref.text or "").strip()}
-                    )
     else:
         for ref in body.references:
             if ref.kind == "image" and ref.media_url:
@@ -82,10 +94,6 @@ def resolve_canvas_generation_inputs(body: CanvasGenerateRequest) -> ResolvedCan
                 image_index_by_node[ref.node_id] = len(image_refs)
             elif ref.kind == "text":
                 text_refs.append(ref)
-                if (ref.text or "").strip():
-                    reference_texts.append(
-                        {"title": ref.title or "参考文本", "text": (ref.text or "").strip()}
-                    )
 
     referenced_text_ids: set[str] = set()
 
@@ -118,17 +126,21 @@ def resolve_canvas_generation_inputs(body: CanvasGenerateRequest) -> ResolvedCan
     resolved = _TEXT_SLOT_TOKEN_RE.sub(_replace_text_slot, body.prompt or "")
     resolved = _LEGACY_REF_TOKEN_RE.sub(_replace_legacy_ref, resolved).strip()
 
+    unreferenced_text_refs = [
+        ref
+        for ref in text_refs
+        if ref.node_id not in referenced_text_ids and (ref.text or "").strip()
+    ]
+    reference_texts = [
+        {"title": ref.title or "参考文本", "text": (ref.text or "").strip()}
+        for ref in unreferenced_text_refs
+    ]
+
     # For image/video generation, if user connected upstream text nodes without using @mention,
     # append them cleanly so connected text context is never silently dropped.
-    if body.kind in ("image", "video"):
-        unreferenced_texts = [
-            (ref.text or "").strip()
-            for ref in body.references
-            if ref.kind == "text" and ref.node_id not in referenced_text_ids and (ref.text or "").strip()
-        ]
-        if unreferenced_texts:
-            prefix = "\n".join(unreferenced_texts)
-            resolved = f"{prefix}\n{resolved}".strip() if resolved else prefix
+    if body.kind in ("image", "video") and unreferenced_text_refs:
+        prefix = "\n".join((ref.text or "").strip() for ref in unreferenced_text_refs)
+        resolved = f"{prefix}\n{resolved}".strip() if resolved else prefix
 
     if body.kind in ("image", "video") and not resolved:
         raise AppError(400, "prompt_missing", "请输入提示词或连接包含文本内容的参考节点")

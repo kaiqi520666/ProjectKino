@@ -11,6 +11,7 @@ from app.core.schemas import ApiResponse
 from app.db.session import get_session
 from app.modules.auth.deps import get_current_user
 from app.modules.auth.models import User
+from app.modules.canvas.generation import find_removed_prompt_refs
 from app.modules.catalog.models import AiModel, AiProvider
 from app.modules.catalog.service import quote_image_price, quote_video_price
 from app.modules.credits.service import assert_llm_balance_positive, freeze_media_credits
@@ -1092,6 +1093,17 @@ async def batch_generate_clip_videos(
                 BatchSkippedClipOut(clip_id=clip.id, clip_index=clip.clip_index, reason="缺少视频提示词")
             )
             continue
+        removed_refs = find_removed_prompt_refs(prompt_text)
+        if removed_refs:
+            labels = "、".join(removed_refs[:3])
+            skipped.append(
+                BatchSkippedClipOut(
+                    clip_id=clip.id,
+                    clip_index=clip.clip_index,
+                    reason=f"提示词包含已移除的引用（{labels}），请先清理后再生成",
+                )
+            )
+            continue
         if len(prompt_text) > max_prompt_chars:
             skipped.append(
                 BatchSkippedClipOut(
@@ -1267,6 +1279,14 @@ async def generate_clip_video(
     prompt = (clip.prompt or "").strip()
     if not prompt:
         raise AppError(400, "prompt_missing", "片段提示词为空，无法生成视频")
+    removed_refs = find_removed_prompt_refs(prompt)
+    if removed_refs:
+        labels = "、".join(removed_refs[:3])
+        raise AppError(
+            400,
+            "prompt_has_removed_reference",
+            f"提示词包含已移除的引用（{labels}），请先删除或重新 @ 引用素材后再生成",
+        )
 
     existing_active = await session.scalar(
         select(Job.id).where(
