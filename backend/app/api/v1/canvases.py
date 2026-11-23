@@ -4,7 +4,11 @@ from fastapi import APIRouter, Depends, Header, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.projects import _validate_image_model_and_infra, _validate_video_model_and_infra
+from app.api.v1.projects import (
+    _check_video_ref_limits,
+    _validate_image_model_and_infra,
+    _validate_video_model_and_infra,
+)
 from app.core.errors import AppError
 from app.core.schemas import ApiResponse
 from app.db.session import get_session
@@ -273,7 +277,6 @@ async def generate_canvas_node_endpoint(
     min_duration = limits["minDuration"]
     max_duration = limits["maxDuration"]
     max_prompt_chars = limits["maxPromptChars"]
-    max_ref_images = limits["maxReferenceImages"]
 
     duration_seconds = body.duration_seconds if body.duration_seconds is not None else min_duration
     if duration_seconds < min_duration or duration_seconds > max_duration:
@@ -294,15 +297,15 @@ async def generate_canvas_node_endpoint(
                 f"当前为 {len(resolved.resolved_prompt)} 字"
             ),
         )
-    if len(resolved.reference_urls) > max_ref_images:
-        raise AppError(
-            400,
-            "reference_images_exceed_limit",
-            (
-                f"{model.display_name} 最多支持 {max_ref_images} 张参考图，"
-                f"当前连接了 {len(resolved.reference_urls)} 张"
-            ),
-        )
+    limit_err = _check_video_ref_limits(
+        model_name=model.display_name,
+        image_count=len(resolved.reference_urls),
+        video_count=len(resolved.reference_video_urls),
+        audio_count=len(resolved.reference_audio_urls),
+        limits=limits,
+    )
+    if limit_err is not None:
+        raise AppError(400, limit_err[0], limit_err[1])
 
     amount, rate_snapshot = await quote_video_price(
         session,
@@ -327,6 +330,8 @@ async def generate_canvas_node_endpoint(
             "durationSeconds": duration_seconds,
             "prompt": resolved.resolved_prompt,
             "referenceUrls": resolved.reference_urls,
+            "referenceVideoUrls": resolved.reference_video_urls,
+            "referenceAudioUrls": resolved.reference_audio_urls,
         },
         step_total=4,
         step_label="画布生视频任务已排队",

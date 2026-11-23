@@ -882,7 +882,12 @@ async def _validate_video_model_and_infra(
     min_duration = int(caps.get("minDuration") or 4)
     max_duration = int(caps.get("maxDuration") or 15)
     max_prompt_chars = int(caps.get("maxPromptChars") or 5000)
-    max_ref_images = int(caps.get("maxReferenceImages") or 9)
+    raw_max_images = caps.get("maxReferenceImages")
+    raw_max_videos = caps.get("maxReferenceVideos")
+    raw_max_audios = caps.get("maxReferenceAudios")
+    max_ref_images = int(raw_max_images) if raw_max_images is not None else 9
+    max_ref_videos = int(raw_max_videos) if raw_max_videos is not None else 0
+    max_ref_audios = int(raw_max_audios) if raw_max_audios is not None else 0
 
     allowed_resolutions = caps.get("resolutions") or ["720p", "1080p"]
     if resolution not in allowed_resolutions:
@@ -918,32 +923,89 @@ async def _validate_video_model_and_infra(
         "maxDuration": max_duration,
         "maxPromptChars": max_prompt_chars,
         "maxReferenceImages": max_ref_images,
+        "maxReferenceVideos": max_ref_videos,
+        "maxReferenceAudios": max_ref_audios,
     }
 
 
-def _resolve_clip_reference_urls(
+def _resolve_clip_references(
     clip: StoryboardClip,
     *,
     by_uuid: dict[str, ProjectAsset],
     by_code: dict[str, ProjectAsset],
-) -> tuple[list[str], str | None]:
+) -> tuple[list[str], list[str], list[str], str | None]:
     ordered_refs = sorted(
         list(clip.references or []),
         key=lambda item: int(item.get("index", 999)) if isinstance(item, dict) else 999,
     )
-    urls: list[str] = []
+    image_urls: list[str] = []
+    video_urls: list[str] = []
+    audio_urls: list[str] = []
     for ref in ordered_refs:
         if not isinstance(ref, dict):
             continue
         ref_id = str(ref.get("assetId") or "").strip()
         ref_code = str(ref.get("assetCode") or "").strip()
         matched = by_uuid.get(ref_id) or by_code.get(ref_code) or by_code.get(ref_id)
-        ref_name = (matched.name if matched else str(ref.get("name") or ref_id or "参考素材")).strip()
-        img_url = (matched.image_url or "").strip() if matched else ""
-        if not img_url.startswith(("http://", "https://")):
-            return [], ref_name
-        urls.append(img_url)
-    return urls, None
+        if matched is not None:
+            ref_name = (matched.name or ref_id or "参考素材").strip()
+            img_url = (matched.image_url or "").strip()
+            if not img_url.startswith(("http://", "https://")):
+                return [], [], [], ref_name
+            image_urls.append(img_url)
+            continue
+
+        direct_url = str(ref.get("mediaUrl") or "").strip()
+        ref_name = str(ref.get("name") or ref_id or "参考素材").strip()
+        if not direct_url.startswith(("http://", "https://")):
+            return [], [], [], ref_name
+        media_kind = str(ref.get("mediaKind") or "image").strip().lower()
+        if media_kind == "video":
+            video_urls.append(direct_url)
+        elif media_kind == "audio":
+            audio_urls.append(direct_url)
+        else:
+            image_urls.append(direct_url)
+    return image_urls, video_urls, audio_urls, None
+
+
+def _check_video_ref_limits(
+    *,
+    model_name: str,
+    image_count: int,
+    video_count: int,
+    audio_count: int,
+    limits: dict[str, int],
+) -> tuple[str, str] | None:
+    max_images = limits["maxReferenceImages"]
+    max_videos = limits["maxReferenceVideos"]
+    max_audios = limits["maxReferenceAudios"]
+    if image_count > max_images:
+        return (
+            "reference_images_exceed_limit",
+            f"{model_name} 最多支持 {max_images} 张参考图，当前引用了 {image_count} 张",
+        )
+    if video_count > max_videos:
+        if max_videos <= 0:
+            return (
+                "reference_videos_not_supported",
+                f"{model_name} 不支持参考视频，请移除视频素材或切换支持视频参考的模型",
+            )
+        return (
+            "reference_videos_exceed_limit",
+            f"{model_name} 最多支持 {max_videos} 个参考视频，当前引用了 {video_count} 个",
+        )
+    if audio_count > max_audios:
+        if max_audios <= 0:
+            return (
+                "reference_audios_not_supported",
+                f"{model_name} 不支持参考音频，请移除音频素材或切换支持音频参考的模型",
+            )
+        return (
+            "reference_audios_exceed_limit",
+            f"{model_name} 最多支持 {max_audios} 个参考音频，当前引用了 {audio_count} 个",
+        )
+    return None
 
 
 @router.post(
@@ -972,7 +1034,6 @@ async def batch_generate_clip_videos(
     min_duration = limits["minDuration"]
     max_duration = limits["maxDuration"]
     max_prompt_chars = limits["maxPromptChars"]
-    max_ref_images = limits["maxReferenceImages"]
 
     if body.duration_seconds is not None and (
         body.duration_seconds < min_duration or body.duration_seconds > max_duration
@@ -1013,7 +1074,7 @@ async def batch_generate_clip_videos(
     by_uuid = {str(a.id): a for a in project_assets}
     by_code = {a.asset_code: a for a in project_assets}
 
-    eligible: list[tuple[StoryboardClip, list[str], Decimal, dict]] = []
+    eligible: list[tuple[StoryboardClip, list[str], list[str], list[str], Decimal, dict]] = []
     skipped: list[BatchSkippedClipOut] = []
     for cid in unique_ids:
         clip = clips_by_id.get(cid)
@@ -1054,22 +1115,31 @@ async def batch_generate_clip_videos(
                 )
             )
             continue
-        ref_urls, missing_ref = _resolve_clip_reference_urls(clip, by_uuid=by_uuid, by_code=by_code)
+        ref_images, ref_videos, ref_audios, missing_ref = _resolve_clip_references(
+            clip, by_uuid=by_uuid, by_code=by_code
+        )
         if missing_ref is not None:
             skipped.append(
                 BatchSkippedClipOut(
                     clip_id=clip.id,
                     clip_index=clip.clip_index,
-                    reason=f"参考素材「{missing_ref}」缺少公网图片",
+                    reason=f"参考素材「{missing_ref}」缺少公网媒体文件",
                 )
             )
             continue
-        if len(ref_urls) > max_ref_images:
+        limit_err = _check_video_ref_limits(
+            model_name=model.display_name,
+            image_count=len(ref_images),
+            video_count=len(ref_videos),
+            audio_count=len(ref_audios),
+            limits=limits,
+        )
+        if limit_err is not None:
             skipped.append(
                 BatchSkippedClipOut(
                     clip_id=clip.id,
                     clip_index=clip.clip_index,
-                    reason=f"参考图 {len(ref_urls)} 张超过模型上限 {max_ref_images} 张",
+                    reason=limit_err[1],
                 )
             )
             continue
@@ -1080,16 +1150,16 @@ async def batch_generate_clip_videos(
             rule_key=body.resolution,
             usage_multiplier=user.usage_multiplier,
         )
-        eligible.append((clip, ref_urls, amount, rate_snapshot))
+        eligible.append((clip, ref_images, ref_videos, ref_audios, amount, rate_snapshot))
 
     if not eligible:
         raise AppError(
             400,
             "no_eligible_clips",
-            "所选片段当前均不可生成视频（可能正在生成、缺少参考图或超出模型时长上限）",
+            "所选片段当前均不可生成视频（可能正在生成、缺少参考素材或超出模型限制）",
         )
 
-    total_cost = sum((item[2] for item in eligible), Decimal("0.0000")).quantize(Decimal("0.0001"))
+    total_cost = sum((item[4] for item in eligible), Decimal("0.0000")).quantize(Decimal("0.0001"))
     total_duration = sum(
         (body.duration_seconds if body.duration_seconds is not None else item[0].duration_seconds)
         for item in eligible
@@ -1110,7 +1180,7 @@ async def batch_generate_clip_videos(
 
     batch_id = uuid4().hex[:16]
     created_jobs: list[Job] = []
-    for clip, ref_urls, amount, rate_snapshot in eligible:
+    for clip, ref_images, ref_videos, ref_audios, amount, rate_snapshot in eligible:
         effective_duration = (
             body.duration_seconds
             if body.duration_seconds is not None
@@ -1133,7 +1203,9 @@ async def batch_generate_clip_videos(
                 "ratio": ratio,
                 "durationSeconds": effective_duration,
                 "prompt": clip.prompt.strip(),
-                "referenceUrls": ref_urls,
+                "referenceUrls": ref_images,
+                "referenceVideoUrls": ref_videos,
+                "referenceAudioUrls": ref_audios,
             },
             step_total=4,
             step_label=f"片段 {clip.clip_index} 批量生视频已排队",
@@ -1216,7 +1288,6 @@ async def generate_clip_video(
     min_duration = limits["minDuration"]
     max_duration = limits["maxDuration"]
     max_prompt_chars = limits["maxPromptChars"]
-    max_ref_images = limits["maxReferenceImages"]
 
     effective_duration = body.duration_seconds if body.duration_seconds is not None else clip.duration_seconds
     if len(prompt) > max_prompt_chars:
@@ -1242,22 +1313,24 @@ async def generate_clip_video(
     )
     by_uuid = {str(a.id): a for a in project_assets}
     by_code = {a.asset_code: a for a in project_assets}
-    reference_urls, missing_ref = _resolve_clip_reference_urls(clip, by_uuid=by_uuid, by_code=by_code)
+    ref_images, ref_videos, ref_audios, missing_ref = _resolve_clip_references(
+        clip, by_uuid=by_uuid, by_code=by_code
+    )
     if missing_ref is not None:
         raise AppError(
             400,
             "reference_image_missing",
-            f"参考素材「{missing_ref}」尚未生成或上传公网图片，请先到资产库完成生图或上传",
+            f"参考素材「{missing_ref}」尚未生成或上传公网媒体文件，请先完成生图或上传",
         )
-    if len(reference_urls) > max_ref_images:
-        raise AppError(
-            400,
-            "reference_images_exceed_limit",
-            (
-                f"{model.display_name} 最多支持 {max_ref_images} 张参考图，"
-                f"当前片段引用了 {len(reference_urls)} 张"
-            ),
-        )
+    limit_err = _check_video_ref_limits(
+        model_name=model.display_name,
+        image_count=len(ref_images),
+        video_count=len(ref_videos),
+        audio_count=len(ref_audios),
+        limits=limits,
+    )
+    if limit_err is not None:
+        raise AppError(400, limit_err[0], limit_err[1])
     amount, rate_snapshot = await quote_video_price(
         session,
         model_id=model.id,
@@ -1278,7 +1351,9 @@ async def generate_clip_video(
             "ratio": ratio,
             "durationSeconds": clip.duration_seconds,
             "prompt": prompt,
-            "referenceUrls": reference_urls,
+            "referenceUrls": ref_images,
+            "referenceVideoUrls": ref_videos,
+            "referenceAudioUrls": ref_audios,
         },
         step_total=4,
         step_label=f"片段 {clip.clip_index} 视频生成任务已排队",

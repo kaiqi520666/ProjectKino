@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, useTemplateRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useTemplateRef, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   AlertCircle,
@@ -12,7 +12,10 @@ import {
   Download,
   Film,
   History,
+  Image as ImageIcon,
   Loader2,
+  Music,
+  Pause,
   Play,
   Plus,
   RefreshCw,
@@ -35,6 +38,8 @@ import UiButton from '@/components/ui/UiButton.vue'
 import UiDialog from '@/components/ui/UiDialog.vue'
 import UiTextarea from '@/components/ui/UiTextarea.vue'
 import VideoPreview from '@/components/ui/VideoPreview.vue'
+import AssetLibraryDialog from '@/features/assets/AssetLibraryDialog.vue'
+import type { AssetLibraryItem } from '@/features/assets/asset-library-types'
 import { useAuthStore } from '@/stores/auth'
 import { useGenerationStore } from '@/stores/generation'
 import { useUiStore } from '@/stores/ui'
@@ -55,6 +60,7 @@ import {
   updateClipApi,
   watchJob,
 } from '../api'
+import type { PersistedClipReference } from '../api-types'
 import { assetCategoryItems, assetKindIcons } from '../asset-icons'
 import { defaultSegmentDuration } from '../components/drama-creation'
 import EpisodeAssetsSidebar from '../components/EpisodeAssetsSidebar.vue'
@@ -97,13 +103,15 @@ const selectMode = ref(false)
 const checkedClipIds = ref<string[]>([])
 const reorderingClips = ref(false)
 
-const previewClip = ref<{ id: number; src: string; poster?: string } | null>(null)
+const previewClip = ref<{ id: number; src: string; poster?: string; title?: string } | null>(null)
 const previewOpen = computed({
   get: () => previewClip.value !== null,
   set: (value: boolean) => {
     if (!value) previewClip.value = null
   },
 })
+const refAudioEl = useTemplateRef<HTMLAudioElement>('refAudioEl')
+const playingRefAudioId = ref<string | null>(null)
 const generating = ref(false)
 const clipToDelete = ref<number>()
 const selectedVideoModelId = ref('')
@@ -320,23 +328,49 @@ const references = computed(() => {
   const listed = clip.value?.references
   if (listed?.length) {
     const assets = resolvedStoryboardAssets.value
+    let imgIdx = 0
+    let vidIdx = 0
+    let audIdx = 0
     return listed.map((reference) => {
       const live = projectAssetsById.value.get(reference.assetId)
       const boardAsset = assets.find((asset) => asset.id === reference.assetId)
       const siblings = live ? findAssetSiblings(allAssets, live) : []
+      const mediaKind: 'image' | 'video' | 'audio' = live
+        ? 'image'
+        : reference.mediaKind
+          ?? (reference.kind === 'video' || reference.kind === 'audio' ? reference.kind : 'image')
+      const slotLabel =
+        mediaKind === 'video'
+          ? `视频${++vidIdx}`
+          : mediaKind === 'audio'
+            ? `音频${++audIdx}`
+            : `图片${++imgIdx}`
+      const icon =
+        mediaKind === 'video'
+          ? Film
+          : mediaKind === 'audio'
+            ? Music
+            : reference.kind === 'character' || reference.kind === 'scene' || reference.kind === 'prop'
+              ? assetKindIcons[reference.kind]
+              : ImageIcon
+      const mediaUrl = live?.imageUrl ?? boardAsset?.imageUrl ?? reference.mediaUrl
       return {
         id: reference.assetId,
         name: live?.name || boardAsset?.name || reference.name,
         displayName: live ? assetDisplayName(live) : (boardAsset?.name || reference.name),
         stateLabel: live ? assetStateLabel(live) : '',
         kind: reference.kind,
+        mediaKind,
+        mediaUrl,
+        slotLabel,
         index: reference.index as number | undefined,
-        icon: assetKindIcons[reference.kind],
-        imageUrl: live?.imageUrl ?? boardAsset?.imageUrl,
+        icon,
+        imageUrl: mediaKind === 'image' ? mediaUrl : undefined,
         siblings,
       }
     })
   }
+  let imgIdx = 0
   return assetGroups.value.flatMap(({ icon, assets }) =>
     assets.filter((asset) => clip.value?.assetIds.includes(asset.id)).map((asset) => {
       const live = projectAssetsById.value.get(asset.id)
@@ -347,6 +381,9 @@ const references = computed(() => {
         displayName: live ? assetDisplayName(live) : asset.name,
         stateLabel: live ? assetStateLabel(live) : '',
         kind: asset.kind,
+        mediaKind: 'image' as const,
+        mediaUrl: asset.imageUrl,
+        slotLabel: `图片${++imgIdx}`,
         icon,
         imageUrl: asset.imageUrl,
         index: undefined as number | undefined,
@@ -356,14 +393,40 @@ const references = computed(() => {
   )
 })
 
-const availablePickerAssets = computed(() => {
-  const used = new Set(references.value.map((r) => r.id))
-  return (props.project.assets ?? []).filter((item) => !used.has(item.id))
-})
-
 const currentVideoModel = computed(
   () => videoModels.value.find((m) => m.id === selectedVideoModelId.value) ?? videoModels.value[0] ?? null,
 )
+
+const usedReferenceKeys = computed(() => {
+  const keys: string[] = []
+  for (const refItem of references.value) {
+    keys.push(refItem.id)
+    const live = projectAssetsById.value.get(refItem.id)
+    if (live?.backendId) keys.push(live.backendId)
+    if (refItem.mediaUrl) keys.push(refItem.mediaUrl)
+  }
+  return keys
+})
+
+const remainingRefCaps = computed(() => {
+  const caps = currentVideoModel.value?.capabilities
+  const maxImg = caps?.maxReferenceImages !== undefined && caps.maxReferenceImages !== null ? Number(caps.maxReferenceImages) : 9
+  const maxVid = caps?.maxReferenceVideos !== undefined && caps.maxReferenceVideos !== null ? Number(caps.maxReferenceVideos) : 0
+  const maxAud = caps?.maxReferenceAudios !== undefined && caps.maxReferenceAudios !== null ? Number(caps.maxReferenceAudios) : 0
+  let curImg = 0
+  let curVid = 0
+  let curAud = 0
+  for (const refItem of references.value) {
+    if (refItem.mediaKind === 'video') curVid += 1
+    else if (refItem.mediaKind === 'audio') curAud += 1
+    else curImg += 1
+  }
+  return {
+    image: Math.max(0, maxImg - curImg),
+    video: Math.max(0, maxVid - curVid),
+    audio: Math.max(0, maxAud - curAud),
+  }
+})
 
 const estimatedVideoQuote = computed(() => {
   const dur = selectedDuration.value || clip.value?.durationSeconds || 10
@@ -671,9 +734,7 @@ function updatePrompt(value: string) {
   }
 }
 
-async function persistClipReferences(
-  nextRefs: Array<{ index: number; assetId: string; assetCode?: string; name: string; kind: StudioAsset['kind'] }>,
-) {
+async function persistClipReferences(nextRefs: PersistedClipReference[]) {
   if (!clip.value?.backendId || !props.project.persisted) return
   try {
     await updateClipApi(props.project.id, clip.value.backendId, { references: nextRefs })
@@ -684,45 +745,86 @@ async function persistClipReferences(
   }
 }
 
-async function addReferenceAsset(asset: StudioAsset) {
-  if (!clip.value) return
-  const current = references.value.map((ref, idx) => {
+function serializeExistingRefs(): PersistedClipReference[] {
+  return references.value.map((ref, idx) => {
     const live = projectAssetsById.value.get(ref.id)
     return {
       index: idx + 1,
       assetId: live?.backendId || ref.id,
-      assetCode: ref.id,
-      name: ref.name,
+      assetCode: live ? ref.id : undefined,
+      name: ref.displayName,
       kind: ref.kind,
+      ...(!live && ref.mediaUrl ? { mediaKind: ref.mediaKind, mediaUrl: ref.mediaUrl } : {}),
     }
   })
-  current.push({
-    index: current.length + 1,
-    assetId: asset.backendId || asset.id,
-    assetCode: asset.id,
-    name: asset.name,
-    kind: asset.kind,
-  })
-  pickerOpen.value = false
+}
+
+async function addReferenceLibraryItems(items: AssetLibraryItem[]) {
+  if (!clip.value || !items.length) return
+  const current = serializeExistingRefs()
+  for (const item of items) {
+    if (item.source === 'project' && item.projectAsset) {
+      const asset = item.projectAsset
+      current.push({
+        index: current.length + 1,
+        assetId: asset.backendId || asset.id,
+        assetCode: asset.id,
+        name: assetDisplayName(asset),
+        kind: asset.kind,
+      })
+    } else if (item.mediaUrl && (item.kind === 'image' || item.kind === 'video' || item.kind === 'audio')) {
+      current.push({
+        index: current.length + 1,
+        assetId: item.id,
+        name: item.title,
+        kind: item.kind,
+        mediaKind: item.kind,
+        mediaUrl: item.mediaUrl,
+      })
+    }
+  }
   await persistClipReferences(current)
 }
 
 async function removeReferenceAsset(assetCode: string) {
   if (!clip.value) return
-  const next = references.value
-    .filter((ref) => ref.id !== assetCode)
-    .map((ref, idx) => {
-      const live = projectAssetsById.value.get(ref.id)
-      return {
-        index: idx + 1,
-        assetId: live?.backendId || ref.id,
-        assetCode: ref.id,
-        name: ref.name,
-        kind: ref.kind,
-      }
-    })
+  if (playingRefAudioId.value === assetCode) stopRefAudio()
+  const next = serializeExistingRefs()
+    .filter((_, idx) => references.value[idx]?.id !== assetCode)
+    .map((ref, idx) => ({ ...ref, index: idx + 1 }))
   await persistClipReferences(next)
 }
+
+function stopRefAudio() {
+  if (refAudioEl.value) {
+    refAudioEl.value.pause()
+    refAudioEl.value.currentTime = 0
+  }
+  playingRefAudioId.value = null
+}
+
+function toggleRefAudio(id: string, url?: string) {
+  const el = refAudioEl.value
+  if (!el || !url) return
+  if (playingRefAudioId.value === id) {
+    stopRefAudio()
+    return
+  }
+  el.src = url
+  playingRefAudioId.value = id
+  void el.play().catch(() => {
+    playingRefAudioId.value = null
+  })
+}
+
+function openRefVideoPreview(url: string, title: string) {
+  stopRefAudio()
+  previewClip.value = { id: 0, src: url, title }
+}
+
+onBeforeUnmount(() => {
+  stopRefAudio()
+})
 
 async function switchReferenceVariant(slotIndex: number, target: StudioAsset) {
   if (!clip.value || !props.project.persisted) return
@@ -732,7 +834,7 @@ async function switchReferenceVariant(slotIndex: number, target: StudioAsset) {
     ui.notify(`「${assetDisplayName(target)}」已存在于当前片段的其他参考槽位中`, 'info')
     return
   }
-  const next = references.value.map((ref, idx) => {
+  const next = serializeExistingRefs().map((ref, idx) => {
     if (idx === slotIndex) {
       return {
         index: idx + 1,
@@ -742,17 +844,10 @@ async function switchReferenceVariant(slotIndex: number, target: StudioAsset) {
         kind: target.kind,
       }
     }
-    const live = projectAssetsById.value.get(ref.id)
-    return {
-      index: idx + 1,
-      assetId: live?.backendId || ref.id,
-      assetCode: ref.id,
-      name: ref.displayName,
-      kind: ref.kind,
-    }
+    return ref
   })
   await persistClipReferences(next)
-  ui.notify(`已将图片${slotIndex + 1}切换为「${assetDisplayName(target)}」（提示词无需修改）`, 'success')
+  ui.notify(`已将${currentSlot.slotLabel}切换为「${assetDisplayName(target)}」`, 'success')
 }
 
 async function generateClipVideo() {
@@ -1024,23 +1119,44 @@ async function deleteClip() {
               <h2 id="episode-clip-title"><Clapperboard :size="17" aria-hidden="true" />片段 {{ clip.id }}</h2>
             </div>
             <ul class="episode-reference-list" aria-label="片段参考素材">
-              <li v-for="(asset, slotIndex) in references" :key="asset.id">
+              <li v-for="(asset, slotIndex) in references" :key="`${asset.id}-${slotIndex}`">
                 <div class="episode-reference-thumb-wrap">
-                  <ImagePreview v-if="asset.imageUrl" :src="asset.imageUrl" :title="asset.displayName">
+                  <ImagePreview v-if="asset.mediaKind === 'image' && asset.imageUrl" :src="asset.imageUrl" :title="asset.displayName">
                     <template #trigger>
                       <button type="button" class="episode-asset-thumb" :aria-label="'预览片段参考 ' + asset.displayName"><img :src="asset.imageUrl" alt="" /></button>
                     </template>
                   </ImagePreview>
+                  <button
+                    v-else-if="asset.mediaKind === 'video' && asset.mediaUrl"
+                    type="button"
+                    class="episode-asset-thumb episode-asset-thumb--video"
+                    :aria-label="'预览参考视频 ' + asset.displayName"
+                    @click="openRefVideoPreview(asset.mediaUrl, asset.displayName)"
+                  >
+                    <video :src="`${asset.mediaUrl}#t=0.05`" preload="metadata" muted playsinline />
+                    <span class="episode-ref-play-dot"><Play :size="12" /></span>
+                  </button>
+                  <button
+                    v-else-if="asset.mediaKind === 'audio' && asset.mediaUrl"
+                    type="button"
+                    class="episode-asset-thumb episode-asset-thumb--audio"
+                    :class="{ 'is-playing': playingRefAudioId === asset.id }"
+                    :aria-label="(playingRefAudioId === asset.id ? '暂停 ' : '试听 ') + asset.displayName"
+                    @click="toggleRefAudio(asset.id, asset.mediaUrl)"
+                  >
+                    <Pause v-if="playingRefAudioId === asset.id" :size="18" />
+                    <Music v-else :size="18" />
+                  </button>
                   <span v-else class="episode-asset-thumb">
                     <component :is="asset.icon" :size="20" :stroke-width="1.5" aria-hidden="true" />
                   </span>
-                  <span v-if="asset.index" class="episode-reference-no">图片{{ asset.index }}</span>
+                  <span class="episode-reference-no">{{ asset.slotLabel }}</span>
                   <button
                     v-if="project.persisted && clip.backendId"
                     type="button"
                     class="episode-reference-remove"
                     :aria-label="`移除参考 ${asset.displayName}`"
-                    title="移除该参考素材"
+                    title="移除"
                     @click="removeReferenceAsset(asset.id)"
                   >
                     <X :size="11" aria-hidden="true" />
@@ -1048,7 +1164,7 @@ async function deleteClip() {
                 </div>
                 <span class="episode-asset-name" :title="asset.displayName">{{ asset.name }}</span>
                 <DropdownMenuRoot v-if="project.persisted && clip.backendId && asset.siblings.length >= 2">
-                  <DropdownMenuTrigger type="button" class="episode-variant-trigger" :title="`切换「${asset.name}」的造型/时段/状态`">
+                  <DropdownMenuTrigger type="button" class="episode-variant-trigger" :title="`切换「${asset.name}」变体`">
                     <span>{{ asset.stateLabel }}</span>
                     <ChevronDown :size="11" aria-hidden="true" />
                   </DropdownMenuTrigger>
@@ -1078,8 +1194,7 @@ async function deleteClip() {
                   class="episode-reference-add"
                   variant="secondary"
                   size="sm"
-                  :disabled="!project.persisted || !clip.backendId || !availablePickerAssets.length"
-                  :title="availablePickerAssets.length ? '从项目资产中添加参考图' : '项目所有资产已添加'"
+                  :disabled="!project.persisted || !clip.backendId"
                   @click="pickerOpen = true"
                 >
                   <template #leading><Plus :size="17" aria-hidden="true" /></template>
@@ -1231,33 +1346,27 @@ async function deleteClip() {
       @submit="submitBatchClipVideos"
     />
 
-    <UiDialog v-model:open="pickerOpen" title="添加片段参考素材" description="点击下方项目资产即可按序追加为当前片段的参考图片（图片N）。">
-      <ul v-if="availablePickerAssets.length" class="picker-asset-grid">
-        <li v-for="asset in availablePickerAssets" :key="asset.id">
-          <button type="button" class="picker-asset-card" @click="addReferenceAsset(asset)">
-            <span class="picker-asset-thumb">
-              <img v-if="asset.imageUrl" :src="asset.imageUrl" alt="" />
-              <component :is="assetKindIcons[asset.kind]" v-else :size="20" aria-hidden="true" />
-            </span>
-            <span class="picker-asset-info">
-              <strong :title="assetDisplayName(asset)">{{ assetDisplayName(asset) }}</strong>
-              <small :class="{ 'is-ready': !!asset.imageUrl }">{{ asset.imageUrl ? '已有图片' : '暂未生图' }}</small>
-            </span>
-          </button>
-        </li>
-      </ul>
-      <p v-else class="episode-meta">项目中的所有资产均已添加到该片段。</p>
-      <template #footer>
-        <UiButton variant="ghost" @click="pickerOpen = false">关闭</UiButton>
-      </template>
-    </UiDialog>
+    <AssetLibraryDialog
+      v-model:open="pickerOpen"
+      title="素材库"
+      mode="multiple"
+      :allowed-kinds="['image', 'video', 'audio']"
+      :project-assets="project.assets ?? []"
+      default-source="project"
+      :disabled-keys="usedReferenceKeys"
+      :max-by-kind="remainingRefCaps"
+      require-http-url
+      @confirm="addReferenceLibraryItems"
+    />
+
+    <audio ref="refAudioEl" hidden @ended="playingRefAudioId = null" />
 
     <VideoPreview
       v-if="previewClip"
       v-model:open="previewOpen"
       :src="previewClip.src"
       :poster="previewClip.poster"
-      :title="`片段 ${previewClip.id}`"
+      :title="previewClip.title || `片段 ${previewClip.id}`"
       autoplay
     />
 
@@ -1571,44 +1680,29 @@ button.episode-asset-thumb { width: 100%; cursor: zoom-in; }
 .episode-clip-job-close:hover { opacity: 1; background: rgb(255 255 255 / 8%); }
 .episode-clip-empty { grid-row: 1 / 3; align-self: center; }
 .episode-empty { align-self: center; }
-.picker-asset-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: 10px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  max-height: 360px;
-  overflow-y: auto;
-}
-.picker-asset-card {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  padding: 6px;
-  border: 1px solid var(--border-control);
-  border-radius: 8px;
-  background: var(--color-surface);
-  color: var(--color-text);
-  text-align: left;
-  cursor: pointer;
-}
-.picker-asset-card:is(:hover, :focus-visible) { border-color: var(--color-gold); background: var(--surface-hover); }
-.picker-asset-thumb {
+.episode-asset-thumb--video { position: relative; cursor: pointer; }
+.episode-asset-thumb--video video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.episode-ref-play-dot {
+  position: absolute;
+  inset: 0;
+  margin: auto;
   display: grid;
   place-items: center;
-  width: 100%;
-  aspect-ratio: 4 / 3;
-  overflow: hidden;
-  border-radius: 5px;
-  background: var(--color-elevated);
-  color: var(--color-muted);
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: rgb(10 11 14 / 72%);
+  color: var(--color-gold-soft);
 }
-.picker-asset-thumb img { width: 100%; height: 100%; object-fit: cover; }
-.picker-asset-info { display: flex; flex-direction: column; gap: 2px; padding: 6px 2px 2px; }
-.picker-asset-info strong { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.picker-asset-info small { color: var(--color-muted); font-size: 11px; }
-.picker-asset-info small.is-ready { color: var(--color-success); }
+.episode-asset-thumb--audio {
+  cursor: pointer;
+  background: radial-gradient(circle at 50% 45%, rgb(212 175 55 / 16%), rgb(18 19 24 / 96%) 74%);
+  color: var(--color-gold-soft);
+}
+.episode-asset-thumb--audio.is-playing {
+  border-color: var(--color-gold);
+  background: var(--gold-tint);
+}
 .episode-variant-trigger {
   display: inline-flex;
   align-items: center;

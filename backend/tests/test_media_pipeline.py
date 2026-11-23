@@ -221,8 +221,10 @@ def test_cangyuan_and_cc_adapters_payload_and_parse():
     cc = CcVideoAdapter()
     v_payload = cc.build_payload(
         upstream_model_id="seedance-2.5",
-        prompt="图片1人物推门",
+        prompt="图片1人物推门，参考视频1运镜，配音频1",
         reference_urls=["https://cdn.example/1.png", "https://cdn.example/2.png"],
+        reference_video_urls=["https://cdn.example/motion.mp4"],
+        reference_audio_urls=["https://cdn.example/bgm.mp3"],
         ratio="16:9",
         resolution="1080p",
         duration=25,
@@ -230,8 +232,75 @@ def test_cangyuan_and_cc_adapters_payload_and_parse():
     assert v_payload["input"]["media"] == [
         {"type": "reference_image", "url": "https://cdn.example/1.png"},
         {"type": "reference_image", "url": "https://cdn.example/2.png"},
+        {"type": "reference_video", "url": "https://cdn.example/motion.mp4"},
+        {"type": "reference_audio", "url": "https://cdn.example/bgm.mp3"},
     ]
     assert v_payload["parameters"] == {"ratio": "16:9", "resolution": "1080p", "duration": 25}
+
+    from types import SimpleNamespace
+
+    from app.api.v1.projects import _check_video_ref_limits, _resolve_clip_references
+
+    asset_row = SimpleNamespace(
+        id="asset-uuid-1",
+        asset_code="C01",
+        name="陈国栋",
+        image_url="https://cdn.example/c01.png",
+    )
+    fake_clip = SimpleNamespace(
+        references=[
+            {
+                "index": 1,
+                "assetId": "asset-uuid-1",
+                "assetCode": "C01",
+                "name": "陈国栋",
+                "kind": "character",
+            },
+            {
+                "index": 2,
+                "assetId": "ua-vid-1",
+                "name": "运镜参考",
+                "kind": "video",
+                "mediaKind": "video",
+                "mediaUrl": "https://cdn.example/ref.mp4",
+            },
+            {
+                "index": 3,
+                "assetId": "ua-aud-1",
+                "name": "雨声",
+                "kind": "audio",
+                "mediaKind": "audio",
+                "mediaUrl": "https://cdn.example/rain.mp3",
+            },
+        ]
+    )
+    imgs, vids, auds, missing = _resolve_clip_references(
+        fake_clip, by_uuid={"asset-uuid-1": asset_row}, by_code={"C01": asset_row}
+    )
+    assert missing is None
+    assert imgs == ["https://cdn.example/c01.png"]
+    assert vids == ["https://cdn.example/ref.mp4"]
+    assert auds == ["https://cdn.example/rain.mp3"]
+    assert (
+        _check_video_ref_limits(
+            model_name="sd-2-c5",
+            image_count=1,
+            video_count=1,
+            audio_count=1,
+            limits={"maxReferenceImages": 9, "maxReferenceVideos": 0, "maxReferenceAudios": 3},
+        )[0]
+        == "reference_videos_not_supported"
+    )
+    assert (
+        _check_video_ref_limits(
+            model_name="cc-sd2-fast-720",
+            image_count=1,
+            video_count=1,
+            audio_count=1,
+            limits={"maxReferenceImages": 9, "maxReferenceVideos": 3, "maxReferenceAudios": 3},
+        )
+        is None
+    )
 
     v_pending = cc.parse({"id": "vid-1", "status": "RUNNING", "progress": 64})
     assert v_pending.status == "pending" and v_pending.progress == 64

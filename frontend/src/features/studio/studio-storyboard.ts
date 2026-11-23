@@ -23,7 +23,9 @@ export interface StoryboardReference {
   index: number
   assetId: string
   name: string
-  kind: 'character' | 'scene' | 'prop'
+  kind: 'character' | 'scene' | 'prop' | 'image' | 'video' | 'audio'
+  mediaKind?: 'image' | 'video' | 'audio'
+  mediaUrl?: string
 }
 
 export interface StoryboardClip {

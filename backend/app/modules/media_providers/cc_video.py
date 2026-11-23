@@ -34,6 +34,8 @@ class CcVideoAdapter:
         upstream_model_id: str,
         prompt: str,
         reference_urls: list[str],
+        reference_video_urls: list[str] | None = None,
+        reference_audio_urls: list[str] | None = None,
         ratio: str,
         resolution: str,
         duration: int,
@@ -48,7 +50,13 @@ class CcVideoAdapter:
             key = str(val)
             mapped[field] = binding.get("values", {}).get(key, val)
 
-        media = [{"type": "reference_image", "url": url} for url in reference_urls]
+        media: list[dict[str, str]] = [
+            {"type": "reference_image", "url": url} for url in reference_urls
+        ]
+        for url in reference_video_urls or []:
+            media.append({"type": "reference_video", "url": url})
+        for url in reference_audio_urls or []:
+            media.append({"type": "reference_audio", "url": url})
         return {
             "model": upstream_model_id,
             "input": {"prompt": prompt, **({"media": media} if media else {})},

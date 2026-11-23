@@ -12,6 +12,7 @@ import type {
   OssUploadPolicyOut,
   PersistedAssetOut,
   PersistedClipOut,
+  PersistedClipReference,
   PersistedEpisodeOut,
   ProjectDetailOut,
   ProjectJobAcceptedOut,
@@ -145,10 +146,12 @@ export async function uploadFileToOss(
   file: File,
   kind: 'image' | 'video' | 'audio' = 'image',
 ): Promise<{ key: string; url: string }> {
+  const defaultExt = kind === 'image' ? 'png' : kind === 'audio' ? 'mp3' : 'mp4'
+  const defaultMime = kind === 'image' ? 'image/png' : kind === 'audio' ? 'audio/mpeg' : 'video/mp4'
   const policy = await requestOssUploadPolicy({
     kind,
-    fileName: file.name || `upload.${kind === 'image' ? 'png' : 'mp4'}`,
-    mimeType: file.type || (kind === 'image' ? 'image/png' : 'video/mp4'),
+    fileName: file.name || `upload.${defaultExt}`,
+    mimeType: file.type || defaultMime,
     size: file.size,
   })
   const form = new FormData()
@@ -248,13 +251,7 @@ export function updateClipApi(
   patch: {
     durationSeconds?: number
     prompt?: string
-    references?: Array<{
-      index: number
-      assetId: string
-      assetCode?: string
-      name: string
-      kind: StudioAssetKind
-    }>
+    references?: PersistedClipReference[]
   },
 ) {
   return unwrap<PersistedClipOut>(http.patch(`/projects/${projectId}/clips/${clipId}`, patch))

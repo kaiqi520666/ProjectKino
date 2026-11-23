@@ -27,7 +27,7 @@ export const workspaceRoutes: RouteRecordRaw[] = [{
       ],
     },
     { path: '/canvas', name: 'canvas', component: () => import('@/features/canvas/views/CanvasListView.vue'), meta: { title: '画布', workspaceNav: 'canvas' } },
-    { path: '/assets', name: 'assets', component: pendingView, meta: { title: '素材', workspaceNav: 'assets' } },
+    { path: '/assets', name: 'assets', component: () => import('@/features/assets/views/AssetsLibraryView.vue'), meta: { title: '素材', workspaceNav: 'assets' } },
     { path: '/account', name: 'account', component: pendingView, meta: { title: '我的', workspaceNav: 'account' } },
   ],
 }]

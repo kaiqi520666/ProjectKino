@@ -60,17 +60,46 @@ const currentModel = computed(
 const minDuration = computed(() => Number(currentModel.value?.capabilities?.minDuration || 4))
 const maxDuration = computed(() => Number(currentModel.value?.capabilities?.maxDuration || 15))
 const maxPromptChars = computed(() => Number(currentModel.value?.capabilities?.maxPromptChars || 5000))
-const maxReferenceImages = computed(() => Number(currentModel.value?.capabilities?.maxReferenceImages ?? 9))
+const maxReferenceImages = computed(() => {
+  const raw = currentModel.value?.capabilities?.maxReferenceImages
+  return raw !== undefined && raw !== null ? Number(raw) : 9
+})
+const maxReferenceVideos = computed(() => {
+  const raw = currentModel.value?.capabilities?.maxReferenceVideos
+  return raw !== undefined && raw !== null ? Number(raw) : 0
+})
+const maxReferenceAudios = computed(() => {
+  const raw = currentModel.value?.capabilities?.maxReferenceAudios
+  return raw !== undefined && raw !== null ? Number(raw) : 0
+})
 
 function missingReferenceName(clip: StoryboardClip): string {
   for (const refItem of clip.references ?? []) {
     const asset = assetsByCode.value.get(refItem.assetId) ?? assetsByBackendId.value.get(refItem.assetId)
-    const url = (asset?.imageUrl ?? '').trim()
+    const url = (asset?.imageUrl ?? refItem.mediaUrl ?? '').trim()
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
       return asset?.name || refItem.name || '参考素材'
     }
   }
   return ''
+}
+
+function countClipRefs(clip: StoryboardClip): { images: number; videos: number; audios: number } {
+  let images = 0
+  let videos = 0
+  let audios = 0
+  for (const refItem of clip.references ?? []) {
+    const asset = assetsByCode.value.get(refItem.assetId) ?? assetsByBackendId.value.get(refItem.assetId)
+    if (asset) {
+      images += 1
+      continue
+    }
+    const kind = refItem.mediaKind ?? (refItem.kind === 'video' || refItem.kind === 'audio' ? refItem.kind : 'image')
+    if (kind === 'video') videos += 1
+    else if (kind === 'audio') audios += 1
+    else images += 1
+  }
+  return { images, videos, audios }
 }
 
 function effectiveClipDuration(clip: StoryboardClip): number {
@@ -86,9 +115,16 @@ function disabledReason(clip: StoryboardClip): string {
   const dur = effectiveClipDuration(clip)
   if (dur < minDuration.value) return `少于 ${minDuration.value}s`
   if (dur > maxDuration.value) return `超 ${maxDuration.value}s`
-  if ((clip.references?.length ?? 0) > maxReferenceImages.value) return `参考图超 ${maxReferenceImages.value} 张`
+  const refCounts = countClipRefs(clip)
+  if (refCounts.images > maxReferenceImages.value) return `参考图超 ${maxReferenceImages.value} 张`
+  if (refCounts.videos > maxReferenceVideos.value) {
+    return maxReferenceVideos.value <= 0 ? '不支持视频参考' : `参考视频超 ${maxReferenceVideos.value} 个`
+  }
+  if (refCounts.audios > maxReferenceAudios.value) {
+    return maxReferenceAudios.value <= 0 ? '不支持音频参考' : `参考音频超 ${maxReferenceAudios.value} 个`
+  }
   const missingRef = missingReferenceName(clip)
-  if (missingRef) return '缺参考图'
+  if (missingRef) return '缺参考素材'
   return ''
 }
 

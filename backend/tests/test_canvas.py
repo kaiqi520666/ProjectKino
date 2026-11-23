@@ -131,10 +131,40 @@ def test_resolve_canvas_generation_inputs_handles_refs_and_rejects_unsupported_m
     assert "冷调雨夜" in resolved.resolved_prompt
     assert "电影质感" in resolved.resolved_prompt
 
-    bad_video_req = CanvasGenerateRequest.model_validate(
+    multimodal_video_req = CanvasGenerateRequest.model_validate(
         {
             "kind": "video",
-            "prompt": "参考视频",
+            "prompt": "参考 {{ref:vid-1}} 的运镜和 {{ref:aud-1}} 的节奏",
+            "references": [
+                {
+                    "nodeId": "vid-1",
+                    "kind": "video",
+                    "title": "运镜参考",
+                    "mediaUrl": "https://image.nodepass.net/framedrama/1/videos/old.mp4",
+                },
+                {
+                    "nodeId": "aud-1",
+                    "kind": "audio",
+                    "title": "配乐",
+                    "mediaUrl": "https://image.nodepass.net/framedrama/1/audios/bgm.mp3",
+                },
+            ],
+        }
+    )
+    resolved_mm = resolve_canvas_generation_inputs(multimodal_video_req)
+    assert resolved_mm.reference_video_urls == [
+        "https://image.nodepass.net/framedrama/1/videos/old.mp4"
+    ]
+    assert resolved_mm.reference_audio_urls == [
+        "https://image.nodepass.net/framedrama/1/audios/bgm.mp3"
+    ]
+    assert "@[视频1]" in resolved_mm.resolved_prompt
+    assert "@[音频1]" in resolved_mm.resolved_prompt
+
+    bad_img_req = CanvasGenerateRequest.model_validate(
+        {
+            "kind": "image",
+            "prompt": "参考视频生图",
             "references": [
                 {
                     "nodeId": "vid-1",
@@ -146,8 +176,8 @@ def test_resolve_canvas_generation_inputs_handles_refs_and_rejects_unsupported_m
         }
     )
     with pytest.raises(AppError) as err:
-        resolve_canvas_generation_inputs(bad_video_req)
-    assert err.value.code == "unsupported_video_reference"
+        resolve_canvas_generation_inputs(bad_img_req)
+    assert err.value.code == "unsupported_image_reference"
 
     img_edit_req = CanvasGenerateRequest.model_validate(
         {

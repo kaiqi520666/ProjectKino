@@ -910,6 +910,12 @@ async def _execute_clip_video_under_slot(
                 duration_seconds = int(payload_in.get("durationSeconds") or clip.duration_seconds)
                 prompt = str(payload_in.get("prompt") or clip.prompt or "").strip()
             reference_urls = [str(u) for u in (payload_in.get("referenceUrls") or []) if str(u).strip()]
+            reference_video_urls = [
+                str(u) for u in (payload_in.get("referenceVideoUrls") or []) if str(u).strip()
+            ]
+            reference_audio_urls = [
+                str(u) for u in (payload_in.get("referenceAudioUrls") or []) if str(u).strip()
+            ]
             if not prompt:
                 raise MediaProviderError("prompt_missing", "提示词为空，无法生成视频", rejected=True)
 
@@ -938,6 +944,8 @@ async def _execute_clip_video_under_slot(
                 upstream_model_id=model.upstream_model_id,
                 prompt=prompt,
                 reference_urls=reference_urls,
+                reference_video_urls=reference_video_urls,
+                reference_audio_urls=reference_audio_urls,
                 ratio=ratio,
                 resolution=resolution,
                 duration=duration_seconds,

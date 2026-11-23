@@ -190,17 +190,22 @@ export const useStudioStore = defineStore('studio', () => {
         const refs = (clip.references ?? []).map((ref) => {
           const code = ref.assetCode || assetByBackendId.get(ref.assetId)?.id || ref.assetId
           const live = assetByCode.get(code) ?? assetByBackendId.get(ref.assetId)
-          epAssetMap.set(code, {
-            id: code,
-            kind: ref.kind,
-            name: live?.name || ref.name,
-            ...(live?.imageUrl ? { imageUrl: live.imageUrl } : {}),
-          })
+          if (live || ref.kind === 'character' || ref.kind === 'scene' || ref.kind === 'prop') {
+            const boardKind = live?.kind ?? (ref.kind === 'character' || ref.kind === 'scene' || ref.kind === 'prop' ? ref.kind : 'prop')
+            epAssetMap.set(code, {
+              id: code,
+              kind: boardKind,
+              name: live?.name || ref.name,
+              ...(live?.imageUrl ? { imageUrl: live.imageUrl } : {}),
+            })
+          }
           return {
             index: ref.index,
             assetId: code,
             name: live?.name || ref.name,
             kind: ref.kind,
+            ...(ref.mediaKind ? { mediaKind: ref.mediaKind } : {}),
+            ...(ref.mediaUrl ? { mediaUrl: ref.mediaUrl } : {}),
           }
         })
         return {

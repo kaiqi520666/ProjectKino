@@ -1,18 +1,16 @@
 import axios from 'axios'
 import { defineStore } from 'pinia'
 import { reactive } from 'vue'
+import { useUserAssetsStore } from '@/features/assets/user-assets-store'
 import type { JobOut } from '@/features/studio/api-types'
 import {
   apiErrorMessage,
   archiveCanvasApi,
   createCanvasApi,
-  createUserAssetApi,
-  deleteUserAssetApi,
   generateCanvasNodeApi,
   getCanvasDetailApi,
   JobFailureError,
   listCanvasesApi,
-  listUserAssetsApi,
   updateCanvasApi,
   uploadFileToOss,
   watchJob,
@@ -371,18 +369,20 @@ export const useCanvasStore = defineStore('canvases', {
     },
 
     async fetchAssets() {
-      const items = await listUserAssetsApi()
+      const userAssets = useUserAssetsStore()
+      const items = await userAssets.ensureLoaded(true)
       this.assets = items.map(mapUserAsset)
       this.assetsLoaded = true
     },
 
     async collectAsset(canvasId: string, node: CanvasNode, title: string) {
+      const userAssets = useUserAssetsStore()
       const { media, text } = node.data
       const kind = outputKind(node.type)
       if (kind === 'text') {
         if (!text?.trim()) return
         if (this.assets.some((a) => a.kind === 'text' && a.title === title && a.text === text.trim())) return
-        const created = await createUserAssetApi({
+        const created = await userAssets.createAsset({
           kind: 'text',
           title,
           textContent: text.trim(),
@@ -394,7 +394,7 @@ export const useCanvasStore = defineStore('canvases', {
       }
       if (!media || !isPersistedMediaUrl(media.url)) return
       if (this.assets.some((a) => a.title === title && a.media?.url === media.url)) return
-      const created = await createUserAssetApi({
+      const created = await userAssets.createAsset({
         kind,
         title,
         mediaKey: media.key ?? null,
@@ -407,7 +407,8 @@ export const useCanvasStore = defineStore('canvases', {
     },
 
     async removeAsset(id: string) {
-      await deleteUserAssetApi(id)
+      const userAssets = useUserAssetsStore()
+      await userAssets.removeAsset(id)
       this.assets = this.assets.filter((item) => item.id !== id)
     },
 

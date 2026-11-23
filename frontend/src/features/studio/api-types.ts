@@ -257,6 +257,19 @@ export interface PersistedAssetOut {
   lastJobError?: string | null
 }
 
+export type ClipReferenceKind = StudioAssetKind | 'image' | 'video' | 'audio'
+export type ClipReferenceMediaKind = 'image' | 'video' | 'audio'
+
+export interface PersistedClipReference {
+  index: number
+  assetId: string
+  assetCode?: string
+  name: string
+  kind: ClipReferenceKind
+  mediaKind?: ClipReferenceMediaKind
+  mediaUrl?: string
+}
+
 export interface PersistedClipOut {
   id: string
   episodeId: string
@@ -264,13 +277,7 @@ export interface PersistedClipOut {
   durationSeconds: number
   prompt: string
   promptCustomized: boolean
-  references: Array<{
-    index: number
-    assetId: string
-    assetCode?: string
-    name: string
-    kind: StudioAssetKind
-  }>
+  references: PersistedClipReference[]
   beats?: [number, number] | null
   blocking?: string | null
   cuts?: BackendCut[] | null

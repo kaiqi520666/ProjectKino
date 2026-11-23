@@ -23,6 +23,8 @@ _CANVAS_TEXT_INSTRUCTIONS = (
 class ResolvedCanvasGeneration:
     resolved_prompt: str
     reference_urls: list[str]
+    reference_video_urls: list[str]
+    reference_audio_urls: list[str]
     reference_texts: list[dict[str, str]]
     reference_images: list[dict[str, str]]
 
@@ -30,7 +32,11 @@ class ResolvedCanvasGeneration:
 def resolve_canvas_generation_inputs(body: CanvasGenerateRequest) -> ResolvedCanvasGeneration:
     refs_by_id: dict[str, CanvasGenerateReference] = {ref.node_id: ref for ref in body.references}
     image_refs: list[CanvasGenerateReference] = []
+    video_refs: list[CanvasGenerateReference] = []
+    audio_refs: list[CanvasGenerateReference] = []
     image_index_by_node: dict[str, int] = {}
+    video_index_by_node: dict[str, int] = {}
+    audio_index_by_node: dict[str, int] = {}
     reference_texts: list[dict[str, str]] = []
 
     if body.kind == "image":
@@ -50,15 +56,15 @@ def resolve_canvas_generation_inputs(body: CanvasGenerateRequest) -> ResolvedCan
                 )
     elif body.kind == "video":
         for ref in body.references:
-            if ref.kind in ("video", "audio"):
-                raise AppError(
-                    400,
-                    "unsupported_video_reference",
-                    "当前视频模型暂不支持直接引用视频或音频节点，请连接图片或文本节点",
-                )
             if ref.kind == "image" and ref.media_url:
                 image_refs.append(ref)
                 image_index_by_node[ref.node_id] = len(image_refs)
+            elif ref.kind == "video" and ref.media_url:
+                video_refs.append(ref)
+                video_index_by_node[ref.node_id] = len(video_refs)
+            elif ref.kind == "audio" and ref.media_url:
+                audio_refs.append(ref)
+                audio_index_by_node[ref.node_id] = len(audio_refs)
             elif ref.kind == "text" and (ref.text or "").strip():
                 reference_texts.append(
                     {"title": ref.title or "参考文本", "text": (ref.text or "").strip()}
@@ -82,6 +88,10 @@ def resolve_canvas_generation_inputs(body: CanvasGenerateRequest) -> ResolvedCan
             return ""
         if ref.kind == "image" and node_id in image_index_by_node:
             return f"@[图片{image_index_by_node[node_id]}]"
+        if ref.kind == "video" and node_id in video_index_by_node:
+            return f"@[视频{video_index_by_node[node_id]}]"
+        if ref.kind == "audio" and node_id in audio_index_by_node:
+            return f"@[音频{audio_index_by_node[node_id]}]"
         if ref.kind == "text" and (ref.text or "").strip():
             referenced_text_ids.add(node_id)
             return (ref.text or "").strip()
@@ -119,6 +129,8 @@ def resolve_canvas_generation_inputs(body: CanvasGenerateRequest) -> ResolvedCan
     return ResolvedCanvasGeneration(
         resolved_prompt=resolved,
         reference_urls=[ref.media_url for ref in image_refs if ref.media_url],
+        reference_video_urls=[ref.media_url for ref in video_refs if ref.media_url],
+        reference_audio_urls=[ref.media_url for ref in audio_refs if ref.media_url],
         reference_texts=reference_texts,
         reference_images=reference_images,
     )

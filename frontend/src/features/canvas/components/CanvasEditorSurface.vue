@@ -3,15 +3,16 @@ import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, type 
 import { ArrowLeft, Check, CloudAlert, Copy, FolderOpen, Grid2X2, Loader2, Magnet, Map as MapIcon, Maximize, Minus, Plus, Trash2, Unlink, Waypoints, X } from 'lucide-vue-next'
 import { Background, ConnectionLineType, MiniMap, setupVueFlow, SimpleBezierEdge, VueFlow, type Connection, type Edge, type FinalConnectionState, type NodeProps, type Viewport, type XYPosition } from '@xyflow/vue'
 import '@xyflow/vue/dist/style.css'
-import UiDialog from '@/components/ui/UiDialog.vue'
 import UiIconButton from '@/components/ui/UiIconButton.vue'
 import ImagePreview from '@/components/ui/ImagePreview.vue'
 import VideoPreview from '@/components/ui/VideoPreview.vue'
+import AssetLibraryDialog from '@/features/assets/AssetLibraryDialog.vue'
+import type { AssetLibraryItem, AssetMediaKind } from '@/features/assets/asset-library-types'
 import { useModelCatalog } from '@/features/studio/composables/useModelCatalog'
 import { useAuthStore } from '@/stores/auth'
 import { useUiStore } from '@/stores/ui'
 import { apiErrorMessage } from '../api'
-import { canvasNodeKinds, canvasNodeLabels, canConnectCanvasKinds, canConnectCanvasNodes, outputKind, type CanvasAsset, type CanvasDocument, type CanvasGenerationSettings, type CanvasMedia, type CanvasNode, type CanvasNodeKind } from '../canvas-model'
+import { canvasNodeKinds, canvasNodeLabels, canConnectCanvasKinds, canConnectCanvasNodes, outputKind, type CanvasDocument, type CanvasGenerationSettings, type CanvasMedia, type CanvasNode, type CanvasNodeKind } from '../canvas-model'
 import { canvasNodeIcons } from '../canvas-node-icons'
 import { useCanvasStore, type CanvasJobWatchHooks } from '../canvas-store'
 import CanvasWorkNode from './CanvasWorkNode.vue'
@@ -41,7 +42,7 @@ const selecting = ref(false)
 const connecting = ref(false)
 const libraryOpen = ref(false)
 const libraryTarget = ref<string>()
-const libraryType = ref<CanvasAsset['kind'] | 'all'>('all')
+const libraryAllowedKinds = ref<AssetMediaKind[]>(['image', 'video', 'audio', 'text'])
 let touchStart: { point: XYPosition; timer: number } | undefined
 const selectedIds = computed(() => new Set(props.canvas.nodes.filter(node => node.selected).map(node => node.id)))
 const connectedOutputs = computed(() => new Set(props.canvas.edges.map(edge => edge.source)))
@@ -72,7 +73,6 @@ const menuKinds = computed(() => {
     ? canConnectCanvasKinds(kind, source.type)
     : canConnectCanvasKinds(source.type, kind))
 })
-const libraryAssets = computed(() => store.assets.filter(asset => libraryType.value === 'all' || asset.kind === libraryType.value))
 
 function setNodes(nodes?: CanvasNode[]) {
   if (nodes) store.replaceNodes(props.canvas, nodes)
@@ -213,14 +213,6 @@ async function collect(node: CanvasNode, title: string) {
   }
 }
 
-async function removeAsset(id: string) {
-  try {
-    await store.removeAsset(id)
-  } catch (error) {
-    ui.notify(apiErrorMessage(error), 'error')
-  }
-}
-
 async function uploadNodeMedia(nodeId: string, file: File) {
   try {
     await store.replaceMedia(props.canvas, nodeId, file)
@@ -231,15 +223,16 @@ async function uploadNodeMedia(nodeId: string, file: File) {
 
 function openLibrary(id?: string) {
   libraryTarget.value = id
-  libraryType.value = id ? outputKind(props.canvas.nodes.find(node => node.id === id)?.type) : 'all'
+  const nodeKind = id ? outputKind(props.canvas.nodes.find(node => node.id === id)?.type) : undefined
+  libraryAllowedKinds.value = nodeKind ? [nodeKind] : ['image', 'video', 'audio', 'text']
   libraryOpen.value = true
-  if (!store.assetsLoaded) {
-    void store.fetchAssets().catch(() => {})
-  }
 }
 
-function useAsset(asset: CanvasAsset) {
-  const data = { title: asset.title, media: asset.media, text: asset.text }
+function useLibraryItem(item: AssetLibraryItem) {
+  const media: CanvasMedia | undefined = item.mediaUrl
+    ? { url: item.mediaUrl, key: item.mediaKey, name: item.mediaName || item.title }
+    : undefined
+  const data = { title: item.title, media, text: item.text }
   const target = libraryTarget.value
   if (target) {
     store.updateNode(props.canvas, target, data)
@@ -247,7 +240,7 @@ function useAsset(asset: CanvasAsset) {
     const bounds = stage.value?.getBoundingClientRect()
     if (!bounds) return
     const where = flow.screenToFlowPosition({ x: bounds.left + bounds.width / 2 - 140, y: bounds.top + bounds.height / 2 - 75 })
-    store.addNode(props.canvas, asset.kind, where.x, where.y, data)
+    store.addNode(props.canvas, item.kind, where.x, where.y, data)
   }
   libraryOpen.value = false
 }
@@ -498,22 +491,13 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <UiDialog v-model:open="libraryOpen" title="素材库" size="wide">
-      <div v-if="!libraryTarget" class="canvas-library-filters" role="group" aria-label="素材类型">
-        <button v-for="item in (['all', 'text', 'image', 'video', 'audio'] as const)" :key="item" type="button" :aria-pressed="libraryType === item" @click="libraryType = item">{{ item === 'all' ? '全部' : canvasNodeLabels[item] }}</button>
-      </div>
-      <p v-if="!libraryAssets.length" class="canvas-library-empty">暂无素材</p>
-      <div v-else class="canvas-library-grid">
-        <article v-for="asset in libraryAssets" :key="asset.id" class="canvas-library-card">
-          <button type="button" class="canvas-library-item" :aria-label="(libraryTarget ? '使用' : '添加到画布') + ' ' + asset.title" @click="useAsset(asset)">
-            <img v-if="asset.kind === 'image' && asset.media" :src="asset.media.url" alt="" />
-            <component :is="canvasNodeIcons[asset.kind]" v-else :size="23" />
-            <span :title="asset.title">{{ asset.title }}</span>
-          </button>
-          <UiIconButton :label="'移除 ' + asset.title" @click="removeAsset(asset.id)"><Trash2 :size="14" /></UiIconButton>
-        </article>
-      </div>
-    </UiDialog>
+    <AssetLibraryDialog
+      v-model:open="libraryOpen"
+      title="素材库"
+      mode="single"
+      :allowed-kinds="libraryAllowedKinds"
+      @select="useLibraryItem"
+    />
 
     <ImagePreview v-if="previewMedia?.kind === 'image'" v-model:open="previewOpen" :src="previewMedia.media.url" :title="previewMedia.media.name" />
     <VideoPreview v-else-if="previewMedia" v-model:open="previewOpen" :src="previewMedia.media.url" :title="previewMedia.media.name" />
@@ -632,15 +616,6 @@ onBeforeUnmount(() => {
 .canvas-tools .ui-icon-button[aria-pressed='true'] { background: var(--gold-tint); color: var(--color-gold-soft); }
 .canvas-reset-zoom { width: 48px; height: 32px; border-radius: 5px; text-align: center; color: var(--color-muted); font-size: var(--font-size-caption); font-variant-numeric: tabular-nums; cursor: pointer; }
 .canvas-reset-zoom:hover { background: var(--gold-tint); color: var(--color-gold-soft); }
-.canvas-library-filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
-.canvas-library-filters button { padding: 6px 9px; border-radius: 5px; color: var(--color-muted); }
-.canvas-library-filters button[aria-pressed='true'] { background: var(--gold-tint); color: var(--color-gold-soft); }
-.canvas-library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); gap: 9px; }
-.canvas-library-card { display: flex; align-items: flex-start; min-width: 0; border: 1px solid var(--border-subtle); border-radius: 7px; }
-.canvas-library-item { display: grid; justify-items: center; flex: 1; min-width: 0; gap: 6px; padding: 7px; color: var(--color-text); cursor: pointer; }
-.canvas-library-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; font-size: var(--font-size-caption); }
-.canvas-library-item img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 4px; }
-.canvas-library-empty { padding: 26px 0; text-align: center; color: var(--color-muted); }
 @media (max-width: 375px) {
   .canvas-editor-stage { --canvas-minimap-bottom: 90px; }
   .canvas-tools { flex-direction: column; align-items: stretch; }

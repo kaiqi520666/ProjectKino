@@ -1,8 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, useId, useTemplateRef, watch } from 'vue'
 import {
-  ArrowLeft,
-  Check,
   Download,
   FolderOpen,
   FolderPlus,
@@ -23,15 +21,15 @@ import UiDialog from '@/components/ui/UiDialog.vue'
 import UiInput from '@/components/ui/UiInput.vue'
 import UiSelect from '@/components/ui/UiSelect.vue'
 import UiTextarea from '@/components/ui/UiTextarea.vue'
-import { createUserAssetApi, listUserAssetsApi } from '@/features/canvas/api'
-import type { UserAssetOut } from '@/features/canvas/api'
+import AssetLibraryDialog from '@/features/assets/AssetLibraryDialog.vue'
+import type { AssetLibraryItem } from '@/features/assets/asset-library-types'
+import { useUserAssetsStore } from '@/features/assets/user-assets-store'
 import { useUiStore } from '@/stores/ui'
 import { apiErrorMessage, uploadFileToOss } from '../api'
 import type { ModelCatalogItemOut } from '../api-types'
 import {
   assetDisplayName,
   assetKindOptions,
-  exampleAssetLibrary,
   findParentAsset,
   variantLabelSuggestions,
 } from '../studio-assets'
@@ -77,13 +75,14 @@ const emit = defineEmits<{
 }>()
 
 const ui = useUiStore()
+const userAssets = useUserAssetsStore()
 const formId = useId()
 const open = ref(false)
 const asset = ref<StudioAsset>()
 const parentForCreate = ref<StudioAsset>()
 const kind = ref<StudioAssetKind>('character')
 const draft = ref<StudioAssetDraft>()
-const picking = ref(false)
+const libraryOpen = ref(false)
 const pickingTarget = ref<'image' | 'ref'>('image')
 const loadingImage = ref(false)
 const collectingAsset = ref(false)
@@ -93,11 +92,8 @@ const selectedModelId = ref('gpt-image-2')
 const selectedTier = ref<'web' | '1k' | '2k' | '4k'>('1k')
 const selectedRatio = ref('16:9')
 const selectedRefs = ref<ReferenceImageItem[]>([])
-const userLibraryImages = ref<UserAssetOut[]>([])
-const loadingUserLibrary = ref(false)
 const fileInput = useTemplateRef<HTMLInputElement>('fileInput')
 
-const library = computed(() => exampleAssetLibrary[kind.value])
 const labelSuggestions = computed(() => variantLabelSuggestions[kind.value])
 const modelCatalogList = computed<ModelCatalogItemOut[]>(() => props.imageModels)
 
@@ -144,22 +140,12 @@ const canSubmit = computed(() => {
 })
 
 const dialogTitle = computed(() => {
-  if (picking.value) {
-    return pickingTarget.value === 'ref' ? `添加垫图参考（最多 ${maxRefImages.value} 张）` : '从素材库选择'
-  }
-  if (asset.value) return isVariant.value ? '编辑状态变体' : '编辑资产'
-  return isVariant.value ? `为「${parentForCreate.value?.name ?? ''}」新增状态变体` : '增加资产'
+  if (asset.value) return isVariant.value ? '编辑变体' : '编辑资产'
+  return isVariant.value ? `${parentForCreate.value?.name ?? ''} · 新增变体` : '增加资产'
 })
 
-const projectReferenceCandidates = computed(() =>
-  props.projectAssets.filter((item) => !!item.imageUrl && isHttpUrl(item.imageUrl)),
-)
-
-const userLibraryCandidates = computed(() =>
-  userLibraryImages.value.filter((item) => !!item.mediaUrl && isHttpUrl(item.mediaUrl)),
-)
-
-const selectedRefUrlSet = computed(() => new Set(selectedRefs.value.map((r) => r.url)))
+const selectedRefUrls = computed(() => selectedRefs.value.map((r) => r.url))
+const selectedRefUrlSet = computed(() => new Set(selectedRefUrls.value))
 
 const canUseCurrentImageAsRef = computed(
   () =>
@@ -187,22 +173,30 @@ function isHttpUrl(url?: string | null): url is string {
   return typeof url === 'string' && /^https?:\/\//i.test(url.trim())
 }
 
-async function ensureUserLibraryLoaded() {
-  if (!props.persisted || loadingUserLibrary.value) return
-  loadingUserLibrary.value = true
-  try {
-    userLibraryImages.value = await listUserAssetsApi('image')
-  } catch {
-    userLibraryImages.value = []
-  } finally {
-    loadingUserLibrary.value = false
-  }
-}
-
 function openPicker(target: 'image' | 'ref') {
   pickingTarget.value = target
-  picking.value = true
-  void ensureUserLibraryLoaded()
+  libraryOpen.value = true
+}
+
+function handleLibrarySelect(item: AssetLibraryItem) {
+  if (!item.mediaUrl) return
+  chooseImage(item.mediaUrl, item.mediaKey)
+}
+
+function handleLibraryConfirm(items: AssetLibraryItem[]) {
+  const parentUrl = resolvedParent.value?.imageUrl
+  const next: ReferenceImageItem[] = []
+  const seen = new Set<string>()
+  for (const item of items) {
+    if (!item.mediaUrl || !isHttpUrl(item.mediaUrl) || seen.has(item.mediaUrl)) continue
+    seen.add(item.mediaUrl)
+    next.push({
+      url: item.mediaUrl,
+      label: item.title,
+      isParent: Boolean(parentUrl && item.mediaUrl === parentUrl),
+    })
+  }
+  selectedRefs.value = next.slice(0, maxRefImages.value)
 }
 
 function edit(source: StudioAsset, trigger: HTMLButtonElement) {
@@ -272,7 +266,7 @@ function createVariant(parent: StudioAsset, trigger: HTMLButtonElement) {
 function openEditor(fields: StudioAssetDraft, trigger: HTMLButtonElement) {
   draft.value = fields
   opener = trigger
-  picking.value = false
+  libraryOpen.value = false
   loadingImage.value = false
   imageError.value = ''
   imageNotice.value = ''
@@ -299,7 +293,7 @@ watch(open, (isOpen) => {
   parentForCreate.value = undefined
   draft.value = undefined
   selectedRefs.value = []
-  picking.value = false
+  libraryOpen.value = false
   loadingImage.value = false
   imageError.value = ''
   imageNotice.value = ''
@@ -311,7 +305,7 @@ function chooseImage(imageUrl: string, imageKey?: string) {
   draft.value.imageUrl = imageUrl
   draft.value.imageKey = imageKey
   imageError.value = ''
-  picking.value = false
+  libraryOpen.value = false
 }
 
 function toggleReference(url: string, label: string, isParent = false) {
@@ -354,7 +348,7 @@ async function collectToLibrary() {
       name: draft.value.name.trim() || asset.value?.name || '短剧资产图',
       variantLabel: draft.value.variantLabel,
     })
-    await createUserAssetApi({
+    await userAssets.createAsset({
       kind: 'image',
       title,
       mediaUrl: draft.value.imageUrl,
@@ -363,7 +357,7 @@ async function collectToLibrary() {
       sourceType: 'studio',
       sourceId: asset.value?.backendId ?? null,
     })
-    ui.notify(`已将「${title}」收藏到我的素材库，可在画布中直接复用`, 'success')
+    ui.notify(`已收藏「${title}」到素材库`, 'success')
   } catch (error) {
     ui.notify(apiErrorMessage(error), 'error')
   } finally {
@@ -482,95 +476,7 @@ defineExpose({ create, createVariant, edit, close, syncAsset })
 
 <template>
   <UiDialog v-model:open="open" :title="dialogTitle" size="landscape">
-    <div v-if="picking" class="asset-library">
-      <template v-if="pickingTarget === 'ref'">
-        <div v-if="projectReferenceCandidates.length" class="asset-library-section">
-          <p class="asset-library-label">本项目已有图片的资产（点击勾选 / 取消，已选 {{ selectedRefs.length }} / {{ maxRefImages }}）</p>
-          <div class="asset-library-grid">
-            <button
-              v-for="item in projectReferenceCandidates"
-              :key="item.backendId || item.id"
-              type="button"
-              class="asset-library-item"
-              :class="{ 'is-selected': selectedRefUrlSet.has(item.imageUrl!) }"
-              @click="toggleReference(item.imageUrl!, assetDisplayName(item), item.backendId === resolvedParent?.backendId)"
-            >
-              <span class="asset-library-thumb-wrap">
-                <img :src="item.imageUrl" alt="" />
-                <span v-if="selectedRefUrlSet.has(item.imageUrl!)" class="asset-library-checked">
-                  <Check :size="12" :stroke-width="2.6" />
-                </span>
-              </span>
-              <span>{{ assetDisplayName(item) }}</span>
-            </button>
-          </div>
-        </div>
-        <div v-if="userLibraryCandidates.length" class="asset-library-section">
-          <p class="asset-library-label">我的素材库（来自画布或历史收藏）</p>
-          <div class="asset-library-grid">
-            <button
-              v-for="item in userLibraryCandidates"
-              :key="item.id"
-              type="button"
-              class="asset-library-item"
-              :class="{ 'is-selected': selectedRefUrlSet.has(item.mediaUrl!) }"
-              @click="toggleReference(item.mediaUrl!, item.title)"
-            >
-              <span class="asset-library-thumb-wrap">
-                <img :src="item.mediaUrl!" alt="" />
-                <span v-if="selectedRefUrlSet.has(item.mediaUrl!)" class="asset-library-checked">
-                  <Check :size="12" :stroke-width="2.6" />
-                </span>
-              </span>
-              <span>{{ item.title }}</span>
-            </button>
-          </div>
-        </div>
-        <p v-if="!projectReferenceCandidates.length && !userLibraryCandidates.length && !loadingUserLibrary" class="asset-library-empty">
-          暂无可用的公网参考图，请先生成主资产图或上传图片到我的素材库。
-        </p>
-      </template>
-
-      <template v-else>
-        <div v-if="persisted" class="asset-library-section">
-          <p class="asset-library-label">
-            我的素材库{{ loadingUserLibrary ? '（加载中…）' : '' }}
-          </p>
-          <div v-if="userLibraryCandidates.length" class="asset-library-grid">
-            <button
-              v-for="item in userLibraryCandidates"
-              :key="item.id"
-              type="button"
-              class="asset-library-item"
-              @click="chooseImage(item.mediaUrl!, item.mediaKey ?? undefined)"
-            >
-              <img :src="item.mediaUrl!" alt="" />
-              <span>{{ item.title }}</span>
-            </button>
-          </div>
-          <p v-else-if="!loadingUserLibrary" class="asset-library-empty">
-            我的素材库暂无图片（可在画布或资产编辑器里一键收藏图片到素材库）。
-          </p>
-        </div>
-        <div class="asset-library-section">
-          <p class="asset-library-label">示例图片</p>
-          <div class="asset-library-grid">
-            <button
-              v-for="image in library"
-              :key="image.imageUrl"
-              type="button"
-              class="asset-library-item"
-              @click="chooseImage(image.imageUrl)"
-            >
-              <img :src="image.imageUrl" alt="" />
-              <span>{{ image.name }}</span>
-            </button>
-          </div>
-        </div>
-      </template>
-    </div>
-
-    <form v-else-if="draft" :id="formId" class="asset-edit-form" @submit.prevent="submit">
+    <form v-if="draft" :id="formId" class="asset-edit-form" @submit.prevent="submit">
       <div class="asset-edit-fields">
         <UiSelect
           v-if="!asset && !isVariant"
@@ -583,7 +489,7 @@ defineExpose({ create, createVariant, edit, close, syncAsset })
         <div v-if="isVariant" class="asset-variant-box">
           <UiInput
             v-model="draft.variantLabel"
-            label="状态标签（区分换装 / 时段 / 物品变化）"
+            label="状态标签"
             placeholder="例如：晚宴礼服、深夜、碎裂"
             required
           />
@@ -610,7 +516,7 @@ defineExpose({ create, createVariant, edit, close, syncAsset })
         <div class="asset-prompt-field">
           <UiTextarea
             v-model="draft.prompt"
-            :label="isVariant ? '生图提示词（建议保留锚点并描述变化细节）' : '文生图提示词'"
+            label="文生图提示词"
             :rows="4"
           />
         </div>
@@ -618,8 +524,7 @@ defineExpose({ create, createVariant, edit, close, syncAsset })
           <div v-if="persisted" class="asset-ref-bar">
             <div class="asset-ref-head">
               <span class="asset-ref-title">
-                垫图参考（{{ selectedRefs.length }}/{{ maxRefImages }}）
-                <small v-if="!selectedRefs.length">可选，不选则纯文生图</small>
+                参考图（{{ selectedRefs.length }}/{{ maxRefImages }}）
               </span>
               <div class="asset-ref-actions">
                 <button
@@ -680,7 +585,6 @@ defineExpose({ create, createVariant, edit, close, syncAsset })
                 size="sm"
                 :loading="generatingImage"
                 :disabled="!canGenerateAiImage"
-                :title="!draft.prompt.trim() ? '请先填写生图提示词' : selectedRefs.length ? '基于已选参考图走图生图编辑接口生成' : '使用沧元图片引擎生成形象并自动存入 OSS'"
                 @click="triggerAiImage"
               >
                 <template v-if="!generatingImage" #leading><Sparkles :size="14" aria-hidden="true" /></template>
@@ -689,11 +593,6 @@ defineExpose({ create, createVariant, edit, close, syncAsset })
             </div>
           </div>
         </div>
-        <UiAlert
-          v-else-if="isVariant && resolvedParent?.imageUrl"
-          tone="info"
-          title="保存后点击「AI 生图」将自动以主资产图垫图，保持人物/场景/物品一致性。"
-        />
       </div>
 
       <div class="asset-edit-image">
@@ -715,7 +614,7 @@ defineExpose({ create, createVariant, edit, close, syncAsset })
                 <template #leading><Upload :size="14" aria-hidden="true" /></template>本地上传
               </UiButton>
               <UiButton variant="outline" size="sm" :disabled="loadingImage" @click="openPicker('image')">
-                <template #leading><FolderOpen :size="14" aria-hidden="true" /></template>素材库选择
+                <template #leading><FolderOpen :size="14" aria-hidden="true" /></template>素材库
               </UiButton>
               <UiButton
                 v-if="canOpenHistory && asset"
@@ -744,7 +643,6 @@ defineExpose({ create, createVariant, edit, close, syncAsset })
             variant="outline"
             size="sm"
             :loading="collectingAsset"
-            title="收藏到我的素材库（画布可直接复用）"
             @click="collectToLibrary"
           >
             <template v-if="!collectingAsset" #leading><FolderPlus :size="14" aria-hidden="true" /></template>收藏
@@ -755,7 +653,7 @@ defineExpose({ create, createVariant, edit, close, syncAsset })
           <UiButton variant="outline" size="sm" :disabled="loadingImage" @click="removeImage">
             <template #leading><Trash2 :size="14" aria-hidden="true" /></template>删除
           </UiButton>
-          <UiButton variant="outline" size="sm" :loading="loadingImage" title="上传图片替换" @click="fileInput?.click()">
+          <UiButton variant="outline" size="sm" :loading="loadingImage" @click="fileInput?.click()">
             <template #leading><RefreshCw :size="14" aria-hidden="true" /></template>更换
           </UiButton>
           <a class="ui-button ui-button--outline ui-button--sm" :href="draft.imageUrl" :download="downloadName" target="_blank" rel="noopener">
@@ -771,17 +669,26 @@ defineExpose({ create, createVariant, edit, close, syncAsset })
     </form>
 
     <template #footer>
-      <UiButton v-if="picking" variant="ghost" size="sm" @click="picking = false">
-        <template #leading><ArrowLeft :size="14" aria-hidden="true" /></template>返回编辑
+      <UiButton variant="ghost" size="sm" @click="close">取消</UiButton>
+      <UiButton variant="primary" size="sm" type="submit" :form="formId" :disabled="!canSubmit">
+        <template #leading><Save :size="14" aria-hidden="true" /></template>保存
       </UiButton>
-      <template v-else>
-        <UiButton variant="ghost" size="sm" @click="close">取消</UiButton>
-        <UiButton variant="primary" size="sm" type="submit" :form="formId" :disabled="!canSubmit">
-          <template #leading><Save :size="14" aria-hidden="true" /></template>保存
-        </UiButton>
-      </template>
     </template>
   </UiDialog>
+
+  <AssetLibraryDialog
+    v-model:open="libraryOpen"
+    :title="pickingTarget === 'ref' ? '选择参考图' : '素材库'"
+    :mode="pickingTarget === 'ref' ? 'multiple' : 'single'"
+    :allowed-kinds="['image']"
+    :project-assets="projectAssets"
+    :default-source="pickingTarget === 'ref' ? 'project' : 'personal'"
+    :initial-selected-keys="pickingTarget === 'ref' ? selectedRefUrls : []"
+    :max-by-kind="pickingTarget === 'ref' ? { image: maxRefImages } : undefined"
+    :require-http-url="pickingTarget === 'ref'"
+    @select="handleLibrarySelect"
+    @confirm="handleLibraryConfirm"
+  />
 </template>
 
 <style scoped>
@@ -1005,44 +912,6 @@ defineExpose({ create, createVariant, edit, close, syncAsset })
 .asset-image-actions--filled { justify-content: flex-end; }
 .asset-image-actions .ui-button { gap: 5px; padding-inline: 9px; }
 .asset-image-notice { margin: 0; color: var(--color-muted); font-size: 12px; }
-.asset-library { display: flex; flex-direction: column; gap: 16px; }
-.asset-library-section { display: flex; flex-direction: column; gap: 8px; }
-.asset-library-label { margin: 0; color: var(--color-muted); font-size: var(--font-size-caption); }
-.asset-library-empty { margin: 0; padding: 10px 0; color: var(--color-muted); font-size: var(--font-size-caption); }
-.asset-library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
-.asset-library-item {
-  display: grid;
-  gap: 6px;
-  min-width: 0;
-  padding: 6px;
-  border: 1px solid var(--border-control);
-  border-radius: 8px;
-  background: var(--color-surface);
-  color: var(--color-text);
-  font-size: var(--font-size-caption);
-  text-align: left;
-  cursor: pointer;
-}
-.asset-library-item:hover,
-.asset-library-item.is-selected {
-  border-color: var(--color-gold);
-  background: color-mix(in srgb, var(--gold-tint) 50%, var(--color-surface));
-}
-.asset-library-thumb-wrap { position: relative; display: block; }
-.asset-library-item img { width: 100%; aspect-ratio: 4 / 3; border-radius: 4px; object-fit: cover; display: block; }
-.asset-library-checked {
-  position: absolute;
-  top: 5px;
-  right: 5px;
-  display: grid;
-  place-items: center;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: var(--color-gold);
-  color: var(--color-ink);
-}
-.asset-library-item > span:last-child { padding: 2px 4px; overflow-wrap: anywhere; }
 @media (max-width: 640px) {
   .asset-edit-form { grid-template-columns: 1fr; }
 }
