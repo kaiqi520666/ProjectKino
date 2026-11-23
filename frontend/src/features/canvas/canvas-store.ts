@@ -209,6 +209,47 @@ export const useCanvasStore = defineStore('canvases', {
       await this.flushSave(canvas)
     },
 
+    async updateCanvasMeta(
+      canvas: CanvasDocument,
+      patch: {
+        name: string
+        description: string
+        cover?: string | null
+        coverKey?: string | null
+      },
+    ) {
+      const trimmedName = patch.name.trim()
+      if (!trimmedName) return
+      const trimmedDesc = patch.description.trim()
+      const coverUrl = patch.cover && isPersistedMediaUrl(patch.cover) ? patch.cover : null
+      const coverKey = coverUrl ? (patch.coverKey ?? null) : null
+
+      const submit = async (expectedVersion: number) =>
+        updateCanvasApi(canvas.id, {
+          expectedVersion,
+          name: trimmedName,
+          description: trimmedDesc,
+          coverUrl,
+          coverKey,
+        })
+
+      let updated: CanvasDetailOut
+      try {
+        updated = await submit(canvas.version)
+      } catch (error) {
+        if (!isVersionConflict(error)) throw error
+        const latest = await getCanvasDetailApi(canvas.id)
+        updated = await submit(latest.version)
+      }
+
+      canvas.name = updated.name
+      canvas.description = updated.description
+      canvas.cover = updated.coverUrl ?? undefined
+      canvas.coverKey = updated.coverKey ?? null
+      canvas.version = updated.version
+      canvas.updatedAt = updated.updatedAt
+    },
+
     async deleteCanvas(id: string) {
       this.cancelScheduledSave(id)
       await archiveCanvasApi(id)
