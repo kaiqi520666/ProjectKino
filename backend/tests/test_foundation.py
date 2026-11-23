@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from types import SimpleNamespace
 
 import httpx
@@ -13,6 +15,7 @@ class FakeRedis:
     def __init__(self, *, healthy: bool = True) -> None:
         self.healthy = healthy
         self.store: dict[str, str] = {}
+        self.sets: dict[str, set[str]] = {}
 
     async def ping(self) -> bool:
         if not self.healthy:
@@ -27,7 +30,30 @@ class FakeRedis:
         return self.store.get(key)
 
     async def delete(self, key: str) -> int:
-        return 1 if self.store.pop(key, None) is not None else 0
+        removed_val = self.store.pop(key, None) is not None
+        removed_set = self.sets.pop(key, None) is not None
+        return 1 if (removed_val or removed_set) else 0
+
+    async def sadd(self, key: str, *values: str) -> int:
+        bucket = self.sets.setdefault(key, set())
+        before = len(bucket)
+        bucket.update(values)
+        return len(bucket) - before
+
+    async def srem(self, key: str, *values: str) -> int:
+        bucket = self.sets.get(key)
+        if not bucket:
+            return 0
+        before = len(bucket)
+        for value in values:
+            bucket.discard(value)
+        return before - len(bucket)
+
+    async def smembers(self, key: str) -> set[str]:
+        return set(self.sets.get(key, set()))
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        return key in self.store or key in self.sets
 
     async def aclose(self) -> None:
         return None
@@ -127,3 +153,93 @@ async def test_session_issue_resolve_and_revoke():
 
     await revoke_session(redis, settings, issued.access_token)
     assert await resolve_session_user_id(redis, settings, issued.access_token) is None
+
+
+@pytest.mark.asyncio
+async def test_update_profile_and_change_password_revokes_all_old_sessions():
+    from decimal import Decimal
+
+    from app.core.errors import AppError
+    from app.modules.auth.models import User
+    from app.modules.auth.schemas import ChangePasswordRequest, UpdateProfileRequest
+    from app.modules.auth.service import (
+        change_user_password,
+        issue_session,
+        resolve_session_user_id,
+        update_user_profile,
+    )
+
+    class _DummySession:
+        async def commit(self) -> None:
+            return None
+
+        async def refresh(self, obj) -> None:
+            return None
+
+    redis = FakeRedis()
+    settings = Settings(environment="test")
+    user = User(
+        id=99,
+        email="creator@framedrama.ai",
+        password_hash=hash_password("OldPass123"),
+        nickname="原昵称",
+        role="user",
+        status="active",
+        balance=Decimal("50.0000"),
+        frozen=Decimal("0.0000"),
+        usage_multiplier=Decimal("1.0000"),
+    )
+    db = _DummySession()
+
+    updated = await update_user_profile(
+        db,  # type: ignore[arg-type]
+        user=user,
+        body=UpdateProfileRequest(nickname="  新导演  "),
+    )
+    assert updated.nickname == "新导演"
+
+    # 模拟两个设备同时在线
+    sess_a = await issue_session(redis, settings, user)
+    sess_b = await issue_session(redis, settings, user)
+    assert await resolve_session_user_id(redis, settings, sess_a.access_token) == 99
+    assert await resolve_session_user_id(redis, settings, sess_b.access_token) == 99
+
+    # 旧密码错误应拒絶
+    with pytest.raises(AppError) as wrong_err:
+        await change_user_password(
+            db,  # type: ignore[arg-type]
+            redis,  # type: ignore[arg-type]
+            settings,
+            user=user,
+            current_token=sess_a.access_token,
+            body=ChangePasswordRequest(current_password="Wrong!", new_password="NewPass456"),
+        )
+    assert wrong_err.value.code == "invalid_current_password"
+
+    # 新旧密码相同应拒绝
+    with pytest.raises(AppError) as same_err:
+        await change_user_password(
+            db,  # type: ignore[arg-type]
+            redis,  # type: ignore[arg-type]
+            settings,
+            user=user,
+            current_token=sess_a.access_token,
+            body=ChangePasswordRequest(current_password="OldPass123", new_password="OldPass123"),
+        )
+    assert same_err.value.code == "password_unchanged"
+
+    # 正常改密：旧密码失效、双端旧会话全部吊销、返回的新会话立即生效
+    refreshed = await change_user_password(
+        db,  # type: ignore[arg-type]
+        redis,  # type: ignore[arg-type]
+        settings,
+        user=user,
+        current_token=sess_a.access_token,
+        body=ChangePasswordRequest(current_password="OldPass123", new_password="NewPass456"),
+    )
+    assert verify_password("NewPass456", user.password_hash) is True
+    assert verify_password("OldPass123", user.password_hash) is False
+    assert await resolve_session_user_id(redis, settings, sess_a.access_token) is None
+    assert await resolve_session_user_id(redis, settings, sess_b.access_token) is None
+    assert refreshed.access_token not in {sess_a.access_token, sess_b.access_token}
+    assert await resolve_session_user_id(redis, settings, refreshed.access_token) == 99

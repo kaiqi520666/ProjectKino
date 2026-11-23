@@ -120,6 +120,20 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
+  async function updateProfile(nickname: string) {
+    const updated = await unwrap<AuthUser>(http.patch('/users/me', { nickname: nickname.trim() }))
+    user.value = updated
+    return updated
+  }
+
+  async function changePassword(currentPassword: string, newPassword: string) {
+    const session = await unwrap<AuthSessionResponse>(
+      http.post('/users/me/password', { currentPassword, newPassword }),
+    )
+    applySession(session)
+    return session.user
+  }
+
   return {
     token,
     user,
@@ -133,6 +147,8 @@ export const useAuthStore = defineStore('auth', () => {
     login,
     logout,
     refreshBalance,
+    updateProfile,
+    changePassword,
     clearSession,
   }
 })

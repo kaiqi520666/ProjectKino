@@ -44,3 +44,20 @@ class AuthSessionOut(CamelModel):
     token_type: str = "Bearer"
     expires_in: int
     user: UserOut
+
+
+class UpdateProfileRequest(CamelModel):
+    nickname: str = Field(min_length=1, max_length=80)
+
+    @field_validator("nickname")
+    @classmethod
+    def clean_nickname(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("昵称不能为空")
+        return cleaned
+
+
+class ChangePasswordRequest(CamelModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=6, max_length=128)

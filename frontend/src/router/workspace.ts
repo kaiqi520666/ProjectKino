@@ -1,7 +1,5 @@
 import type { RouteRecordRaw } from 'vue-router'
 
-const pendingView = () => import('@/views/WorkspacePendingView.vue')
-
 export const workspaceRoutes: RouteRecordRaw[] = [{
   path: '/workspace',
   component: () => import('@/layouts/WorkspaceLayout.vue'),
@@ -13,7 +11,7 @@ export const workspaceRoutes: RouteRecordRaw[] = [{
       component: () => import('@/features/dashboard/views/WorkspaceHomeView.vue'),
       meta: { title: '创作首页', workspaceNav: 'studio' },
     },
-    { path: '/projects', name: 'projects', component: pendingView, meta: { title: '全部项目', workspaceNav: 'studio' } },
+    { path: '/projects', name: 'projects', component: () => import('@/features/projects/views/ProjectsListView.vue'), meta: { title: '全部项目', workspaceNav: 'studio' } },
     {
       path: '/projects/:projectId',
       component: () => import('@/features/studio/views/StudioProjectView.vue'),
@@ -28,6 +26,6 @@ export const workspaceRoutes: RouteRecordRaw[] = [{
     },
     { path: '/canvas', name: 'canvas', component: () => import('@/features/canvas/views/CanvasListView.vue'), meta: { title: '画布', workspaceNav: 'canvas' } },
     { path: '/assets', name: 'assets', component: () => import('@/features/assets/views/AssetsLibraryView.vue'), meta: { title: '素材', workspaceNav: 'assets' } },
-    { path: '/account', name: 'account', component: pendingView, meta: { title: '我的', workspaceNav: 'account' } },
+    { path: '/account', name: 'account', component: () => import('@/features/account/views/AccountView.vue'), meta: { title: '我的', workspaceNav: 'account' } },
   ],
 }]
