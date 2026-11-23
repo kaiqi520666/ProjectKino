@@ -683,26 +683,30 @@ onBeforeRouteUpdate(canLeave)
             v-if="isCurrentEpisodeRewriting"
             tone="info"
             title="正在按最新要求重写本集剧本"
-            description="下方为上一版本内容，重写完成并落库后会自动替换为新版正文。"
-          />
+          >
+            下方为上一版本内容，重写完成并落库后会自动替换为新版正文。
+          </UiAlert>
           <UiAlert
             v-if="!scriptJobRunning && !hasBackendScript && canRegenerateStory"
             tone="info"
             title="该项目尚未生成剧本正文"
-            description="上次创建任务可能在大纲阶段中断；点击左侧「生成全剧剧本」即可直接重新生成。"
-          />
+          >
+            上次创建任务可能在大纲阶段中断；点击左侧「生成全剧剧本」即可直接重新生成。
+          </UiAlert>
           <UiAlert
             v-if="!scriptJobRunning && missingEpisodeCount > 0"
             tone="warning"
             :title="`全剧大纲已保存，还有 ${missingEpisodeCount} 集待继续生成`"
-            description="已完成的分集均已安全落库；点击左侧「继续生成剩余分集」可从断点接着补写，不会覆盖已有集数。"
-          />
+          >
+            已完成的分集均已安全落库；点击左侧「继续生成剩余分集」可从断点接着补写，不会覆盖已有集数。
+          </UiAlert>
           <UiAlert
             v-if="episodeWarnings.length > 0"
             tone="warning"
             title="本集质量门提醒"
-            :description="episodeWarnings.join('；')"
-          />
+          >
+            {{ episodeWarnings.join('；') }}
+          </UiAlert>
         </div>
 
         <form v-if="draft" :id="editFormId" class="script-edit-form" @submit.prevent="save">
