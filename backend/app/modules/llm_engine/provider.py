@@ -1,5 +1,6 @@
 import os
 
+from pydantic_ai import UsageLimits
 from pydantic_ai.models.openrouter import OpenRouterModel, OpenRouterModelSettings
 from pydantic_ai.providers.openrouter import OpenRouterProvider
 from sqlalchemy import select
@@ -12,6 +13,9 @@ from app.modules.catalog.models import AiModel, AiProvider
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_TEXT_MODEL_ID = "or-ds-baidu"
 DEFAULT_UPSTREAM_PRESET = "@preset/ds-baidu"
+
+# 共享 RunUsage 仅用于整单计费累加（长剧全流程可能超过 50 次分段/分批请求），单次 Agent 由各自 retries 封顶。
+SHARED_USAGE_LIMITS = UsageLimits(request_limit=None)
 
 MODEL_SETTINGS = OpenRouterModelSettings(
     timeout=420,

@@ -1287,22 +1287,25 @@ async def test_unified_600s_multiturn_closed_loop_patch_and_resume():
     assert res.episodes[0].scenes[-1].lighting == "结尾悬念专属冷光"
     assert any(s.lighting == "局部补戏中段灯光" for s in res.episodes[0].scenes[:-1])
 
-    # 3. 验证断点续写：传入 existing_outline + 第 1 集，只生成第 2 集
+    # 3. 验证断点续写：传入 existing_outline + 第 1 集，且共享 RunUsage 已有 60 次请求也不触发 50 次上限报错
     resumed_saved: list[int] = []
 
     async def on_resumed_ep(ep: SchemaEpisode) -> None:
         resumed_saved.append(ep.number)
 
+    high_usage = RunUsage(requests=60)
     resumed = await generate_script(
         FunctionModel(long_ep_responder),
         settings_600,
         Source.from_text("story", "600秒多轮闭环与补戏测试"),
+        usage=high_usage,
         existing_outline=res.outline,
         existing_episodes=[res.episodes[0]],
         on_episode_ready=on_resumed_ep,
     )
     assert resumed_saved == [2]
     assert [ep.number for ep in resumed.episodes] == [1, 2]
+    assert high_usage.requests > 60
 
 
 @pytest.mark.asyncio

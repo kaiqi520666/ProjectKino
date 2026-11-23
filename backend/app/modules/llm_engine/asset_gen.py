@@ -8,7 +8,7 @@ from pydantic_ai import Agent, ModelRetry, PromptedOutput, RunContext, RunUsage
 from pydantic_ai.models import Model
 
 from app.modules.llm_engine.gates import record_gate
-from app.modules.llm_engine.provider import MODEL_SETTINGS
+from app.modules.llm_engine.provider import MODEL_SETTINGS, SHARED_USAGE_LIMITS
 from app.modules.llm_engine.schema import Asset, AssetKind, AssetResult, Record, ScriptResult, Text
 from app.modules.llm_engine.script_gen import ProgressCallback, _notify, prompt, skill_instructions
 
@@ -341,6 +341,7 @@ async def design_kind(
                 ),
                 deps=DesignContext(kind, tuple(item.id for item in chunk), forbidden_names),
                 usage=usage,
+                usage_limits=SHARED_USAGE_LIMITS,
             )
         return {design.id: design for design in result.output.assets}
 
@@ -401,7 +402,7 @@ async def suggest_variant_prompt(
         payload["note"] = note.strip()
     if settings_payload:
         payload["settings"] = settings_payload
-    result = await agent.run(prompt(payload), usage=usage)
+    result = await agent.run(prompt(payload), usage=usage, usage_limits=SHARED_USAGE_LIMITS)
     return VariantPromptSuggestion(
         description=result.output.description.strip(),
         prompt=_format_variant_prompt(kind, result.output.prompt),

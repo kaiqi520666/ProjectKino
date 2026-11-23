@@ -7,7 +7,7 @@ from pydantic_ai import Agent, ModelRetry, PromptedOutput, RunContext, RunUsage
 from pydantic_ai.models import Model
 
 from app.modules.llm_engine.gates import record_gate
-from app.modules.llm_engine.provider import MODEL_SETTINGS
+from app.modules.llm_engine.provider import MODEL_SETTINGS, SHARED_USAGE_LIMITS
 from app.modules.llm_engine.schema import (
     Asset,
     AssetResult,
@@ -548,6 +548,7 @@ async def write_designs(
                 episode=episode.number,
             ),
             usage=usage,
+            usage_limits=SHARED_USAGE_LIMITS,
         )
         designs.update({segment.id: segment for segment in result.output.segments})
         last_segment = batch[-1]
@@ -978,6 +979,7 @@ async def _run_freeform_clip_agent(
             max_cuts=max_cuts,
         ),
         usage=usage,
+        usage_limits=SHARED_USAGE_LIMITS,
     )
     design = result.output
 

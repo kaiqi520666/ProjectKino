@@ -17,6 +17,7 @@ from app.modules.llm_engine.provider import (
     BEAT_SHEET_MODEL_SETTINGS,
     MODEL_SETTINGS,
     PLANNING_MODEL_SETTINGS,
+    SHARED_USAGE_LIMITS,
 )
 from app.modules.llm_engine.schema import (
     Character,
@@ -261,6 +262,7 @@ async def condense_source(
             result = await agent.run(
                 prompt({"lines": [start, end], "text": source.excerpt(start, end)}),
                 usage=usage,
+                usage_limits=SHARED_USAGE_LIMITS,
             )
         return {"lines": [start, end], "summary": result.output.summary, "events": result.output.events}
 
@@ -758,6 +760,7 @@ async def _write_episode_unified(
         prompt(base_payload),
         deps=BeatSheetContext(plan, outline, source, settings),
         usage=usage,
+        usage_limits=SHARED_USAGE_LIMITS,
     )
     sheet = beat_result.output
     groups = _group_beat_plans(sheet.scenes, MAX_GROUP_SECONDS)
@@ -826,6 +829,7 @@ async def _write_episode_unified(
             ),
             message_history=history or None,
             usage=usage,
+            usage_limits=SHARED_USAGE_LIMITS,
         )
         new_msgs = turn_result.new_messages()
         if len(new_msgs) == 2:
@@ -875,6 +879,7 @@ async def _write_episode_unified(
                 ),
                 message_history=history or None,
                 usage=usage,
+                usage_limits=SHARED_USAGE_LIMITS,
             )
             patch_scenes = patch_result.output.scenes
             if len(assembled_scenes) > 1:
@@ -987,7 +992,12 @@ async def generate_script(
             plan_payload["revisionFeedback"] = note
 
         await _notify(on_progress, 1, total_steps, f"正在规划全剧 {settings.episodeCount} 集大纲与世界观", 12)
-        draft = await planner.run(prompt(plan_payload), deps=OutlineContext(settings, source), usage=usage)
+        draft = await planner.run(
+            prompt(plan_payload),
+            deps=OutlineContext(settings, source),
+            usage=usage,
+            usage_limits=SHARED_USAGE_LIMITS,
+        )
         outline = draft.output
         if on_outline is not None:
             await on_outline(outline)
@@ -1160,7 +1170,10 @@ async def append_episode(
     }
     await _notify(on_progress, 1, 3, f"正在规划续写第 {next_number} 集大纲", 20)
     planned = await planner.run(
-        prompt(plan_payload), deps=ExtensionContext(outline, next_number), usage=usage
+        prompt(plan_payload),
+        deps=ExtensionContext(outline, next_number),
+        usage=usage,
+        usage_limits=SHARED_USAGE_LIMITS,
     )
     ext = planned.output
 
