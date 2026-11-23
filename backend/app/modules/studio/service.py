@@ -343,10 +343,14 @@ async def build_script_result_from_db(session: AsyncSession, project: Project) -
 
 
 async def build_asset_result_from_db(session: AsyncSession, project: Project) -> AssetResult:
+    # 仅返回主资产供分镜提取/校验使用；后续 Phase 2B 引入自动变体绑定时再扩展契约。
     assets = list(
         await session.scalars(
             select(ProjectAsset)
-            .where(ProjectAsset.project_id == project.id)
+            .where(
+                ProjectAsset.project_id == project.id,
+                ProjectAsset.parent_asset_id.is_(None),
+            )
             .order_by(ProjectAsset.created_at, ProjectAsset.asset_code)
         )
     )
@@ -464,6 +468,30 @@ async def persist_appended_episode(
     return ep
 
 
+async def _promote_children_and_delete_asset(
+    session: AsyncSession, *, project_id: UUID, asset: ProjectAsset
+) -> None:
+    children = list(
+        await session.scalars(
+            select(ProjectAsset)
+            .where(
+                ProjectAsset.project_id == project_id,
+                ProjectAsset.parent_asset_id == asset.id,
+            )
+            .order_by(ProjectAsset.created_at, ProjectAsset.id)
+        )
+    )
+    if children:
+        # 删除主资产时自动将最早创建的变体提升为新主资产并重挂兄弟变体，避免产生孤儿变体或丢失已生成图片。
+        new_root = children[0]
+        new_root.parent_asset_id = None
+        for sibling in children[1:]:
+            sibling.parent_asset_id = new_root.id
+        await session.flush()
+    await session.delete(asset)
+    await session.flush()
+
+
 async def persist_extracted_assets(
     session: AsyncSession,
     project: Project,
@@ -477,14 +505,14 @@ async def persist_extracted_assets(
     by_code = {row.asset_code: row for row in existing_rows}
     result_codes = {item.id for item in result.assets}
 
-    # 删除已不在剧本中出现的旧脚本主资产（保留用户手动创建的自定义资产及所有状态变体）。
+    # 删除已不在剧本中出现的旧脚本主资产（保留用户自定义资产与所有变体，并通过共享提拔逻辑防止孤儿变体）。
     for row in existing_rows:
         if (
             row.parent_asset_id is None
             and row.asset_code not in result_codes
             and _SCRIPT_CODE_RE.match(row.asset_code)
         ):
-            await session.delete(row)
+            await _promote_children_and_delete_asset(session, project_id=project.id, asset=row)
 
     saved: list[ProjectAsset] = []
     for item in result.assets:
@@ -776,25 +804,7 @@ async def delete_project_asset(session: AsyncSession, *, project: Project, asset
     )
     if asset is None:
         raise AppError(404, "asset_not_found", "资产不存在")
-    children = list(
-        await session.scalars(
-            select(ProjectAsset)
-            .where(
-                ProjectAsset.project_id == project.id,
-                ProjectAsset.parent_asset_id == asset.id,
-            )
-            .order_by(ProjectAsset.created_at, ProjectAsset.id)
-        )
-    )
-    if children:
-        # 删除主资产时自动将最早创建的变体提升为新主资产，避免误删用户已生成的变体图。
-        new_root = children[0]
-        new_root.parent_asset_id = None
-        for sibling in children[1:]:
-            sibling.parent_asset_id = new_root.id
-        await session.flush()
-    await session.delete(asset)
-    await session.flush()
+    await _promote_children_and_delete_asset(session, project_id=project.id, asset=asset)
 
 
 async def create_clip(

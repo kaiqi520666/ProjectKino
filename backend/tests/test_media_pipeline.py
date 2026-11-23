@@ -1446,5 +1446,146 @@ async def test_asset_variant_lifecycle_validation_and_parent_promotion():
     assert v2.parent_asset_id == v1.id
 
 
+@pytest.mark.asyncio
+async def test_persist_extracted_assets_promotes_variants_and_catalog_excludes_variants():
+    from app.modules.llm_engine.schema import Asset, AssetResult, ProjectSettings
+    from app.modules.studio.models import Project, ProjectAsset
+    from app.modules.studio.service import build_asset_result_from_db, persist_extracted_assets
+
+    settings_dict = ProjectSettings(
+        name="变体回归测试剧",
+        ratio="16:9",
+        language="zh-CN",
+        visualStyle="live-action",
+        episodeCount=1,
+        maxSegmentDuration=15,
+    ).model_dump()
+    project = Project(
+        id=uuid4(),
+        user_id=1,
+        name="变体回归测试剧",
+        mode="story",
+        settings=settings_dict,
+    )
+
+    c01 = ProjectAsset(
+        id=uuid4(),
+        project_id=project.id,
+        asset_code="C01",
+        kind="character",
+        name="主角",
+        description="默认造型",
+        prompt="默认提示词",
+        voice="",
+        episode_numbers=[1],
+        variant_label="",
+    )
+    c01_v1 = ProjectAsset(
+        id=uuid4(),
+        project_id=project.id,
+        asset_code="C_VAR1",
+        kind="character",
+        name="主角",
+        description="雨衣造型",
+        prompt="雨衣提示词",
+        voice="",
+        episode_numbers=[1],
+        parent_asset_id=c01.id,
+        variant_label="雨衣",
+    )
+    c02 = ProjectAsset(
+        id=uuid4(),
+        project_id=project.id,
+        asset_code="C02",
+        kind="character",
+        name="旧配角",
+        description="旧默认",
+        prompt="旧提示词",
+        voice="",
+        episode_numbers=[1],
+        variant_label="",
+    )
+    c02_v1 = ProjectAsset(
+        id=uuid4(),
+        project_id=project.id,
+        asset_code="C_OLDV1",
+        kind="character",
+        name="旧配角",
+        description="晚宴造型",
+        prompt="晚宴提示词",
+        voice="",
+        episode_numbers=[1],
+        parent_asset_id=c02.id,
+        variant_label="晚宴",
+    )
+    c02_v2 = ProjectAsset(
+        id=uuid4(),
+        project_id=project.id,
+        asset_code="C_OLDV2",
+        kind="character",
+        name="旧配角",
+        description="战损造型",
+        prompt="战损提示词",
+        voice="",
+        episode_numbers=[1],
+        parent_asset_id=c02.id,
+        variant_label="战损",
+    )
+    store: dict[UUID, ProjectAsset] = {row.id: row for row in (c01, c01_v1, c02, c02_v1, c02_v2)}
+
+    class _ExtractSession:
+        def add(self, obj: ProjectAsset) -> None:
+            if obj.id is None:
+                obj.id = uuid4()
+            store[obj.id] = obj
+
+        async def delete(self, obj: ProjectAsset) -> None:
+            store.pop(obj.id, None)
+
+        async def flush(self) -> None:
+            return None
+
+        async def scalars(self, stmt):
+            sql = str(stmt)
+            params = list(stmt.compile().params.values())
+            pid = params[0]
+            rows = [row for row in store.values() if row.project_id == pid]
+            if "parent_asset_id IS NULL" in sql:
+                return [row for row in rows if row.parent_asset_id is None]
+            if "parent_asset_id =" in sql:
+                parent_id = params[1]
+                return [row for row in rows if row.parent_asset_id == parent_id]
+            return rows
+
+    session = _ExtractSession()
+
+    # 1. build_asset_result_from_db 仅返回主资产，变体不进入分镜 catalog
+    catalog_result = await build_asset_result_from_db(session, project)  # type: ignore[arg-type]
+    assert [item.id for item in catalog_result.assets] == ["C01", "C02"]
+
+    # 2. 重新提取资产移除了 C02：C02 被删时，其最早变体 c02_v1 提拔为新主资产，c02_v2 重挂到 c02_v1
+    next_result = AssetResult(
+        settings=ProjectSettings.model_validate(settings_dict),
+        assets=[
+            Asset(
+                id="C01",
+                kind="character",
+                name="主角",
+                description="默认造型更新",
+                prompt="默认提示词更新",
+                episodeNumbers=[1],
+                voice="",
+            )
+        ],
+    )
+    await persist_extracted_assets(session, project, next_result)  # type: ignore[arg-type]
+    assert c02.id not in store
+    assert c02_v1.parent_asset_id is None
+    assert c02_v2.parent_asset_id == c02_v1.id
+    # 未被移除的主资产及其变体保持完整
+    assert c01.id in store
+    assert c01_v1.parent_asset_id == c01.id
+
+
 async def _async_return(value):
     return value
