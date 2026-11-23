@@ -628,43 +628,45 @@ defineExpose({ resetState, stopAudio })
             :aria-label="item.title"
             @click="handleCardClick(item)"
           >
-            <img
-              v-if="item.kind === 'image' && item.mediaUrl"
-              :src="item.mediaUrl"
-              loading="lazy"
-              alt=""
-              class="asset-lib-media"
-            />
-            <video
-              v-else-if="item.kind === 'video' && item.mediaUrl"
-              :src="`${item.mediaUrl}#t=0.05`"
-              preload="metadata"
-              muted
-              playsinline
-              loop
-              class="asset-lib-media"
-            />
-            <div v-else-if="item.kind === 'audio'" class="asset-lib-audio-stage">
-              <span
-                class="asset-lib-audio-wave"
-                :class="{ 'is-playing': playingAudioId === item.id }"
-                aria-hidden="true"
-              >
-                <i /><i /><i /><i /><i />
-              </span>
-            </div>
-            <div v-else-if="item.kind === 'text'" class="asset-lib-text-stage">
-              <p>{{ item.text }}</p>
-            </div>
-            <div v-else class="asset-lib-placeholder">
-              <component
-                :is="item.projectAsset ? projectKindIcons[item.projectAsset.kind] : ImageIcon"
-                :size="22"
-                :stroke-width="1.5"
+            <div class="asset-lib-stage">
+              <img
+                v-if="item.kind === 'image' && item.mediaUrl"
+                :src="item.mediaUrl"
+                loading="lazy"
+                alt=""
+                class="asset-lib-media asset-lib-media--image"
               />
+              <video
+                v-else-if="item.kind === 'video' && item.mediaUrl"
+                :src="`${item.mediaUrl}#t=0.05`"
+                preload="metadata"
+                muted
+                playsinline
+                loop
+                class="asset-lib-media"
+              />
+              <div v-else-if="item.kind === 'audio'" class="asset-lib-audio-stage">
+                <span
+                  class="asset-lib-audio-wave"
+                  :class="{ 'is-playing': playingAudioId === item.id }"
+                  aria-hidden="true"
+                >
+                  <i /><i /><i /><i /><i />
+                </span>
+              </div>
+              <div v-else-if="item.kind === 'text'" class="asset-lib-text-stage">
+                <p>{{ item.text }}</p>
+              </div>
+              <div v-else class="asset-lib-placeholder">
+                <component
+                  :is="item.projectAsset ? projectKindIcons[item.projectAsset.kind] : ImageIcon"
+                  :size="22"
+                  :stroke-width="1.5"
+                />
+              </div>
             </div>
 
-            <div class="asset-lib-scrim">
+            <div class="asset-lib-caption">
               <span class="asset-lib-name" :title="item.title">{{ item.title }}</span>
               <span v-if="item.tag" class="asset-lib-tag">{{ item.tag }}</span>
             </div>
@@ -912,28 +914,33 @@ defineExpose({ resetState, stopAudio })
 
 .asset-lib-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(172px, 1fr));
+  gap: 14px;
+}
+
+.asset-lib.is-full-page .asset-lib-grid {
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 16px;
 }
 
 .asset-lib-card {
   position: relative;
-  aspect-ratio: 16 / 10;
-  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 8px;
   overflow: hidden;
-  border: 1px solid rgb(255 255 255 / 8%);
-  background: var(--color-elevated);
-  transition: border-color 150ms ease, transform 150ms ease, box-shadow 150ms ease;
+  border: 1px solid var(--border-subtle);
+  background: var(--color-surface);
+  transition: border-color 150ms ease, box-shadow 150ms ease;
 }
 
 .asset-lib-upload {
-  display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  border: 1.5px dashed rgb(212 175 55 / 32%);
-  background: rgb(212 175 55 / 3%);
+  min-height: 152px;
+  border: 1px dashed var(--border-control);
+  background: var(--color-surface);
   color: var(--color-text);
   cursor: pointer;
 }
@@ -941,7 +948,7 @@ defineExpose({ resetState, stopAudio })
 .asset-lib-upload:hover:not(:disabled),
 .asset-lib-upload.is-dragover {
   border-color: var(--color-gold);
-  background: rgb(212 175 55 / 9%);
+  background: rgb(212 175 55 / 6%);
 }
 
 .asset-lib-upload:disabled {
@@ -952,10 +959,11 @@ defineExpose({ resetState, stopAudio })
 .asset-lib-upload-icon {
   display: grid;
   place-items: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  background: rgb(212 175 55 / 12%);
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  border: 1px solid rgb(240 184 75 / 24%);
+  background: rgb(240 184 75 / 10%);
   color: var(--color-gold-soft);
 }
 
@@ -971,12 +979,12 @@ defineExpose({ resetState, stopAudio })
 }
 
 .asset-lib-item:hover:not(.is-disabled) {
-  border-color: rgb(212 175 55 / 45%);
+  border-color: var(--focus-ring);
 }
 
 .asset-lib-item.is-selected {
   border-color: var(--color-gold);
-  box-shadow: 0 0 0 1px var(--color-gold), 0 6px 18px rgb(0 0 0 / 35%);
+  box-shadow: 0 0 0 1px var(--color-gold);
 }
 
 .asset-lib-item.is-disabled {
@@ -984,8 +992,8 @@ defineExpose({ resetState, stopAudio })
 }
 
 .asset-lib-hit {
-  position: relative;
-  display: block;
+  display: flex;
+  flex-direction: column;
   width: 100%;
   height: 100%;
   padding: 0;
@@ -1000,12 +1008,23 @@ defineExpose({ resetState, stopAudio })
   cursor: not-allowed;
 }
 
+.asset-lib-stage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  overflow: hidden;
+  background: var(--color-canvas);
+}
+
 .asset-lib-media {
   display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
-  background: #0d0e11;
+}
+
+.asset-lib-media--image {
+  object-fit: contain;
 }
 
 .asset-lib-audio-stage {
@@ -1013,7 +1032,7 @@ defineExpose({ resetState, stopAudio })
   place-items: center;
   width: 100%;
   height: 100%;
-  background: radial-gradient(circle at 50% 42%, rgb(212 175 55 / 14%), rgb(18 19 24 / 96%) 72%);
+  background: radial-gradient(circle at 50% 48%, rgb(212 175 55 / 12%), var(--color-canvas) 74%);
 }
 
 .asset-lib-audio-wave {
@@ -1057,7 +1076,7 @@ defineExpose({ resetState, stopAudio })
 
 .asset-lib-audio-btn {
   position: absolute;
-  top: 50%;
+  top: calc((100% - 35px) / 2);
   left: 50%;
   z-index: 2;
   display: grid;
@@ -1066,9 +1085,9 @@ defineExpose({ resetState, stopAudio })
   height: 36px;
   border-radius: 50%;
   border: 1px solid rgb(212 175 55 / 45%);
-  background: rgb(12 13 17 / 78%);
+  background: rgb(12 13 17 / 80%);
   color: var(--color-gold-soft);
-  transform: translate(-50%, -62%);
+  transform: translate(-50%, -50%);
   cursor: pointer;
   backdrop-filter: blur(6px);
   transition: transform 140ms ease, background 140ms ease;
@@ -1078,7 +1097,7 @@ defineExpose({ resetState, stopAudio })
 .asset-lib-audio-btn.is-playing {
   background: var(--color-gold);
   color: #14120c;
-  transform: translate(-50%, -62%) scale(1.06);
+  transform: translate(-50%, -50%) scale(1.06);
 }
 
 .asset-lib-text-stage {
@@ -1086,14 +1105,14 @@ defineExpose({ resetState, stopAudio })
   align-items: flex-start;
   width: 100%;
   height: 100%;
-  padding: 28px 12px 32px;
-  background: linear-gradient(155deg, rgb(255 255 255 / 4%), rgb(255 255 255 / 1%));
+  padding: 28px 12px 12px;
+  background: var(--color-elevated);
 }
 
 .asset-lib-text-stage p {
   margin: 0;
   font-size: 12px;
-  line-height: 1.45;
+  line-height: 1.5;
   color: var(--color-muted);
   display: -webkit-box;
   -webkit-line-clamp: 3;
@@ -1107,19 +1126,18 @@ defineExpose({ resetState, stopAudio })
   width: 100%;
   height: 100%;
   color: var(--color-muted);
-  background: rgb(255 255 255 / 2%);
+  background: var(--color-elevated);
 }
 
-.asset-lib-scrim {
-  position: absolute;
-  inset: auto 0 0 0;
+.asset-lib-caption {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
-  padding: 18px 9px 7px;
-  background: linear-gradient(to top, rgb(8 9 12 / 92%), rgb(8 9 12 / 48%) 62%, transparent);
-  pointer-events: none;
+  gap: 8px;
+  min-height: 35px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--color-surface);
 }
 
 .asset-lib-name {
@@ -1129,15 +1147,16 @@ defineExpose({ resetState, stopAudio })
   white-space: nowrap;
   font-size: 12px;
   font-weight: 500;
-  color: #f3f1ec;
+  color: var(--color-text);
 }
 
 .asset-lib-tag {
   flex: none;
-  padding: 1px 5px;
+  padding: 1px 6px;
   border-radius: 4px;
-  background: rgb(255 255 255 / 12%);
-  color: #ddd8cc;
+  background: var(--color-elevated);
+  border: 1px solid var(--border-subtle);
+  color: var(--color-muted);
   font-size: 10px;
 }
 
