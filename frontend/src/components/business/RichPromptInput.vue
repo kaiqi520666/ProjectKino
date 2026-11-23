@@ -8,13 +8,11 @@ import {
   parsePromptLine,
   type PromptReferenceKind,
   type PromptReferenceOption,
-  type PromptTokenSyntax,
 } from './prompt-references'
 
 const props = withDefaults(
   defineProps<{
     references: readonly PromptReferenceOption[]
-    syntax?: PromptTokenSyntax
     placeholder?: string
     mentionTitle?: string
     expanded?: boolean
@@ -24,7 +22,6 @@ const props = withDefaults(
     disabled?: boolean
   }>(),
   {
-    syntax: 'canvas',
     placeholder: '输入提示词，输入 @ 引用素材',
     mentionTitle: '引用素材',
     expanded: false,
@@ -107,11 +104,7 @@ function buildReferenceElement(tokenKey: string, removedLabel?: string): HTMLSpa
     }
     tag.append(createInlineIcon('broken'))
     const text = document.createElement('span')
-    text.textContent = removedLabel
-      ? `${removedLabel} · 已移除`
-      : props.syntax === 'studio'
-        ? `${tokenKey} · 已移除`
-        : '@引用已断开'
+    text.textContent = removedLabel ? `${removedLabel} · 已移除` : `${tokenKey} · 已移除`
     tag.append(text)
     return tag
   }
@@ -129,7 +122,7 @@ function buildReferenceElement(tokenKey: string, removedLabel?: string): HTMLSpa
   }
 
   const labelEl = document.createElement('span')
-  labelEl.textContent = props.syntax === 'studio' ? item.label : `@${item.label}`
+  labelEl.textContent = item.label
   tag.append(labelEl)
   return tag
 }
@@ -141,7 +134,7 @@ function referenceHtml(tokenKey: string, removedLabel?: string): string {
 function toModel(value: string): AnyTagProps[][] {
   return value.split('\n').map((line) => {
     const tags: AnyTagProps[] = []
-    for (const seg of parsePromptLine(line, props.syntax)) {
+    for (const seg of parsePromptLine(line)) {
       if (seg.type === 'text') {
         tags.push({ type: 'Write', text: seg.text })
         continue
@@ -165,9 +158,9 @@ function toText(model: AnyTagProps[][]): string {
             template.innerHTML = tag.html
             const el = template.content.querySelector<HTMLElement>('[data-reference], [data-removed]')
             const removed = el?.dataset.removed
-            if (removed) return formatPromptToken('', props.syntax, removed)
+            if (removed) return formatPromptToken('', removed)
             const id = el?.dataset.reference
-            return id ? formatPromptToken(id, props.syntax) : ''
+            return id ? formatPromptToken(id) : ''
           }
           return (tag.type === 'Mention' ? '@' : '') + tag.name
         })
@@ -311,7 +304,7 @@ function handlePaste() {
     if (sender !== instance) return
     const text = toText(instance.getModel())
     const hasRawTokenInWrite = instance.getModel().some((line) =>
-      line.some((tag) => tag.type === 'Write' && hasPromptToken(tag.text ?? '', props.syntax)),
+      line.some((tag) => tag.type === 'Write' && hasPromptToken(tag.text ?? '')),
     )
     if (hasRawTokenInWrite) {
       void instance.reset({ chatNode: toModel(text), clearHistory: false })
@@ -392,7 +385,7 @@ watch(
   () => {
     if (!sender) return
     sender.updateConfig({ mentionConfig: mentionConfig() })
-    if (!hasPromptToken(prompt.value, props.syntax)) return
+    if (!hasPromptToken(prompt.value)) return
     refreshRenderedChips()
   },
   { deep: true },

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { X } from 'lucide-vue-next'
+import { buildModalitySlotLabels } from '@/components/business/prompt-references'
 import ImagePreview from '@/components/ui/ImagePreview.vue'
 import MediaPlayer from '@/components/ui/MediaPlayer.vue'
 import UiDialog from '@/components/ui/UiDialog.vue'
@@ -13,6 +14,9 @@ const props = defineProps<{ nodes: CanvasNode[] }>()
 const emit = defineEmits<{ remove: [id: string]; reorder: [ids: string[]] }>()
 const preview = ref<CanvasNode>()
 const previewKind = computed(() => outputKind(preview.value?.type))
+const slotLabels = computed(() =>
+  buildModalitySlotLabels(props.nodes.map((node) => ({ id: node.id, kind: outputKind(node.type) }))),
+)
 const images = computed(() => props.nodes.flatMap(node => outputKind(node.type) === 'image' && node.data.media
   ? [{ src: node.data.media.url, title: name(node) }] : []))
 const open = ref(false)
@@ -47,7 +51,7 @@ function show(node: CanvasNode) {
         <img v-if="outputKind(node.type) === 'image' && node.data.media" :src="node.data.media.url" alt="" draggable="false" />
         <video v-else-if="outputKind(node.type) === 'video' && node.data.media" :src="node.data.media.url + '#t=0.05'" preload="metadata" muted playsinline aria-hidden="true" />
         <component :is="canvasNodeIcons[node.type ?? 'text']" v-else :size="18" />
-        <span class="canvas-reference-index">{{ index + 1 }}</span>
+        <span class="canvas-reference-index">{{ slotLabels[index]?.slotLabel ?? index + 1 }}</span>
       </button>
       <button type="button" class="canvas-reference-remove" :title="'移除引用 ' + name(node)" :aria-label="'移除引用 ' + name(node)" @click="emit('remove', node.id)"><X :size="12" /></button>
     </div>

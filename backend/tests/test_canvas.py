@@ -248,6 +248,85 @@ def test_resolve_canvas_generation_inputs_handles_refs_and_rejects_unsupported_m
     assert "@[图片1]" in text_resolved.resolved_prompt
 
 
+def test_resolve_canvas_generation_inputs_unified_at_slot_syntax():
+    from app.modules.canvas.generation import resolve_canvas_generation_inputs
+    from app.modules.canvas.schemas import CanvasGenerateRequest
+
+    video_req = CanvasGenerateRequest.model_validate(
+        {
+            "kind": "video",
+            "prompt": "镜头推进 @[图片1]，参考 @[视频1] 运镜，配 @[音频1] 节奏，氛围为 @[文本1]",
+            "references": [
+                {
+                    "nodeId": "img-1",
+                    "kind": "image",
+                    "title": "主角图",
+                    "mediaUrl": "https://image.nodepass.net/framedrama/1/images/hero.png",
+                },
+                {
+                    "nodeId": "vid-1",
+                    "kind": "video",
+                    "title": "运镜参考",
+                    "mediaUrl": "https://image.nodepass.net/framedrama/1/videos/cam.mp4",
+                },
+                {
+                    "nodeId": "aud-1",
+                    "kind": "audio",
+                    "title": "配乐",
+                    "mediaUrl": "https://image.nodepass.net/framedrama/1/audios/bgm.mp3",
+                },
+                {
+                    "nodeId": "txt-1",
+                    "kind": "text",
+                    "title": "氛围",
+                    "text": "冷调雨夜",
+                },
+                {
+                    "nodeId": "txt-2",
+                    "kind": "text",
+                    "title": "补充",
+                    "text": "胶片颗粒感",
+                },
+            ],
+        }
+    )
+    resolved = resolve_canvas_generation_inputs(video_req)
+    assert resolved.reference_urls == ["https://image.nodepass.net/framedrama/1/images/hero.png"]
+    assert resolved.reference_video_urls == ["https://image.nodepass.net/framedrama/1/videos/cam.mp4"]
+    assert resolved.reference_audio_urls == ["https://image.nodepass.net/framedrama/1/audios/bgm.mp3"]
+    assert "@[图片1]" in resolved.resolved_prompt
+    assert "@[视频1]" in resolved.resolved_prompt
+    assert "@[音频1]" in resolved.resolved_prompt
+    assert "@[文本1]" not in resolved.resolved_prompt
+    # Referenced @[文本1] is expanded inline once (not duplicated into unreferenced context)
+    assert resolved.resolved_prompt.count("冷调雨夜") == 1
+    # Unreferenced txt-2 is appended as context
+    assert "胶片颗粒感" in resolved.resolved_prompt
+
+    img_req = CanvasGenerateRequest.model_validate(
+        {
+            "kind": "image",
+            "prompt": "把 @[图片1] 调整为 @[文本1] 风格",
+            "references": [
+                {
+                    "nodeId": "img-1",
+                    "kind": "image",
+                    "title": "主角图",
+                    "mediaUrl": "https://image.nodepass.net/framedrama/1/images/hero.png",
+                },
+                {
+                    "nodeId": "txt-1",
+                    "kind": "text",
+                    "title": "画风",
+                    "text": "新中式工笔画",
+                },
+            ],
+        }
+    )
+    img_resolved = resolve_canvas_generation_inputs(img_req)
+    assert img_resolved.resolved_prompt == "把 @[图片1] 调整为 新中式工笔画 风格"
+
+
 @pytest.mark.asyncio
 async def test_generate_canvas_text_passes_image_urls_as_multimodal_parts() -> None:
     from pydantic_ai import ImageUrl

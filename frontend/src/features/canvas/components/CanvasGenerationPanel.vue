@@ -13,8 +13,14 @@ import ImageParamsPopover from '@/features/studio/components/ImageParamsPopover.
 import VideoModelPicker from '@/features/studio/components/VideoModelPicker.vue'
 import VideoParamsPopover from '@/features/studio/components/VideoParamsPopover.vue'
 import { useModelCatalog } from '@/features/studio/composables/useModelCatalog'
+import {
+  buildModalitySlotLabels,
+  migrateLegacyCanvasRefs,
+  remapPromptOnReferenceReorder,
+  remapPromptOnSlotRemove,
+} from '@/components/business/prompt-references'
 import { useAuthStore } from '@/stores/auth'
-import { outputKind, type CanvasGenerationSettings, type CanvasImageTier, type CanvasNode, type CanvasNodeKind } from '../canvas-model'
+import { canvasNodeLabels, outputKind, type CanvasGenerationSettings, type CanvasImageTier, type CanvasNode, type CanvasNodeKind } from '../canvas-model'
 import { useCanvasPopup } from '../useCanvasPopup'
 import CanvasPromptInput from './CanvasPromptInput.vue'
 import CanvasNodeReferences from './CanvasNodeReferences.vue'
@@ -272,6 +278,57 @@ function onDurationChange(value: unknown) {
   }
 }
 
+function toSlotInputs(nodes: readonly CanvasNode[]) {
+  return nodes.map((node) => ({ id: node.id, kind: outputKind(node.type) }))
+}
+
+function remapForRemove(currentPrompt: string, nodes: readonly CanvasNode[], removedId: string): string {
+  const slots = buildModalitySlotLabels(toSlotInputs(nodes))
+  const migrated = migrateLegacyCanvasRefs(
+    currentPrompt,
+    new Map(slots.map((slot) => [slot.id, slot.slotLabel])),
+  )
+  const targetSlot = slots.find((slot) => slot.id === removedId)
+  if (!targetSlot) return migrated
+  const node = nodes.find((item) => item.id === removedId)
+  const label = node?.data.title || canvasNodeLabels[node?.type ?? 'text']
+  return remapPromptOnSlotRemove(migrated, targetSlot.kind, targetSlot.modalityIndex, label).prompt
+}
+
+function remapForReorder(currentPrompt: string, prevNodes: readonly CanvasNode[], nextIds: readonly string[]): string {
+  const prevInputs = toSlotInputs(prevNodes)
+  const prevSlots = buildModalitySlotLabels(prevInputs)
+  const migrated = migrateLegacyCanvasRefs(
+    currentPrompt,
+    new Map(prevSlots.map((slot) => [slot.id, slot.slotLabel])),
+  )
+  const byId = new Map(prevNodes.map((node) => [node.id, node]))
+  const nextNodes = nextIds.flatMap((id) => byId.get(id) ?? [])
+  return remapPromptOnReferenceReorder(migrated, prevInputs, toSlotInputs(nextNodes)).prompt
+}
+
+function handleInlineRemoveReference(id: string) {
+  const nextPrompt = remapForRemove(prompt.value, props.references, id)
+  if (nextPrompt !== prompt.value) prompt.value = nextPrompt
+  emit('removeReference', id)
+}
+
+function handleInlineReorderReferences(ids: string[]) {
+  const nextPrompt = remapForReorder(prompt.value, props.references, ids)
+  if (nextPrompt !== prompt.value) prompt.value = nextPrompt
+  emit('reorderReferences', ids)
+}
+
+function handleExpandedRemoveReference(id: string) {
+  expandedPrompt.value = remapForRemove(expandedPrompt.value, expandedReferences.value, id)
+  expandedOrder.value = expandedOrder.value.filter((item) => item !== id)
+}
+
+function handleExpandedReorderReferences(ids: string[]) {
+  expandedPrompt.value = remapForReorder(expandedPrompt.value, expandedReferences.value, ids)
+  expandedOrder.value = ids
+}
+
 function expandPrompt() {
   expandedPrompt.value = prompt.value
   expandedOrder.value = props.references.map(node => node.id)
@@ -294,7 +351,7 @@ function applyPrompt() {
 
 <template>
   <section class="canvas-generation-panel nodrag nopan nowheel" aria-label="生成设置" @pointerdown.stop @mousedown.stop @keydown.stop @click.stop @contextmenu.prevent>
-    <CanvasNodeReferences v-if="references.length" :nodes="references" @remove="emit('removeReference', $event)" @reorder="emit('reorderReferences', $event)" />
+    <CanvasNodeReferences v-if="references.length" :nodes="references" @remove="handleInlineRemoveReference" @reorder="handleInlineReorderReferences" />
     <CanvasPromptInput v-if="!expanded" v-model="prompt" :references="references" />
     <div class="canvas-generation-controls">
       <ImageModelPicker
@@ -391,7 +448,7 @@ function applyPrompt() {
   </section>
   <UiDialog v-model:open="expanded" title="提示词" size="editor">
     <div v-if="expandedReferences.length" class="canvas-expanded-references">
-      <CanvasNodeReferences :nodes="expandedReferences" @remove="expandedOrder = expandedOrder.filter(id => id !== $event)" @reorder="expandedOrder = $event" />
+      <CanvasNodeReferences :nodes="expandedReferences" @remove="handleExpandedRemoveReference" @reorder="handleExpandedReorderReferences" />
     </div>
     <CanvasPromptInput v-if="expanded" v-model="expandedPrompt" :references="expandedReferences" expanded />
     <template #footer>

@@ -9,7 +9,8 @@ from pydantic_ai.usage import RunUsage
 from app.core.errors import AppError
 from app.modules.canvas.schemas import CanvasGenerateReference, CanvasGenerateRequest
 
-_REF_TOKEN_RE = re.compile(r"\{\{ref:([\w-]+)\}\}")
+_LEGACY_REF_TOKEN_RE = re.compile(r"\{\{ref:([\w-]+)\}\}")
+_TEXT_SLOT_TOKEN_RE = re.compile(r"@\[文本(\d+)\]")
 
 _CANVAS_TEXT_INSTRUCTIONS = (
     "你是 FrameDrama 画布创作助手，擅长视觉画面分析、影视短剧大纲、角色设定、分镜提示词润色与视觉画面描述。"
@@ -34,6 +35,7 @@ def resolve_canvas_generation_inputs(body: CanvasGenerateRequest) -> ResolvedCan
     image_refs: list[CanvasGenerateReference] = []
     video_refs: list[CanvasGenerateReference] = []
     audio_refs: list[CanvasGenerateReference] = []
+    text_refs: list[CanvasGenerateReference] = []
     image_index_by_node: dict[str, int] = {}
     video_index_by_node: dict[str, int] = {}
     audio_index_by_node: dict[str, int] = {}
@@ -50,10 +52,12 @@ def resolve_canvas_generation_inputs(body: CanvasGenerateRequest) -> ResolvedCan
             if ref.kind == "image" and ref.media_url:
                 image_refs.append(ref)
                 image_index_by_node[ref.node_id] = len(image_refs)
-            elif ref.kind == "text" and (ref.text or "").strip():
-                reference_texts.append(
-                    {"title": ref.title or "参考文本", "text": (ref.text or "").strip()}
-                )
+            elif ref.kind == "text":
+                text_refs.append(ref)
+                if (ref.text or "").strip():
+                    reference_texts.append(
+                        {"title": ref.title or "参考文本", "text": (ref.text or "").strip()}
+                    )
     elif body.kind == "video":
         for ref in body.references:
             if ref.kind == "image" and ref.media_url:
@@ -65,23 +69,37 @@ def resolve_canvas_generation_inputs(body: CanvasGenerateRequest) -> ResolvedCan
             elif ref.kind == "audio" and ref.media_url:
                 audio_refs.append(ref)
                 audio_index_by_node[ref.node_id] = len(audio_refs)
-            elif ref.kind == "text" and (ref.text or "").strip():
-                reference_texts.append(
-                    {"title": ref.title or "参考文本", "text": (ref.text or "").strip()}
-                )
+            elif ref.kind == "text":
+                text_refs.append(ref)
+                if (ref.text or "").strip():
+                    reference_texts.append(
+                        {"title": ref.title or "参考文本", "text": (ref.text or "").strip()}
+                    )
     else:
         for ref in body.references:
             if ref.kind == "image" and ref.media_url:
                 image_refs.append(ref)
                 image_index_by_node[ref.node_id] = len(image_refs)
-            elif ref.kind == "text" and (ref.text or "").strip():
-                reference_texts.append(
-                    {"title": ref.title or "参考文本", "text": (ref.text or "").strip()}
-                )
+            elif ref.kind == "text":
+                text_refs.append(ref)
+                if (ref.text or "").strip():
+                    reference_texts.append(
+                        {"title": ref.title or "参考文本", "text": (ref.text or "").strip()}
+                    )
 
     referenced_text_ids: set[str] = set()
 
-    def _replace_ref(match: re.Match[str]) -> str:
+    def _replace_text_slot(match: re.Match[str]) -> str:
+        idx = int(match.group(1)) - 1
+        if 0 <= idx < len(text_refs):
+            ref = text_refs[idx]
+            if (ref.text or "").strip():
+                referenced_text_ids.add(ref.node_id)
+                return (ref.text or "").strip()
+            return ref.title or ""
+        return match.group(0)
+
+    def _replace_legacy_ref(match: re.Match[str]) -> str:
         node_id = match.group(1)
         ref = refs_by_id.get(node_id)
         if ref is None:
@@ -97,7 +115,8 @@ def resolve_canvas_generation_inputs(body: CanvasGenerateRequest) -> ResolvedCan
             return (ref.text or "").strip()
         return ref.title or ""
 
-    resolved = _REF_TOKEN_RE.sub(_replace_ref, body.prompt or "").strip()
+    resolved = _TEXT_SLOT_TOKEN_RE.sub(_replace_text_slot, body.prompt or "")
+    resolved = _LEGACY_REF_TOKEN_RE.sub(_replace_legacy_ref, resolved).strip()
 
     # For image/video generation, if user connected upstream text nodes without using @mention,
     # append them cleanly so connected text context is never silently dropped.

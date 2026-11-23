@@ -35,7 +35,7 @@ import MediaHistoryDialog from '@/components/business/MediaHistoryDialog.vue'
 import type { MediaHistoryItem } from '@/components/business/MediaHistoryDialog.vue'
 import RichPromptInput from '@/components/business/RichPromptInput.vue'
 import {
-  remapStudioPromptOnSlotRemove,
+  remapPromptOnSlotRemove,
   type PromptReferenceOption,
 } from '@/components/business/prompt-references'
 import ImagePreview from '@/components/ui/ImagePreview.vue'
@@ -821,7 +821,7 @@ async function removeReferenceAsset(slotIndex: number) {
   const removed = references.value[slotIndex]
   if (!removed) return
   if (playingRefAudioId.value === removed.id) stopRefAudio()
-  const remap = remapStudioPromptOnSlotRemove(
+  const remap = remapPromptOnSlotRemove(
     clip.value.prompt,
     removed.mediaKind,
     removed.modalityIndex,
@@ -1279,7 +1279,6 @@ async function deleteClip() {
             <RichPromptInput
               :key="`${number}-${clip.backendId || clip.id}`"
               :model-value="clip.prompt"
-              syntax="studio"
               :references="promptReferences"
               bordered
               :min-height="132"
