@@ -494,15 +494,28 @@ defineExpose({ insertReference })
 
 .rich-prompt-input[data-expanded='true'] {
   display: flex;
+  flex-direction: column;
   flex: 1;
-  min-height: 0;
+  min-height: var(--rich-prompt-min-height, 142px);
   --chat-rect-padding: 12px;
 }
 
+.rich-prompt-input[data-expanded='true'] .chat-area-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+}
+
 .rich-prompt-input[data-expanded='true'] .chat-rich-text {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
   border: 1px solid var(--border-control);
   border-radius: 8px;
   background: var(--color-canvas);
+  transition: border-color 140ms ease;
 }
 
 .rich-prompt-input[data-expanded='true'] .chat-rich-text:focus-within {
@@ -516,6 +529,26 @@ defineExpose({ insertReference })
 .rich-prompt-input[data-expanded='true'] .chat-placeholder-wrap {
   inset: 1px 1px auto;
   width: auto;
+}
+
+.rich-prompt-input .chat-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.rich-prompt-input .chat-scroll::-webkit-scrollbar-track {
+  background: transparent;
+  box-shadow: none;
+}
+
+.rich-prompt-input .chat-scroll::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgb(255 255 255 / 16%);
+  box-shadow: none;
+}
+
+.rich-prompt-input .chat-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgb(255 255 255 / 28%);
 }
 
 .rich-prompt-input .chat-placeholder-wrap {

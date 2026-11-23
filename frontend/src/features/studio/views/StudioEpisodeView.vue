@@ -1280,9 +1280,8 @@ async function deleteClip() {
               :key="`${number}-${clip.backendId || clip.id}`"
               :model-value="clip.prompt"
               :references="promptReferences"
-              bordered
-              :min-height="132"
-              max-height="320px"
+              expanded
+              :min-height="180"
               placeholder="输入视频提示词，输入 @ 引用上方图片、视频或音频素材"
               mention-title="引用素材"
               @update:model-value="updatePrompt"
@@ -1569,7 +1568,7 @@ button.episode-asset-thumb { width: 100%; cursor: zoom-in; }
   object-fit: cover;
 }
 .episode-asset-name { display: block; margin-top: 4px; font-size: 12px; overflow-wrap: anywhere; }
-.episode-editor { display: grid; grid-template-rows: auto minmax(min-content, 1fr) auto; min-width: 0; }
+.episode-editor { display: grid; grid-template-rows: auto minmax(240px, 1fr) auto; min-width: 0; }
 .episode-references, .episode-prompt { min-width: 0; padding: 12px 16px; }
 .episode-section-head { justify-content: space-between; flex-wrap: wrap; }
 .episode-meta { margin: 0; color: var(--color-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -1634,7 +1633,7 @@ button.episode-asset-thumb { width: 100%; cursor: zoom-in; }
   color: var(--color-gold-soft);
 }
 .episode-prompt-actions > span { display: flex; align-items: center; gap: 6px; }
-.episode-prompt { display: flex; flex-direction: column; border-top: 1px solid var(--border-subtle); }
+.episode-prompt { display: flex; flex-direction: column; min-height: 0; border-top: 1px solid var(--border-subtle); }
 .episode-prompt :deep(.ui-field) { display: flex; flex: 1; flex-direction: column; }
 .episode-prompt :deep(textarea) { flex: 1; width: 100%; min-height: 142px; }
 .episode-prompt-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; }
@@ -1734,7 +1733,9 @@ button.episode-asset-thumb { width: 100%; cursor: zoom-in; }
 .episode-empty { align-self: center; }
 .episode-prompt-field {
   display: flex;
+  flex: 1;
   flex-direction: column;
+  min-height: 0;
   gap: 6px;
 }
 .episode-asset-thumb--video { position: relative; cursor: pointer; }
