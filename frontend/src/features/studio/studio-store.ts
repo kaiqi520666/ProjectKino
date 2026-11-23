@@ -1,6 +1,6 @@
 import { acceptHMRUpdate, defineStore } from 'pinia'
 import { ref } from 'vue'
-import { defaultSegmentDuration } from './components/drama-creation.ts'
+import { defaultEpisodeDuration, defaultSegmentDuration } from './components/drama-creation.ts'
 import type { DramaCreation, DramaSettings } from './components/drama-creation.ts'
 import type {
   AssetResult,
@@ -34,7 +34,16 @@ function normalizeAssetDraft(draft: StudioAssetDraft): StudioAssetDraft {
 
 function toDramaSettings(settings: BackendSettings): DramaSettings {
   const { name, ratio, language, visualStyle, episodeCount, maxSegmentDuration } = settings
-  return { name, ratio, language, visualStyle, episodeCount, maxSegmentDuration, backgroundMusic: settings.backgroundMusic ?? true }
+  return {
+    name,
+    ratio,
+    language,
+    visualStyle,
+    episodeCount,
+    maxSegmentDuration,
+    secondsPerEpisode: settings.secondsPerEpisode ?? defaultEpisodeDuration,
+    backgroundMusic: settings.backgroundMusic ?? true,
+  }
 }
 
 export const useStudioStore = defineStore('studio', () => {

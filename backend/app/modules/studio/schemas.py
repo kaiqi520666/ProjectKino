@@ -3,10 +3,15 @@ from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from app.core.schemas import CamelModel
 from app.modules.jobs.schemas import JobOut
+
+MIN_EPISODE_SECONDS = 120
+MAX_EPISODE_SECONDS = 600
+MAX_INITIAL_TOTAL_SECONDS = 3600
+MAX_UPLOAD_TEXT_BYTES = 2 * 1024 * 1024
 
 
 class ProjectSettingsIn(CamelModel):
@@ -15,10 +20,21 @@ class ProjectSettingsIn(CamelModel):
     language: Literal["zh-CN", "zh-TW", "en"] = "zh-CN"
     visual_style: str = Field(min_length=1, max_length=80)
     visual_style_label: str = Field(default="", max_length=500)
-    episode_count: int = Field(gt=0, le=100)
+    episode_count: int = Field(ge=1, le=MAX_INITIAL_TOTAL_SECONDS // MIN_EPISODE_SECONDS)
     max_segment_duration: Literal[15, 30] = 15
-    seconds_per_episode: int = Field(default=120, gt=0, le=600)
+    seconds_per_episode: int = Field(default=120, ge=MIN_EPISODE_SECONDS, le=MAX_EPISODE_SECONDS)
     background_music: bool = True
+
+    @model_validator(mode="after")
+    def validate_initial_total_duration(self) -> "ProjectSettingsIn":
+        if self.episode_count * self.seconds_per_episode > MAX_INITIAL_TOTAL_SECONDS:
+            max_eps = MAX_INITIAL_TOTAL_SECONDS // self.seconds_per_episode
+            raise ValueError(
+                f"首创全剧总时长不能超过 {MAX_INITIAL_TOTAL_SECONDS // 60} 分钟"
+                f"（当前单集 {self.seconds_per_episode} 秒最多可首创 {max_eps} 集，"
+                "创建后可在剧本页继续新增分集）"
+            )
+        return self
 
 
 class GenerateProjectRequest(CamelModel):
@@ -26,6 +42,12 @@ class GenerateProjectRequest(CamelModel):
     mode: Literal["story", "upload"] = "story"
     text: str = Field(min_length=1)
     feedback: str = Field(default="", max_length=500)
+
+    @model_validator(mode="after")
+    def validate_text_size(self) -> "GenerateProjectRequest":
+        if len(self.text.encode("utf-8")) > MAX_UPLOAD_TEXT_BYTES:
+            raise ValueError("上传的文本内容不能超过 2MB")
+        return self
 
 
 class RegenerateStoryRequest(CamelModel):

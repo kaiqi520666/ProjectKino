@@ -9,7 +9,20 @@ import UiSelect from '@/components/ui/UiSelect.vue'
 import UiSwitch from '@/components/ui/UiSwitch.vue'
 import UiTextarea from '@/components/ui/UiTextarea.vue'
 import ArtStylePicker from './ArtStylePicker.vue'
-import { contentLanguages, initialDramaSettings, resolveDramaSettings, segmentDurations, videoRatios } from './drama-creation'
+import {
+  contentLanguages,
+  episodeDurationPresets,
+  formatDurationLabel,
+  initialDramaSettings,
+  maxEpisodeDuration,
+  maxEpisodesForDuration,
+  maxInitialTotalSeconds,
+  maxScriptUploadMb,
+  minEpisodeDuration,
+  resolveDramaSettings,
+  segmentDurations,
+  videoRatios,
+} from './drama-creation'
 import type { DramaCreation } from './drama-creation'
 import { storyMaxLength, validateStory } from './story-input'
 
@@ -25,8 +38,52 @@ const draft = ref(initialDramaSettings())
 const story = ref('')
 const file = shallowRef<File>()
 const settings = computed(() => resolveDramaSettings(draft.value))
-const episodeCountInvalid = computed(() => draft.value.episodeCount !== '' &&
-  (!Number.isSafeInteger(draft.value.episodeCount) || draft.value.episodeCount < 1))
+const maxEpisodes = computed(() => maxEpisodesForDuration(draft.value.secondsPerEpisode))
+const episodeDurationInvalid = computed(
+  () =>
+    draft.value.secondsPerEpisode !== '' &&
+    (!Number.isSafeInteger(draft.value.secondsPerEpisode) ||
+      draft.value.secondsPerEpisode < minEpisodeDuration ||
+      draft.value.secondsPerEpisode > maxEpisodeDuration),
+)
+const episodeCountNonPositive = computed(
+  () =>
+    draft.value.episodeCount !== '' &&
+    (!Number.isSafeInteger(draft.value.episodeCount) || draft.value.episodeCount < 1),
+)
+const totalDurationExceeded = computed(
+  () =>
+    typeof draft.value.episodeCount === 'number' &&
+    Number.isSafeInteger(draft.value.episodeCount) &&
+    draft.value.episodeCount >= 1 &&
+    typeof draft.value.secondsPerEpisode === 'number' &&
+    Number.isSafeInteger(draft.value.secondsPerEpisode) &&
+    draft.value.secondsPerEpisode >= minEpisodeDuration &&
+    draft.value.episodeCount * draft.value.secondsPerEpisode > maxInitialTotalSeconds,
+)
+const episodeCountInvalid = computed(() => episodeCountNonPositive.value || totalDurationExceeded.value)
+const episodeCountError = computed(() => {
+  if (episodeCountNonPositive.value) return '集数必须是正整数'
+  if (totalDurationExceeded.value) {
+    return `单集 ${draft.value.secondsPerEpisode} 秒时首创最多 ${maxEpisodes.value} 集（总时长 ≤ ${maxInitialTotalSeconds / 60} 分钟），后续可在剧本页新增分集`
+  }
+  return ''
+})
+const estimatedTotalSeconds = computed(() => {
+  if (typeof draft.value.episodeCount !== 'number' || typeof draft.value.secondsPerEpisode !== 'number') return null
+  if (draft.value.episodeCount < 1 || draft.value.secondsPerEpisode < minEpisodeDuration) return null
+  return draft.value.episodeCount * draft.value.secondsPerEpisode
+})
+const estimatedClipsPerEpisode = computed(() => {
+  if (typeof draft.value.secondsPerEpisode !== 'number' || draft.value.secondsPerEpisode < minEpisodeDuration) return null
+  return Math.max(1, Math.ceil(draft.value.secondsPerEpisode / (draft.value.maxSegmentDuration * 0.8)))
+})
+const suggestThirtySeconds = computed(
+  () =>
+    typeof draft.value.secondsPerEpisode === 'number' &&
+    draft.value.secondsPerEpisode > 300 &&
+    draft.value.maxSegmentDuration === 15,
+)
 const canSubmit = computed(() => settings.value !== null &&
   (mode.value === 'story' ? validateStory(story.value) === null : !!file.value))
 
@@ -93,7 +150,14 @@ watch(open, (isOpen) => {
             :rows="3"
             :required="mode === 'story'"
           />
-          <FileDropzone v-show="mode === 'upload'" label="选择文件" :extensions="scriptFileExtensions" @select="file = $event" @clear="file = undefined" />
+          <FileDropzone
+            v-show="mode === 'upload'"
+            label="选择文件"
+            :extensions="scriptFileExtensions"
+            :max-size-mb="maxScriptUploadMb"
+            @select="file = $event"
+            @clear="file = undefined"
+          />
         </fieldset>
 
         <fieldset class="drama-section drama-settings">
@@ -120,9 +184,49 @@ watch(open, (isOpen) => {
                 </label>
               </div>
             </fieldset>
+            <div class="ui-field drama-full">
+              <label class="ui-label" :for="`${id}-ep-seconds`">
+                单集目标时长（{{ minEpisodeDuration }}–{{ maxEpisodeDuration }} 秒）<span class="ui-required" aria-hidden="true">*</span>
+              </label>
+              <div class="drama-ep-duration-row">
+                <div class="drama-ep-presets">
+                  <button
+                    v-for="sec in episodeDurationPresets"
+                    :key="sec"
+                    type="button"
+                    class="drama-ep-preset"
+                    :class="{ 'is-active': draft.secondsPerEpisode === sec }"
+                    @click="draft.secondsPerEpisode = sec"
+                  >
+                    {{ formatDurationLabel(sec) }}
+                  </button>
+                </div>
+                <label class="drama-ep-custom">
+                  <input
+                    :id="`${id}-ep-seconds`"
+                    v-model.number="draft.secondsPerEpisode"
+                    type="number"
+                    class="ui-input"
+                    :class="{ 'is-invalid': episodeDurationInvalid }"
+                    :min="minEpisodeDuration"
+                    :max="maxEpisodeDuration"
+                    step="1"
+                    required
+                    :aria-invalid="episodeDurationInvalid || undefined"
+                    :aria-describedby="episodeDurationInvalid ? `${id}-ep-seconds-error` : undefined"
+                  />
+                  <span>秒</span>
+                </label>
+              </div>
+              <p v-if="episodeDurationInvalid" :id="`${id}-ep-seconds-error`" class="ui-field-message is-error">
+                单集目标时长须为 {{ minEpisodeDuration }}–{{ maxEpisodeDuration }} 秒之间的整数
+              </p>
+            </div>
             <UiSelect v-model="draft.language" label="内容语言" :options="contentLanguages" required />
             <div class="ui-field">
-              <label class="ui-label" :for="`${id}-episodes`">集数<span class="ui-required" aria-hidden="true">*</span></label>
+              <label class="ui-label" :for="`${id}-episodes`">
+                集数（1–{{ maxEpisodes }}）<span class="ui-required" aria-hidden="true">*</span>
+              </label>
               <input
                 :id="`${id}-episodes`"
                 v-model.number="draft.episodeCount"
@@ -130,12 +234,23 @@ watch(open, (isOpen) => {
                 class="ui-input"
                 :class="{ 'is-invalid': episodeCountInvalid }"
                 min="1"
+                :max="maxEpisodes"
                 step="1"
                 required
                 :aria-invalid="episodeCountInvalid || undefined"
                 :aria-describedby="episodeCountInvalid ? `${id}-episodes-error` : undefined"
               />
-              <p v-if="episodeCountInvalid" :id="`${id}-episodes-error`" class="ui-field-message is-error">集数必须是正整数</p>
+              <p v-if="episodeCountInvalid" :id="`${id}-episodes-error`" class="ui-field-message is-error">{{ episodeCountError }}</p>
+            </div>
+            <div v-if="estimatedTotalSeconds !== null" class="drama-budget-hint drama-full">
+              <span>
+                首创总时长约 <strong>{{ formatDurationLabel(estimatedTotalSeconds) }}</strong> / 上限 {{ maxInitialTotalSeconds / 60 }} 分钟
+                <template v-if="estimatedClipsPerEpisode !== null"> · 每集约 {{ estimatedClipsPerEpisode }} 个片段</template>
+              </span>
+              <span v-if="suggestThirtySeconds" class="drama-budget-tip">
+                单集超过 5 分钟，建议单片段上限选 30 秒
+                <button type="button" class="drama-budget-link" @click="draft.maxSegmentDuration = 30">切为 30 秒</button>
+              </span>
             </div>
             <ArtStylePicker v-model="draft.visualStyle" class="drama-full" />
             <div class="drama-switch-row drama-full" :class="{ 'is-active': draft.backgroundMusic }">
@@ -190,6 +305,18 @@ watch(open, (isOpen) => {
 .drama-switch-control :deep(label) { flex: 1; color: #c9cad3; font-weight: 500; }
 .drama-switch-row.is-active .drama-switch-control :deep(label) { color: var(--color-text); }
 .drama-form input.is-invalid { border-color: var(--color-error); }
+.drama-ep-duration-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.drama-ep-presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.drama-ep-preset { min-height: 32px; padding: 0 11px; border: 1px solid var(--border-control); border-radius: 6px; background: var(--color-surface); color: var(--color-muted); font-size: 12px; cursor: pointer; transition: border-color .15s, background-color .15s, color .15s; }
+.drama-ep-preset:hover { color: var(--color-text); border-color: rgb(255 255 255 / 22%); }
+.drama-ep-preset.is-active { border-color: rgb(240 184 75 / 38%); background: var(--gold-tint); color: var(--color-gold-soft); font-weight: 500; }
+.drama-ep-custom { display: inline-flex; align-items: center; gap: 6px; color: var(--color-muted); font-size: 12px; }
+.drama-ep-custom .ui-input { width: 84px; min-height: 32px; padding: 4px 8px; text-align: center; }
+.drama-budget-hint { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; padding: 8px 12px; border: 1px solid var(--border-subtle); border-radius: 8px; background: rgb(255 255 255 / 2.5%); color: var(--color-muted); font-size: 12px; line-height: 1.5; }
+.drama-budget-hint strong { color: var(--color-text); font-weight: 500; }
+.drama-budget-tip { display: inline-flex; align-items: center; gap: 6px; color: var(--color-gold-soft); }
+.drama-budget-link { padding: 1px 7px; border: 1px solid rgb(240 184 75 / 38%); border-radius: 5px; background: var(--gold-tint); color: var(--color-gold-soft); font-size: 11px; cursor: pointer; }
+.drama-budget-link:hover { border-color: rgb(240 184 75 / 60%); }
 .drama-form :deep(.file-dropzone) { min-height: 158px; padding-block: 12px; gap: 5px; }
 .drama-form :deep(.ui-counter) { color: var(--color-muted); }
 @media (max-width: 460px) {

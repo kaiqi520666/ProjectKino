@@ -14,8 +14,8 @@ DEFAULT_TEXT_MODEL_ID = "or-ds-baidu"
 DEFAULT_UPSTREAM_PRESET = "@preset/ds-baidu"
 
 MODEL_SETTINGS = OpenRouterModelSettings(
-    timeout=300,
-    max_tokens=16384,
+    timeout=420,
+    max_tokens=32768,
     openrouter_reasoning={"enabled": False},
     openrouter_usage={"include": True},
 )

@@ -42,14 +42,36 @@ from app.modules.llm_engine.timing import (
 ProgressCallback = Callable[[int, int, str, int], Awaitable[None]]
 
 SKILLS_DIR = Path(__file__).resolve().parents[3] / "skills"
-DIGEST_THRESHOLD_CHARS = 24_000
-CHUNK_CHARS = 6_000
-MAX_SOURCE_LINES_PER_EPISODE = 1200
+DIGEST_THRESHOLD_CHARS = 40_000
+CHUNK_CHARS = 20_000
+MAX_SOURCE_LINE_CHARS = 400
+MAX_SOURCE_LINES_PER_EPISODE = 4000
+MAX_SOURCE_EXCERPT_CHARS_PER_EPISODE = 30_000
 
 _CHAPTER_HEADING = re.compile(r"^\s*(第[〇零一二三四五六七八九十百千万0-9]+[章回节][^\n]{0,40})\s*$")
+_SOFT_BREAK_CHARS = "。！？；!?;…\n"
 _ERA_DYNASTY = re.compile(r"(夏|商|周|秦|汉|三国|晋|南北朝|隋|唐|五代|宋|辽|金|元|明|清|民国)")
 _ERA_YEAR = re.compile(r"\d{3,4}\s*年|\d{1,2}\s*年代")
 _VAGUE_ERA = {"古代", "古装", "架空", "某朝", "未来", "现代", "年代"}
+
+
+def _wrap_long_line(line: str, limit: int = MAX_SOURCE_LINE_CHARS) -> list[str]:
+    if len(line) <= limit:
+        return [line]
+    parts: list[str] = []
+    remaining = line
+    while len(remaining) > limit:
+        window = remaining[:limit]
+        cut = max((window.rfind(ch) for ch in _SOFT_BREAK_CHARS), default=-1)
+        if cut >= limit // 2:
+            split_at = cut + 1
+        else:
+            split_at = limit
+        parts.append(remaining[:split_at])
+        remaining = remaining[split_at:]
+    if remaining:
+        parts.append(remaining)
+    return parts
 
 
 @dataclass(frozen=True)
@@ -61,7 +83,11 @@ class Source:
     def from_text(cls, mode: Literal["story", "upload"], text: str) -> "Source":
         if not text.strip():
             raise ValueError("故事内容不能为空。")
-        return cls(mode, text.splitlines())
+        raw_lines = text.splitlines()
+        normalized: list[str] = []
+        for raw_line in raw_lines:
+            normalized.extend(_wrap_long_line(raw_line))
+        return cls(mode, normalized)
 
     @property
     def chars(self) -> int:
@@ -303,6 +329,8 @@ def _cards(outline: Outline, plan: EpisodePlan) -> dict:
 
 def _episode_budget(target: int) -> dict:
     low, high = seconds_range(target)
+    line_beats = max(6, round(target / 6.6))
+    action_beats = max(3, round(target / 15))
     return {
         "targetSeconds": target,
         "minSeconds": low,
@@ -311,16 +339,38 @@ def _episode_budget(target: int) -> dict:
             f"{ACTION_SECONDS} 秒 × 动作节拍数 + 台词总字数 ÷ {CHARS_PER_SECOND} 必须落在 "
             f"{low}–{high} 秒；输出前先自己算一遍"
         ),
-        "reference": "120 秒一集通常 18–22 句台词加 8–12 个动作节拍",
+        "reference": (
+            f"{target} 秒一集建议约 {line_beats} 句台词（每句 20–28 字）加 {action_beats} 个动作节拍"
+        ),
         "recommended": {
-            "lineBeats": max(6, round(target / 6.6)),
-            "actionBeats": max(3, round(target / 15)),
+            "lineBeats": line_beats,
+            "actionBeats": action_beats,
         },
         "charsPerSecond": CHARS_PER_SECOND,
         "actionSeconds": ACTION_SECONDS,
         "maxLineChars": MAX_LINE_CHARS,
         "hookWindow": HOOK_WINDOW,
     }
+
+
+def _bounded_source_excerpts(source: Source, ranges: list[tuple[int, int]]) -> list[str]:
+    excerpts: list[str] = []
+    remaining = MAX_SOURCE_EXCERPT_CHARS_PER_EPISODE
+    for start, end in ranges:
+        if remaining <= 0:
+            break
+        block = source.excerpt(start, end)
+        if len(block) <= remaining:
+            excerpts.append(block)
+            remaining -= len(block)
+        else:
+            excerpts.append(
+                block[:remaining]
+                + f"\n…（本段原文第 {start}–{end} 行已按单集字符上限截断，"
+                "需要后续细节请调用 read_source_excerpt 回查）"
+            )
+            remaining = 0
+    return excerpts
 
 
 def _build_writer(model: Model, source: Source | None) -> Agent[EpisodeContext, EpisodeDraft]:
@@ -368,7 +418,7 @@ def _episode_payload(
         "source": source.excerpt(1, len(source.lines))
         if source is not None and source.mode == "story"
         else None,
-        "sourceExcerpts": [source.excerpt(start, end) for start, end in plan.sourceLines]
+        "sourceExcerpts": _bounded_source_excerpts(source, plan.sourceLines)
         if source is not None and source.mode == "upload"
         else [],
     }

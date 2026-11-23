@@ -3,7 +3,12 @@ import { readdirSync } from 'node:fs'
 import { test } from 'node:test'
 import { wrapSlideIndex } from '../src/features/dashboard/components/carousel-index.ts'
 import { storyMaxLength, validateStory } from '../src/features/studio/components/story-input.ts'
-import { initialDramaSettings, resolveDramaSettings } from '../src/features/studio/components/drama-creation.ts'
+import {
+  formatDurationLabel,
+  initialDramaSettings,
+  maxEpisodesForDuration,
+  resolveDramaSettings,
+} from '../src/features/studio/components/drama-creation.ts'
 import { artStyles, defaultArtStyle, quickArtStyles } from '../src/features/studio/components/art-styles.ts'
 
 test('carousel wraps next and previous indices without exceeding the slide count', () => {
@@ -47,6 +52,22 @@ test('short drama keeps the user-defined episode count and rejects invalid count
   for (const episodeCount of ['', 0, -2, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1] as const) {
     assert.equal(resolveDramaSettings({ ...draft, episodeCount }), null)
   }
+})
+
+test('short drama enforces episode duration 120-600s and initial total cap of 3600s', () => {
+  const draft = { ...initialDramaSettings(), name: 'Night Files' }
+  assert.equal(resolveDramaSettings({ ...draft, secondsPerEpisode: 120, episodeCount: 30 })?.episodeCount, 30)
+  assert.equal(resolveDramaSettings({ ...draft, secondsPerEpisode: 600, episodeCount: 6 })?.secondsPerEpisode, 600)
+  assert.equal(resolveDramaSettings({ ...draft, secondsPerEpisode: 119, episodeCount: 1 }), null)
+  assert.equal(resolveDramaSettings({ ...draft, secondsPerEpisode: 601, episodeCount: 1 }), null)
+  assert.equal(resolveDramaSettings({ ...draft, secondsPerEpisode: 120, episodeCount: 31 }), null)
+  assert.equal(resolveDramaSettings({ ...draft, secondsPerEpisode: 600, episodeCount: 7 }), null)
+  assert.equal(maxEpisodesForDuration(120), 30)
+  assert.equal(maxEpisodesForDuration(300), 12)
+  assert.equal(maxEpisodesForDuration(600), 6)
+  assert.equal(formatDurationLabel(120), '2 分钟')
+  assert.equal(formatDurationLabel(150), '2 分 30 秒')
+  assert.equal(formatDurationLabel(3600), '60 分钟')
 })
 
 test('the style catalog has a local preview for each pure visual style and defaults to live-action', () => {

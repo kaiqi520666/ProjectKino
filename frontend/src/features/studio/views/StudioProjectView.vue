@@ -9,7 +9,7 @@ import { useGenerationStore } from '@/stores/generation'
 import { useUiStore } from '@/stores/ui'
 import { apiErrorMessage, getProjectDetail, isRetryableApiError, renameProjectApi, watchJob } from '../api'
 import { artStyles } from '../components/art-styles'
-import { contentLanguages } from '../components/drama-creation'
+import { contentLanguages, formatDurationLabel } from '../components/drama-creation'
 import { useStudioStore } from '../studio-store'
 
 const route = useRoute()
@@ -190,6 +190,10 @@ function handleNameEscape(event: KeyboardEvent) {
           <div>
             <dt>集数</dt>
             <dd>{{ settings.episodeCount }} 集</dd>
+          </div>
+          <div v-if="settings.secondsPerEpisode">
+            <dt>单集</dt>
+            <dd>约 {{ formatDurationLabel(settings.secondsPerEpisode) }}</dd>
           </div>
         </dl>
       </header>

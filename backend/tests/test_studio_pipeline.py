@@ -2,6 +2,7 @@ import json
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 from pydantic_ai import RunUsage
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import ModelResponse, TextPart, UserPromptPart
@@ -10,13 +11,28 @@ from pydantic_ai.usage import RequestUsage
 
 from app.modules.llm_engine.asset_gen import analyze_assets
 from app.modules.llm_engine.schema import Asset, AssetResult, ProjectSettings
-from app.modules.llm_engine.script_gen import Source, append_episode, generate_script
+from app.modules.llm_engine.script_gen import (
+    CHUNK_CHARS,
+    MAX_SOURCE_EXCERPT_CHARS_PER_EPISODE,
+    MAX_SOURCE_LINE_CHARS,
+    Source,
+    _bounded_source_excerpts,
+    _episode_budget,
+    append_episode,
+    chunk_ranges,
+    generate_script,
+)
 from app.modules.llm_engine.storyboard_gen import (
     generate_new_clip_storyboard,
     regenerate_clip_storyboard,
     storyboard,
 )
 from app.modules.studio.models import Episode, Project, ProjectAsset, StoryboardClip
+from app.modules.studio.schemas import (
+    MAX_UPLOAD_TEXT_BYTES,
+    GenerateProjectRequest,
+    ProjectSettingsIn,
+)
 from app.modules.studio.service import _insert_clip_at_position, apply_regenerated_clip
 
 
@@ -946,3 +962,66 @@ async def test_apply_regenerated_clip_preserves_video_and_insert_at_position_ren
     assert [item.id for item in ordered] == [clip1.id, inserted.id, clip2.id, clip3.id]
     assert [item.clip_index for item in ordered] == [1, 2, 3, 4]
     assert inserted.duration_seconds == 20
+
+
+def test_project_settings_duration_total_cap_and_upload_limit():
+    ok_30 = ProjectSettingsIn(
+        name="长剧测试",
+        visual_style="live-action",
+        episode_count=30,
+        seconds_per_episode=120,
+    )
+    assert ok_30.episode_count == 30
+
+    ok_600 = ProjectSettingsIn(
+        name="长单集测试",
+        visual_style="live-action",
+        episode_count=6,
+        seconds_per_episode=600,
+    )
+    assert ok_600.seconds_per_episode == 600
+
+    with pytest.raises(ValidationError):
+        ProjectSettingsIn(name="过短", visual_style="live-action", episode_count=1, seconds_per_episode=119)
+    with pytest.raises(ValidationError):
+        ProjectSettingsIn(name="过长", visual_style="live-action", episode_count=1, seconds_per_episode=601)
+    with pytest.raises(ValidationError):
+        ProjectSettingsIn(
+            name="超总时长", visual_style="live-action", episode_count=7, seconds_per_episode=600
+        )
+    with pytest.raises(ValidationError):
+        ProjectSettingsIn(
+            name="超总时长2", visual_style="live-action", episode_count=31, seconds_per_episode=120
+        )
+
+    req_ok = GenerateProjectRequest(settings=ok_600, mode="upload", text="a" * MAX_UPLOAD_TEXT_BYTES)
+    assert len(req_ok.text) == MAX_UPLOAD_TEXT_BYTES
+    with pytest.raises(ValidationError):
+        GenerateProjectRequest(settings=ok_600, mode="upload", text="a" * (MAX_UPLOAD_TEXT_BYTES + 1))
+
+
+def test_source_soft_wraps_long_lines_chunks_at_20k_and_bounds_excerpts():
+    # 单行无换行长文自动软折行，免疫无换行 2MB txt
+    one_giant_line = ("林晚推开档案室铁门，冷风顺着走廊灌进来。" * 120)
+    src = Source.from_text("upload", one_giant_line)
+    assert len(src.lines) > 1
+    assert all(len(line) <= MAX_SOURCE_LINE_CHARS for line in src.lines)
+
+    # 60,000 字按 CHUNK_CHARS=20,000 分块，约 3 块
+    large_text = "\n".join(f"第{i}段：" + ("故事推进中。" * 16) for i in range(600))
+    large_src = Source.from_text("upload", large_text)
+    ranges = chunk_ranges(large_src.lines)
+    assert CHUNK_CHARS == 20_000
+    assert 2 <= len(ranges) <= 4
+
+    # 单集 sourceExcerpts 按 30,000 字上限截断并附带回查提示
+    excerpts = _bounded_source_excerpts(large_src, [(1, len(large_src.lines))])
+    assert len(excerpts) == 1
+    assert len(excerpts[0]) <= MAX_SOURCE_EXCERPT_CHARS_PER_EPISODE + 120
+    assert "read_source_excerpt" in excerpts[0]
+
+    # 动态时长配比不再硬编码 120 秒锚点
+    budget_600 = _episode_budget(600)
+    assert "600 秒" in budget_600["reference"]
+    assert "120 秒" not in budget_600["reference"]
+    assert budget_600["recommended"]["lineBeats"] > 60

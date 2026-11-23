@@ -10,6 +10,7 @@ import PromoCarousel from '../components/PromoCarousel.vue'
 import ToolEntryCard from '../components/ToolEntryCard.vue'
 import ScriptCreationPanel from '@/features/studio/components/ScriptCreationPanel.vue'
 import { artStyles } from '@/features/studio/components/art-styles'
+import { defaultEpisodeDuration, formatDurationLabel } from '@/features/studio/components/drama-creation'
 import type { DramaCreation } from '@/features/studio/components/drama-creation'
 import type { ProjectDetailOut } from '@/features/studio/api-types'
 import {
@@ -87,6 +88,7 @@ async function createDrama(input: DramaCreation) {
   const subtitle = [
     input.settings.name,
     `${input.settings.episodeCount} 集`,
+    `约 ${formatDurationLabel(input.settings.secondsPerEpisode ?? defaultEpisodeDuration)}/集`,
     style?.label || input.settings.visualStyle,
   ].filter(Boolean).join(' · ')
 

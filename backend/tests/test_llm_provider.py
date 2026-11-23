@@ -66,7 +66,7 @@ async def test_resolve_text_model_uses_openrouter_preset_and_disables_reasoning(
     assert isinstance(model, OpenRouterModel)
     assert model_id == "or-ds-baidu"
     assert model.model_name == "@preset/ds-baidu"
-    assert MODEL_SETTINGS.get("max_tokens") == 16384
+    assert MODEL_SETTINGS.get("max_tokens") == 32768
     assert MODEL_SETTINGS.get("openrouter_reasoning") == {"enabled": False}
     assert MODEL_SETTINGS.get("openrouter_usage") == {"include": True}
 
