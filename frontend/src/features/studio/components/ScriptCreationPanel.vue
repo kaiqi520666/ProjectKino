@@ -74,16 +74,17 @@ const estimatedTotalSeconds = computed(() => {
   if (draft.value.episodeCount < 1 || draft.value.secondsPerEpisode < minEpisodeDuration) return null
   return draft.value.episodeCount * draft.value.secondsPerEpisode
 })
-const estimatedClipsPerEpisode = computed(() => {
-  if (typeof draft.value.secondsPerEpisode !== 'number' || draft.value.secondsPerEpisode < minEpisodeDuration) return null
-  return Math.max(1, Math.ceil(draft.value.secondsPerEpisode / (draft.value.maxSegmentDuration * 0.8)))
-})
-const suggestThirtySeconds = computed(
+const recommendThirtySeconds = computed(
   () =>
     typeof draft.value.secondsPerEpisode === 'number' &&
-    draft.value.secondsPerEpisode > 300 &&
-    draft.value.maxSegmentDuration === 15,
+    draft.value.secondsPerEpisode > 300,
 )
+function estimatedClipsForSegment(segmentCap: number): number | null {
+  if (typeof draft.value.secondsPerEpisode !== 'number' || draft.value.secondsPerEpisode < minEpisodeDuration) {
+    return null
+  }
+  return Math.max(1, Math.ceil(draft.value.secondsPerEpisode / (segmentCap * 0.8)))
+}
 const canSubmit = computed(() => settings.value !== null &&
   (mode.value === 'story' ? validateStory(story.value) === null : !!file.value))
 
@@ -175,21 +176,12 @@ watch(open, (isOpen) => {
                 </label>
               </div>
             </fieldset>
-            <fieldset class="drama-choice drama-full">
-              <legend class="ui-label">单片段最长时长<span class="ui-required" aria-hidden="true">*</span></legend>
-              <div class="drama-segments drama-durations">
-                <label v-for="duration in segmentDurations" :key="duration">
-                  <input v-model="draft.maxSegmentDuration" type="radio" :name="`${id}-duration`" :value="duration" required />
-                  <span>{{ duration }} 秒</span>
-                </label>
-              </div>
-            </fieldset>
             <div class="ui-field drama-full">
               <label class="ui-label" :for="`${id}-ep-seconds`">
                 单集目标时长（{{ minEpisodeDuration }}–{{ maxEpisodeDuration }} 秒）<span class="ui-required" aria-hidden="true">*</span>
               </label>
               <div class="drama-ep-duration-row">
-                <div class="drama-ep-presets">
+                <div class="drama-segments drama-ep-presets" role="group" aria-label="快捷时长">
                   <button
                     v-for="sec in episodeDurationPresets"
                     :key="sec"
@@ -201,13 +193,11 @@ watch(open, (isOpen) => {
                     {{ formatDurationLabel(sec) }}
                   </button>
                 </div>
-                <label class="drama-ep-custom">
+                <label class="drama-ep-custom" :class="{ 'is-invalid': episodeDurationInvalid }">
                   <input
                     :id="`${id}-ep-seconds`"
                     v-model.number="draft.secondsPerEpisode"
                     type="number"
-                    class="ui-input"
-                    :class="{ 'is-invalid': episodeDurationInvalid }"
                     :min="minEpisodeDuration"
                     :max="maxEpisodeDuration"
                     step="1"
@@ -222,6 +212,21 @@ watch(open, (isOpen) => {
                 单集目标时长须为 {{ minEpisodeDuration }}–{{ maxEpisodeDuration }} 秒之间的整数
               </p>
             </div>
+            <fieldset class="drama-choice drama-full">
+              <legend class="ui-label">单片段最长时长<span class="ui-required" aria-hidden="true">*</span></legend>
+              <div class="drama-segments drama-durations">
+                <label v-for="duration in segmentDurations" :key="duration">
+                  <input v-model="draft.maxSegmentDuration" type="radio" :name="`${id}-duration`" :value="duration" required />
+                  <span>
+                    <strong class="drama-duration-main">{{ duration }} 秒</strong>
+                    <small v-if="estimatedClipsForSegment(duration) !== null" class="drama-duration-sub">
+                      约 {{ estimatedClipsForSegment(duration) }} 段/集
+                    </small>
+                    <em v-if="duration === 30 && recommendThirtySeconds" class="drama-duration-badge">推荐</em>
+                  </span>
+                </label>
+              </div>
+            </fieldset>
             <UiSelect v-model="draft.language" label="内容语言" :options="contentLanguages" required />
             <div class="ui-field">
               <label class="ui-label" :for="`${id}-episodes`">
@@ -242,16 +247,6 @@ watch(open, (isOpen) => {
               />
               <p v-if="episodeCountInvalid" :id="`${id}-episodes-error`" class="ui-field-message is-error">{{ episodeCountError }}</p>
             </div>
-            <div v-if="estimatedTotalSeconds !== null" class="drama-budget-hint drama-full">
-              <span>
-                首创总时长约 <strong>{{ formatDurationLabel(estimatedTotalSeconds) }}</strong> / 上限 {{ maxInitialTotalSeconds / 60 }} 分钟
-                <template v-if="estimatedClipsPerEpisode !== null"> · 每集约 {{ estimatedClipsPerEpisode }} 个片段</template>
-              </span>
-              <span v-if="suggestThirtySeconds" class="drama-budget-tip">
-                单集超过 5 分钟，建议单片段上限选 30 秒
-                <button type="button" class="drama-budget-link" @click="draft.maxSegmentDuration = 30">切为 30 秒</button>
-              </span>
-            </div>
             <ArtStylePicker v-model="draft.visualStyle" class="drama-full" />
             <div class="drama-switch-row drama-full" :class="{ 'is-active': draft.backgroundMusic }">
               <span class="drama-switch-icon" aria-hidden="true"><Music :size="15" :stroke-width="1.8" /></span>
@@ -263,11 +258,18 @@ watch(open, (isOpen) => {
       </form>
 
       <template #footer>
-        <UiButton variant="ghost" :disabled="busy" @click="open = false">取消</UiButton>
-        <UiButton variant="primary" type="submit" :form="formId" :disabled="!canSubmit || busy" :loading="busy">
-          {{ busy ? '正在生成剧本…' : '创建剧本' }}
-          <template v-if="!busy" #trailing><ArrowRight :size="16" aria-hidden="true" /></template>
-        </UiButton>
+        <div class="drama-dialog-footer">
+          <span v-if="estimatedTotalSeconds !== null" class="drama-footer-summary" :class="{ 'is-exceeded': totalDurationExceeded }">
+            首创总时长 <strong>{{ formatDurationLabel(estimatedTotalSeconds) }}</strong> / {{ maxInitialTotalSeconds / 60 }} 分钟
+          </span>
+          <div class="drama-footer-actions">
+            <UiButton variant="ghost" :disabled="busy" @click="open = false">取消</UiButton>
+            <UiButton variant="primary" type="submit" :form="formId" :disabled="!canSubmit || busy" :loading="busy">
+              {{ busy ? '正在生成剧本…' : '创建剧本' }}
+              <template v-if="!busy" #trailing><ArrowRight :size="16" aria-hidden="true" /></template>
+            </UiButton>
+          </div>
+        </div>
       </template>
     </UiDialog>
   </section>
@@ -305,18 +307,27 @@ watch(open, (isOpen) => {
 .drama-switch-control :deep(label) { flex: 1; color: #c9cad3; font-weight: 500; }
 .drama-switch-row.is-active .drama-switch-control :deep(label) { color: var(--color-text); }
 .drama-form input.is-invalid { border-color: var(--color-error); }
-.drama-ep-duration-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
-.drama-ep-presets { display: flex; flex-wrap: wrap; gap: 6px; }
-.drama-ep-preset { min-height: 32px; padding: 0 11px; border: 1px solid var(--border-control); border-radius: 6px; background: var(--color-surface); color: var(--color-muted); font-size: 12px; cursor: pointer; transition: border-color .15s, background-color .15s, color .15s; }
-.drama-ep-preset:hover { color: var(--color-text); border-color: rgb(255 255 255 / 22%); }
-.drama-ep-preset.is-active { border-color: rgb(240 184 75 / 38%); background: var(--gold-tint); color: var(--color-gold-soft); font-weight: 500; }
-.drama-ep-custom { display: inline-flex; align-items: center; gap: 6px; color: var(--color-muted); font-size: 12px; }
-.drama-ep-custom .ui-input { width: 84px; min-height: 32px; padding: 4px 8px; text-align: center; }
-.drama-budget-hint { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; padding: 8px 12px; border: 1px solid var(--border-subtle); border-radius: 8px; background: rgb(255 255 255 / 2.5%); color: var(--color-muted); font-size: 12px; line-height: 1.5; }
-.drama-budget-hint strong { color: var(--color-text); font-weight: 500; }
-.drama-budget-tip { display: inline-flex; align-items: center; gap: 6px; color: var(--color-gold-soft); }
-.drama-budget-link { padding: 1px 7px; border: 1px solid rgb(240 184 75 / 38%); border-radius: 5px; background: var(--gold-tint); color: var(--color-gold-soft); font-size: 11px; cursor: pointer; }
-.drama-budget-link:hover { border-color: rgb(240 184 75 / 60%); }
+.drama-ep-duration-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: stretch; gap: 8px; }
+.drama-ep-presets { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.drama-ep-preset { min-height: 34px; padding: 2px 6px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--color-muted); font-size: 13px; line-height: 1.25; cursor: pointer; transition: border-color .15s, background-color .15s, color .15s; }
+.drama-ep-preset:hover { color: var(--color-text); background: var(--surface-hover); }
+.drama-ep-preset.is-active { border-color: rgb(240 184 75 / 28%); background: var(--gold-tint); color: var(--color-gold-soft); font-weight: 500; }
+.drama-ep-custom { display: inline-flex; align-items: center; gap: 4px; padding: 0 10px; border: 1px solid var(--border-control); border-radius: 8px; background: var(--color-surface); color: var(--color-muted); font-size: 13px; transition: border-color .15s; }
+.drama-ep-custom:focus-within { border-color: rgb(240 184 75 / 55%); }
+.drama-ep-custom.is-invalid { border-color: var(--color-error); }
+.drama-ep-custom input { width: 46px; padding: 0; border: 0; background: transparent; color: var(--color-text); font-size: 13px; font-variant-numeric: tabular-nums; text-align: center; outline: none; -moz-appearance: textfield; }
+.drama-ep-custom input::-webkit-outer-spin-button,
+.drama-ep-custom input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.drama-duration-main { font-weight: 500; }
+.drama-duration-sub { color: var(--color-muted); font-size: 12px; opacity: .82; }
+.drama-segments input:checked + span .drama-duration-sub { color: var(--color-gold-soft); opacity: .78; }
+.drama-duration-badge { padding: 1px 6px; border: 1px solid rgb(240 184 75 / 38%); border-radius: 999px; background: rgb(240 184 75 / 14%); color: var(--color-gold-soft); font-size: 11px; font-style: normal; font-weight: 500; line-height: 1.35; }
+.drama-dialog-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 14px; width: 100%; }
+.drama-footer-summary { color: var(--color-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.drama-footer-summary strong { color: var(--color-text); font-weight: 500; }
+.drama-footer-summary.is-exceeded,
+.drama-footer-summary.is-exceeded strong { color: var(--color-error); }
+.drama-footer-actions { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
 .drama-form :deep(.file-dropzone) { min-height: 158px; padding-block: 12px; gap: 5px; }
 .drama-form :deep(.ui-counter) { color: var(--color-muted); }
 @media (max-width: 460px) {
