@@ -205,7 +205,7 @@ function handleNameEscape(event: KeyboardEvent) {
 .studio-project--fill-height { display: flex; flex-direction: column; min-height: inherit; padding-bottom: 12px; }
 .studio-project--script { height: calc(100dvh - 64px); overflow: hidden; }
 .studio-project--script > .studio-project-head { flex-shrink: 0; }
-.studio-project--episode { display: grid; min-height: inherit; padding-block: 12px; }
+.studio-project--episode { display: grid; height: calc(100dvh - 64px); min-height: 0; overflow: hidden; padding-block: 12px; }
 .studio-project-head {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -253,10 +253,12 @@ function handleNameEscape(event: KeyboardEvent) {
   .studio-project-style span { overflow: hidden; text-overflow: ellipsis; }
 }
 @media (max-width: 760px) {
-  .studio-project--script { height: calc(100dvh - 58px); }
+  .studio-project--script,
+  .studio-project--episode { height: calc(100dvh - 58px); }
 }
 @media (max-width: 640px) {
-  .studio-project--script { height: auto; overflow: visible; }
+  .studio-project--script,
+  .studio-project--episode { height: auto; overflow: visible; }
 }
 @media (max-width: 420px) {
   .studio-steps { gap: 6px; }

@@ -47,6 +47,8 @@ defineProps<{
 <style scoped>
 .episode-assets {
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
   padding: 16px;
   border-right: 1px solid var(--border-subtle);
 }

@@ -1445,13 +1445,14 @@ async function deleteClip() {
 </template>
 
 <style scoped>
-.episode-workbench { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.episode-workbench { display: flex; flex-direction: column; gap: 14px; height: 100%; min-width: 0; min-height: 0; }
 .episode-toolbar, .episode-heading, .episode-actions, .episode-section-head {
   display: flex;
   align-items: center;
   gap: 12px;
 }
 .episode-toolbar {
+  flex-shrink: 0;
   justify-content: space-between;
   flex-wrap: wrap;
   padding: 8px 12px;
@@ -1460,6 +1461,7 @@ async function deleteClip() {
   background: var(--color-surface);
 }
 .episode-batch-banner {
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1533,7 +1535,8 @@ async function deleteClip() {
   flex: 1;
   display: grid;
   grid-template-columns: clamp(196px, 20%, 268px) minmax(0, 1fr);
-  min-height: 536px;
+  min-height: 0;
+  overflow: hidden;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-panel);
   background: var(--color-surface);
@@ -1568,7 +1571,7 @@ button.episode-asset-thumb { width: 100%; cursor: zoom-in; }
   object-fit: cover;
 }
 .episode-asset-name { display: block; margin-top: 4px; font-size: 12px; overflow-wrap: anywhere; }
-.episode-editor { display: grid; grid-template-rows: auto minmax(240px, 1fr) auto; min-width: 0; }
+.episode-editor { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; height: 100%; min-width: 0; min-height: 0; overflow: hidden; }
 .episode-references, .episode-prompt { min-width: 0; padding: 12px 16px; }
 .episode-section-head { justify-content: space-between; flex-wrap: wrap; }
 .episode-meta { margin: 0; color: var(--color-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -1633,10 +1636,10 @@ button.episode-asset-thumb { width: 100%; cursor: zoom-in; }
   color: var(--color-gold-soft);
 }
 .episode-prompt-actions > span { display: flex; align-items: center; gap: 6px; }
-.episode-prompt { display: flex; flex-direction: column; min-height: 0; border-top: 1px solid var(--border-subtle); }
+.episode-prompt { display: flex; flex-direction: column; min-height: 0; overflow: hidden; border-top: 1px solid var(--border-subtle); }
 .episode-prompt :deep(.ui-field) { display: flex; flex: 1; flex-direction: column; }
 .episode-prompt :deep(textarea) { flex: 1; width: 100%; min-height: 142px; }
-.episode-prompt-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; }
+.episode-prompt-actions { flex-shrink: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; }
 .episode-video-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .episode-cta-split {
   display: inline-flex;
@@ -1851,7 +1854,9 @@ button.episode-asset-thumb { width: 100%; cursor: zoom-in; }
   to { transform: rotate(360deg); }
 }
 @container (max-width: 640px) {
-  .episode-layout { grid-template: auto 1fr / minmax(0, 1fr); min-height: 0; }
+  .episode-layout { grid-template: auto 1fr / minmax(0, 1fr); min-height: 0; overflow: visible; }
+  .episode-editor { height: auto; overflow: visible; }
+  .episode-prompt-field { min-height: 240px; }
   .episode-empty { min-height: 280px; }
 }
 </style>

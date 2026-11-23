@@ -496,7 +496,8 @@ defineExpose({ insertReference })
   display: flex;
   flex-direction: column;
   flex: 1;
-  min-height: var(--rich-prompt-min-height, 142px);
+  min-height: 0;
+  overflow: hidden;
   --chat-rect-padding: 12px;
 }
 
@@ -505,6 +506,7 @@ defineExpose({ insertReference })
   flex-direction: column;
   flex: 1;
   width: 100%;
+  height: 100%;
   min-height: 0;
 }
 
@@ -512,6 +514,8 @@ defineExpose({ insertReference })
   flex: 1;
   min-height: 0;
   height: 100%;
+  max-height: 100%;
+  overflow-y: auto;
   border: 1px solid var(--border-control);
   border-radius: 8px;
   background: var(--color-canvas);
