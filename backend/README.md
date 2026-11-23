@@ -15,13 +15,13 @@ uv run --locked uvicorn app.main:create_app --factory --reload --host 127.0.0.1 
 ### 2. AI 异步 Worker（处理剧本 / 资产 / 分镜 / 生图 / 生视频及任务巡检）
 
 ```powershell
-uv run --locked taskiq worker app.workers.broker:ai_broker app.workers.ai_tasks --workers 1 --max-async-tasks 20
+uv run --locked taskiq worker app.workers.broker:ai_broker app.workers.ai_tasks --workers 1 --max-async-tasks 20 --reload --reload-dir app
 ```
 
 ### 3. 媒体合成 Worker（按需启动，用于 FFmpeg 合成本集视频）
 
 ```powershell
-uv run --locked taskiq worker app.workers.broker:media_broker app.workers.media_tasks --workers 1 --max-async-tasks 2
+uv run --locked taskiq worker app.workers.broker:media_broker app.workers.media_tasks --workers 1 --max-async-tasks 2 --reload --reload-dir app
 ```
 
 ## Docker 启动（可选）
