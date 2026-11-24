@@ -582,7 +582,7 @@ async def write_designs(
         payload: dict = {
             "episode": episode.number,
             "settings": {
-                **script.settings.model_dump(),
+                **script.settings.llm_dump(),
                 "world": script.outline.world.model_dump() if script.outline.world else None,
             },
             "maxSegmentDuration": script.settings.maxSegmentDuration,
@@ -1001,7 +1001,7 @@ async def _run_freeform_clip_agent(
         "durationSeconds": duration_seconds,
         "cutCountRange": {"min": min_cuts, "max": max_cuts},
         "settings": {
-            **script.settings.model_dump(),
+            **script.settings.llm_dump(),
             "world": script.outline.world.model_dump() if script.outline.world else None,
         },
     }

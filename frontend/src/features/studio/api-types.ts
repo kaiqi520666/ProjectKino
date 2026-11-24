@@ -14,6 +14,9 @@ export interface BackendSettings {
   maxSegmentDuration: 15 | 30
   secondsPerEpisode?: number
   backgroundMusic?: boolean
+  imageModelId?: string | null
+  imageTier?: 'web' | '1k' | '2k' | '4k' | null
+  videoModelId?: string | null
 }
 
 export interface BackendBeat {
@@ -353,6 +356,7 @@ export interface ModelCatalogItemOut {
   category?: string
   displayName: string
   isDefault: boolean
+  isDefaultLong?: boolean
   capabilities: Record<string, unknown>
   defaults: Record<string, unknown>
   textPrice?: TextModelPriceOut | null

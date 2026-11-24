@@ -48,6 +48,7 @@ import StudioAssetEditor from '../components/StudioAssetEditor.vue'
 import StudioBatchImageDialog from '../components/StudioBatchImageDialog.vue'
 import { useBatchJobTracker } from '../composables/useBatchJobTracker'
 import { useModelCatalog } from '../composables/useModelCatalog'
+import { resolveDefaultImageModel, resolveImageTierForModel } from '../model-defaults'
 import { formatElapsedSeconds } from '../script-job-helpers'
 import {
   assetDisplayName,
@@ -644,22 +645,21 @@ function quickGenerateAssetImage(asset: StudioAsset, event: MouseEvent) {
   }
   const parent = findParentAsset(props.project.assets ?? [], asset)
   const parentRefUrl = parent?.imageUrl && /^https?:\/\//i.test(parent.imageUrl) ? parent.imageUrl : undefined
-  const sunburstModel = parentRefUrl
+  const projectModelId = props.project.creation.settings.imageModelId
+  const projectTier = props.project.creation.settings.imageTier
+  const sunburstModel = !projectModelId && parentRefUrl
     ? imageModels.value.find((m) => m.id === 'gpt-image-2.6-sunburst')?.id
     : undefined
-  const defaultModel = sunburstModel || imageModels.value.find((m) => m.isDefault)?.id || imageModels.value[0]?.id
-  const modelId = asset.imageModelId && imageModels.value.some((m) => m.id === asset.imageModelId)
-    ? asset.imageModelId
-    : defaultModel
-  if (!modelId) {
+  const preferredModelId = asset.imageModelId || projectModelId || sunburstModel
+  const chosenModel = resolveDefaultImageModel(imageModels.value, preferredModelId)
+  if (!chosenModel) {
     ui.notify('图片模型目录尚未加载完成，请稍后重试', 'error')
     void ensureModelCatalog()
     return
   }
-  const tierVal = asset.imageTier
-  const tier: 'web' | '1k' | '2k' | '4k' = tierVal === 'web' || tierVal === '1k' || tierVal === '2k' || tierVal === '4k' ? tierVal : '1k'
+  const tier = resolveImageTierForModel(chosenModel, asset.imageTier || projectTier)
   void generateAssetImage(asset, {
-    modelId,
+    modelId: chosenModel.id,
     tier,
     ...(parentRefUrl ? { referenceUrls: [parentRefUrl] } : {}),
   })
@@ -1134,6 +1134,8 @@ async function deleteAsset() {
       :project-id="project.id"
       :image-models="imageModels"
       :project-assets="project.assets ?? []"
+      :default-model-id="project.creation.settings.imageModelId"
+      :default-tier="project.creation.settings.imageTier"
       :persisted="project.persisted"
       :generating-image="!!submittingAssetId"
       @create="createAsset"
@@ -1162,6 +1164,8 @@ async function deleteAsset() {
       :active-category="category"
       :active-asset-ids="activeImageAssetIds"
       :image-models="imageModels"
+      :default-model-id="project.creation.settings.imageModelId"
+      :default-tier="project.creation.settings.imageTier"
       :initial-selected-ids="batchInitialIds"
       :submitting="batchSubmitting"
       @submit="submitBatchImageGeneration"

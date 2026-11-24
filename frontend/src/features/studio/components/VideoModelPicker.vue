@@ -16,6 +16,7 @@ const props = withDefaults(
   defineProps<{
     models: readonly ModelCatalogItemOut[]
     clipDuration?: number
+    minMaxDuration?: number
     projectRatio?: string
     referenceCount?: number
     promptLength?: number
@@ -129,6 +130,12 @@ function estimatedClipCost(m: ModelCatalogItemOut): string {
 
 function hardBlockReason(m: ModelCatalogItemOut): string {
   const caps = m.capabilities || {}
+  if (props.minMaxDuration !== undefined) {
+    const maxD = Number(caps.maxDuration || 15)
+    if (maxD < props.minMaxDuration) {
+      return `最长支持 ${maxD}s，不满足 ${props.minMaxDuration}s 片段要求`
+    }
+  }
   if (props.referenceCount !== undefined) {
     const maxImg = Number(caps.maxReferenceImages ?? 9)
     if (props.referenceCount > maxImg) {
@@ -278,7 +285,8 @@ function selectModel(m: ModelCatalogItemOut) {
                   <strong class="vmp-card-name">{{ m.displayName }}</strong>
                   <div class="vmp-card-badges">
                     <span v-if="m.category" class="vmp-cat-tag">{{ m.category }}</span>
-                    <span v-if="m.isDefault" class="vmp-default-tag">推荐默认</span>
+                    <span v-if="m.isDefault" class="vmp-default-tag">15s 默认</span>
+                    <span v-if="m.isDefaultLong" class="vmp-default-tag">30s 默认</span>
                     <span v-if="m.id === modelValue" class="vmp-selected-tag">
                       <Check :size="11" :stroke-width="2.6" />
                       <span>已选</span>

@@ -820,7 +820,8 @@ async def _serialize_admin_models(
                 enabled=m.enabled,
                 upstream_available=m.upstream_available,
                 last_synced_at=m.last_synced_at,
-                is_default=m.is_default,
+                is_default=bool(m.is_default),
+                is_default_long=bool(m.is_default_long),
                 sort=m.sort,
                 capabilities=m.capabilities or {},
                 defaults=m.defaults or {},
@@ -860,6 +861,31 @@ async def admin_list_models(
     return ApiResponse(data=await _serialize_admin_models(session, models))
 
 
+def _validate_default_long(
+    *,
+    media_type: str,
+    enabled: bool,
+    is_default_long: bool,
+    capabilities: dict[str, Any] | None,
+) -> None:
+    if not is_default_long:
+        return
+    if media_type != "video":
+        raise AppError(400, "default_long_video_only", "仅视频模型支持设为 30s 默认")
+    if not enabled:
+        raise AppError(400, "default_model_must_be_enabled", "默认模型必须保持启用状态")
+    try:
+        max_duration = int((capabilities or {}).get("maxDuration") or 15)
+    except (TypeError, ValueError):
+        max_duration = 15
+    if max_duration < 30:
+        raise AppError(
+            400,
+            "default_long_requires_30s",
+            "设为 30s 默认的视频模型最长时长须 ≥ 30 秒",
+        )
+
+
 @router.post("/models", response_model=ApiResponse[AdminModelItemOut], status_code=201)
 async def admin_create_model(
     body: AdminModelCreateRequest,
@@ -876,11 +902,23 @@ async def admin_create_model(
 
     if body.is_default and not body.enabled:
         raise AppError(400, "default_model_must_be_enabled", "默认模型必须保持启用状态")
+    _validate_default_long(
+        media_type=body.media_type,
+        enabled=body.enabled,
+        is_default_long=body.is_default_long,
+        capabilities=body.capabilities,
+    )
     if body.is_default:
         await session.execute(
             update(AiModel)
             .where(AiModel.media_type == body.media_type)
             .values(is_default=False)
+        )
+    if body.is_default_long:
+        await session.execute(
+            update(AiModel)
+            .where(AiModel.media_type == "video")
+            .values(is_default_long=False)
         )
 
     model = AiModel(
@@ -893,6 +931,7 @@ async def admin_create_model(
         enabled=body.enabled,
         upstream_available=True,
         is_default=body.is_default,
+        is_default_long=body.is_default_long,
         sort=body.sort,
         capabilities=dict(body.capabilities or {}),
         defaults=dict(body.defaults or {}),
@@ -964,8 +1003,17 @@ async def admin_update_model(
 
     next_enabled = model.enabled if body.enabled is None else body.enabled
     next_default = model.is_default if body.is_default is None else body.is_default
+    next_default_long = (
+        model.is_default_long if body.is_default_long is None else body.is_default_long
+    )
     if next_default and not next_enabled:
         raise AppError(400, "default_model_must_be_enabled", "默认模型必须保持启用状态")
+    _validate_default_long(
+        media_type=model.media_type,
+        enabled=next_enabled,
+        is_default_long=next_default_long,
+        capabilities=model.capabilities,
+    )
 
     if body.is_default is True and not model.is_default:
         await session.execute(
@@ -973,8 +1021,15 @@ async def admin_update_model(
             .where(AiModel.media_type == model.media_type, AiModel.id != model.id)
             .values(is_default=False)
         )
+    if body.is_default_long is True and not model.is_default_long:
+        await session.execute(
+            update(AiModel)
+            .where(AiModel.media_type == "video", AiModel.id != model.id)
+            .values(is_default_long=False)
+        )
     model.enabled = next_enabled
     model.is_default = next_default
+    model.is_default_long = next_default_long
 
     if body.text_price is not None and model.media_type == "text":
         tp = await session.scalar(select(TextModelPrice).where(TextModelPrice.model_id == model.id))
@@ -1057,7 +1112,7 @@ async def admin_delete_model(
     model = await session.scalar(select(AiModel).where(AiModel.id == model_id))
     if model is None:
         raise AppError(404, "model_not_found", f"模型 {model_id} 不存在")
-    if model.is_default:
+    if model.is_default or model.is_default_long:
         raise AppError(409, "cannot_delete_default_model", "请先将其他模型设为默认后再删除")
     used_res = await session.scalar(
         select(CreditReservation.id).where(CreditReservation.model_id == model.id).limit(1)

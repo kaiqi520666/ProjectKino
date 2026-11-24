@@ -35,6 +35,7 @@ import {
   variantLabelSuggestions,
 } from '../studio-assets'
 import type { StudioAsset, StudioAssetDraft, StudioAssetKind } from '../studio-assets'
+import { resolveDefaultImageModel, resolveImageTierForModel, type ImageTier } from '../model-defaults'
 import ImageModelPicker from './ImageModelPicker.vue'
 import ImageParamsPopover from './ImageParamsPopover.vue'
 
@@ -49,6 +50,8 @@ const props = withDefaults(
     projectId?: string
     imageModels?: ModelCatalogItemOut[]
     projectAssets?: StudioAsset[]
+    defaultModelId?: string
+    defaultTier?: ImageTier
     persisted?: boolean
     generatingImage?: boolean
   }>(),
@@ -56,6 +59,8 @@ const props = withDefaults(
     projectId: '',
     imageModels: () => [],
     projectAssets: () => [],
+    defaultModelId: undefined,
+    defaultTier: undefined,
     persisted: false,
     generatingImage: false,
   },
@@ -243,6 +248,16 @@ function handleLibraryConfirm(items: AssetLibraryItem[]) {
   selectedRefs.value = next.slice(0, maxRefImages.value)
 }
 
+function applyInitialImageDefaults(source?: StudioAsset, hasParentRef = false) {
+  const sunburstId = !props.defaultModelId && hasParentRef
+    ? modelCatalogList.value.find((m) => m.id === 'gpt-image-2.6-sunburst')?.id
+    : undefined
+  const preferredId = source?.imageModelId || props.defaultModelId || sunburstId
+  const chosenModel = resolveDefaultImageModel(modelCatalogList.value, preferredId)
+  selectedModelId.value = chosenModel?.id ?? 'gpt-image-2'
+  selectedTier.value = resolveImageTierForModel(chosenModel, source?.imageTier || props.defaultTier)
+}
+
 function edit(source: StudioAsset, trigger: HTMLButtonElement) {
   const { name, description, prompt, imageUrl, imageKey, voice, parentAssetId, variantLabel } = source
   asset.value = source
@@ -256,19 +271,7 @@ function edit(source: StudioAsset, trigger: HTMLButtonElement) {
   }
   selectedRefs.value = initialRefs
 
-  const sunburstId = initialRefs.length
-    ? modelCatalogList.value.find((m) => m.id === 'gpt-image-2.6-sunburst')?.id
-    : undefined
-  const fallbackDefault =
-    sunburstId
-    || modelCatalogList.value.find((m) => m.isDefault)?.id
-    || modelCatalogList.value[0]?.id
-    || 'gpt-image-2'
-  selectedModelId.value = source.imageModelId && modelCatalogList.value.some((m) => m.id === source.imageModelId)
-    ? source.imageModelId
-    : fallbackDefault
-  const tierVal = source.imageTier
-  selectedTier.value = tierVal === 'web' || tierVal === '1k' || tierVal === '2k' || tierVal === '4k' ? tierVal : '1k'
+  applyInitialImageDefaults(source, initialRefs.length > 0)
   selectedRatio.value = source.kind === 'prop' ? '1:1' : '16:9'
   openEditor(
     { name, description, prompt, imageUrl, imageKey, voice, parentAssetId, variantLabel: variantLabel ?? '' },
@@ -281,6 +284,7 @@ function create(initialKind: StudioAssetKind, trigger: HTMLButtonElement) {
   parentForCreate.value = undefined
   selectedRefs.value = []
   kind.value = initialKind
+  applyInitialImageDefaults(undefined, false)
   selectedRatio.value = initialKind === 'prop' ? '1:1' : '16:9'
   openEditor({ name: '', description: '', prompt: '', voice: '', variantLabel: '' }, trigger)
 }
@@ -293,6 +297,7 @@ function createVariant(parent: StudioAsset, trigger: HTMLButtonElement) {
       ? [{ url: parent.imageUrl, label: `${parent.name}（主图）`, isParent: true }]
       : []
   kind.value = parent.kind
+  applyInitialImageDefaults(undefined, selectedRefs.value.length > 0)
   selectedRatio.value = parent.kind === 'prop' ? '1:1' : '16:9'
   openEditor(
     {

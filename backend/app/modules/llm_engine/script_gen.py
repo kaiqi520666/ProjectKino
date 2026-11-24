@@ -693,7 +693,7 @@ def _episode_payload(
     next_plan = next((item for item in outline.episodes if item.number == plan.number + 1), None)
     payload: dict = {
         "task": "plan_episode_beats",
-        "settings": settings.model_dump(),
+        "settings": settings.llm_dump(),
         "mode": source.mode if source is not None else "story",
         "episodeSeconds": target,
         "recommendedSceneCount": _recommended_scene_count(target),
@@ -974,7 +974,7 @@ async def plan_script_outline(
     planner.output_validator(verify_outline)
 
     plan_payload: dict = {
-        "settings": settings.model_dump(),
+        "settings": settings.llm_dump(),
         "mode": source.mode,
         "episodeSeconds": target,
         "scaleGuide": _outline_scale_guide(settings, source.mode),
@@ -1207,7 +1207,7 @@ async def append_episode(
 
     direction = feedback.strip()
     plan_payload: dict = {
-        "settings": script.settings.model_dump(),
+        "settings": script.settings.llm_dump(),
         "nextEpisodeNumber": next_number,
         "nextIds": {
             "character": _next_id("C", [item.id for item in outline.characters]),
@@ -1249,7 +1249,7 @@ async def append_episode(
     )
     updated_settings = ProjectSettings.model_validate(
         {
-            **script.settings.model_dump(),
+            **script.settings.llm_dump(),
             "episodeCount": max(script.settings.episodeCount + 1, next_number),
         }
     )

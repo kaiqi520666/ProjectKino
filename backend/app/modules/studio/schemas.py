@@ -24,6 +24,9 @@ class ProjectSettingsIn(CamelModel):
     max_segment_duration: Literal[15, 30] = 15
     seconds_per_episode: int = Field(default=120, ge=MIN_EPISODE_SECONDS, le=MAX_EPISODE_SECONDS)
     background_music: bool = True
+    image_model_id: str | None = Field(default=None, max_length=48)
+    image_tier: Literal["web", "1k", "2k", "4k"] | None = None
+    video_model_id: str | None = Field(default=None, max_length=48)
 
     @model_validator(mode="after")
     def validate_initial_total_duration(self) -> "ProjectSettingsIn":

@@ -9,6 +9,16 @@ import UiSelect from '@/components/ui/UiSelect.vue'
 import UiSwitch from '@/components/ui/UiSwitch.vue'
 import UiTextarea from '@/components/ui/UiTextarea.vue'
 import ArtStylePicker from './ArtStylePicker.vue'
+import ImageModelPicker from './ImageModelPicker.vue'
+import VideoModelPicker from './VideoModelPicker.vue'
+import { useModelCatalog } from '../composables/useModelCatalog'
+import {
+  availableImageTiers,
+  IMAGE_TIER_OPTIONS,
+  resolveDefaultImageModel,
+  resolveDefaultVideoModel,
+  resolveImageTierForModel,
+} from '../model-defaults'
 import {
   contentLanguages,
   episodeDurationPresets,
@@ -37,6 +47,77 @@ const mode = ref<DramaCreation['mode']>('story')
 const draft = ref(initialDramaSettings())
 const story = ref('')
 const file = shallowRef<File>()
+const { imageModels, videoModels, ensureLoaded: ensureModelCatalog } = useModelCatalog()
+
+const selectedImageModelId = computed({
+  get: () => draft.value.imageModelId ?? '',
+  set: (value: string) => {
+    draft.value.imageModelId = value || undefined
+  },
+})
+
+const selectedVideoModelId = computed({
+  get: () => draft.value.videoModelId ?? '',
+  set: (value: string) => {
+    draft.value.videoModelId = value || undefined
+  },
+})
+
+const selectedImageModel = computed(
+  () => imageModels.value.find((m) => m.id === draft.value.imageModelId) ?? resolveDefaultImageModel(imageModels.value),
+)
+
+const imageTierChoices = computed(() => {
+  const tiers = availableImageTiers(selectedImageModel.value)
+  const priceMap = new Map(
+    (selectedImageModel.value?.imagePrices ?? []).map((p) => [p.tier, p.creditPrice]),
+  )
+  return IMAGE_TIER_OPTIONS.filter((opt) => tiers.includes(opt.value)).map((opt) => ({
+    ...opt,
+    price: priceMap.get(opt.value),
+  }))
+})
+
+function syncDefaultModelsForDraft(forceVideo = false) {
+  if (imageModels.value.length) {
+    const resolvedImg = resolveDefaultImageModel(imageModels.value, draft.value.imageModelId)
+    if (resolvedImg) {
+      draft.value.imageModelId = resolvedImg.id
+      draft.value.imageTier = resolveImageTierForModel(resolvedImg, draft.value.imageTier)
+    }
+  }
+  if (videoModels.value.length) {
+    const resolvedVid = resolveDefaultVideoModel(
+      videoModels.value,
+      draft.value.maxSegmentDuration,
+      forceVideo ? undefined : draft.value.videoModelId,
+    )
+    if (resolvedVid) {
+      draft.value.videoModelId = resolvedVid.id
+    }
+  }
+}
+
+watch(
+  () => draft.value.maxSegmentDuration,
+  (nextCap) => {
+    if (!videoModels.value.length) return
+    const nextModel = resolveDefaultVideoModel(videoModels.value, nextCap)
+    if (nextModel) draft.value.videoModelId = nextModel.id
+  },
+)
+
+watch(
+  () => draft.value.imageModelId,
+  () => {
+    if (!selectedImageModel.value) return
+    draft.value.imageTier = resolveImageTierForModel(selectedImageModel.value, draft.value.imageTier)
+  },
+)
+
+watch([imageModels, videoModels], () => {
+  if (open.value) syncDefaultModelsForDraft()
+})
 const settings = computed(() => resolveDramaSettings(draft.value))
 const maxEpisodes = computed(() => maxEpisodesForDuration(draft.value.secondsPerEpisode))
 const episodeDurationInvalid = computed(
@@ -102,7 +183,13 @@ function submit() {
 }
 
 watch(open, (isOpen) => {
-  if (isOpen) return
+  if (isOpen) {
+    syncDefaultModelsForDraft()
+    void ensureModelCatalog().then(() => {
+      if (open.value) syncDefaultModelsForDraft()
+    })
+    return
+  }
   if (preserveDraftOnClose.value) {
     preserveDraftOnClose.value = false
     return
@@ -227,6 +314,43 @@ watch(open, (isOpen) => {
                 </label>
               </div>
             </fieldset>
+            <div class="ui-field drama-full">
+              <span class="ui-label">默认视频模型（按 {{ draft.maxSegmentDuration }} 秒档自动匹配）</span>
+              <div class="drama-model-picker-wrap">
+                <VideoModelPicker
+                  v-model="selectedVideoModelId"
+                  :models="videoModels"
+                  :project-ratio="draft.ratio"
+                  :min-max-duration="draft.maxSegmentDuration === 30 ? 30 : undefined"
+                  placeholder="加载视频模型…"
+                />
+              </div>
+            </div>
+            <div class="drama-image-defaults drama-full">
+              <div class="ui-field">
+                <span class="ui-label">默认图片模型</span>
+                <div class="drama-model-picker-wrap">
+                  <ImageModelPicker
+                    v-model="selectedImageModelId"
+                    :models="imageModels"
+                    :tier="draft.imageTier"
+                    placeholder="加载图片模型…"
+                  />
+                </div>
+              </div>
+              <fieldset class="drama-choice">
+                <legend class="ui-label">默认图片清晰度</legend>
+                <div
+                  class="drama-segments drama-image-tiers"
+                  :style="{ gridTemplateColumns: `repeat(${Math.max(1, imageTierChoices.length)}, minmax(0, 1fr))` }"
+                >
+                  <label v-for="opt in imageTierChoices" :key="opt.value">
+                    <input v-model="draft.imageTier" type="radio" :name="`${id}-image-tier`" :value="opt.value" />
+                    <span>{{ opt.label }}</span>
+                  </label>
+                </div>
+              </fieldset>
+            </div>
             <UiSelect v-model="draft.language" label="内容语言" :options="contentLanguages" required />
             <div class="ui-field">
               <label class="ui-label" :for="`${id}-episodes`">
@@ -322,6 +446,11 @@ watch(open, (isOpen) => {
 .drama-duration-sub { color: var(--color-muted); font-size: 12px; opacity: .82; }
 .drama-segments input:checked + span .drama-duration-sub { color: var(--color-gold-soft); opacity: .78; }
 .drama-duration-badge { padding: 1px 6px; border: 1px solid rgb(240 184 75 / 38%); border-radius: 999px; background: rgb(240 184 75 / 14%); color: var(--color-gold-soft); font-size: 11px; font-style: normal; font-weight: 500; line-height: 1.35; }
+.drama-image-defaults { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); align-items: end; gap: 12px; }
+.drama-model-picker-wrap { display: flex; }
+.drama-model-picker-wrap :deep(.vmp-trigger),
+.drama-model-picker-wrap :deep(.imp-trigger) { width: 100%; justify-content: space-between; min-height: 40px; }
+.drama-image-tiers span { min-height: 30px; font-size: 13px; }
 .drama-dialog-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 14px; width: 100%; }
 .drama-footer-summary { color: var(--color-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .drama-footer-summary strong { color: var(--color-text); font-weight: 500; }

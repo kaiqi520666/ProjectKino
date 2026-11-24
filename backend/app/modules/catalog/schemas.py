@@ -27,6 +27,7 @@ class ModelCatalogItemOut(CamelModel):
     category: str = ""
     display_name: str
     is_default: bool
+    is_default_long: bool = False
     capabilities: dict[str, Any]
     defaults: dict[str, Any]
     text_price: TextModelPriceOut | None = None

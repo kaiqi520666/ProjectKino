@@ -34,6 +34,7 @@ function normalizeAssetDraft(draft: StudioAssetDraft): StudioAssetDraft {
 
 function toDramaSettings(settings: BackendSettings): DramaSettings {
   const { name, ratio, language, visualStyle, episodeCount, maxSegmentDuration } = settings
+  const tier = settings.imageTier
   return {
     name,
     ratio,
@@ -43,6 +44,9 @@ function toDramaSettings(settings: BackendSettings): DramaSettings {
     maxSegmentDuration,
     secondsPerEpisode: settings.secondsPerEpisode ?? defaultEpisodeDuration,
     backgroundMusic: settings.backgroundMusic ?? true,
+    ...(settings.imageModelId ? { imageModelId: settings.imageModelId } : {}),
+    ...(tier === 'web' || tier === '1k' || tier === '2k' || tier === '4k' ? { imageTier: tier } : {}),
+    ...(settings.videoModelId ? { videoModelId: settings.videoModelId } : {}),
   }
 }
 

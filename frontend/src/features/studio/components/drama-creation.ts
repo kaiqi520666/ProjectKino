@@ -16,6 +16,8 @@ export const contentLanguages = [
   { value: 'zh-TW', label: '繁體中文' },
   { value: 'en', label: 'English' },
 ]
+export type DramaImageTier = 'web' | '1k' | '2k' | '4k'
+
 export interface DramaSettings {
   name: string
   ratio: ImageAspectRatio
@@ -25,6 +27,9 @@ export interface DramaSettings {
   maxSegmentDuration: SegmentDuration
   secondsPerEpisode?: number
   backgroundMusic: boolean
+  imageModelId?: string
+  imageTier?: DramaImageTier
+  videoModelId?: string
 }
 
 export type DramaCreation =
@@ -67,6 +72,9 @@ export function initialDramaSettings(): DramaSettingsDraft {
     maxSegmentDuration: defaultSegmentDuration,
     secondsPerEpisode: defaultEpisodeDuration,
     backgroundMusic: true,
+    imageModelId: undefined,
+    imageTier: '1k',
+    videoModelId: undefined,
   }
 }
 

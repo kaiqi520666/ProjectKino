@@ -507,7 +507,7 @@ async def analyze_assets(
     items = inventory(script)
     names = [card.name for card in script.outline.characters]
     world = script.outline.world
-    settings_payload = {**script.settings.model_dump(), "world": world.model_dump() if world else None}
+    settings_payload = {**script.settings.llm_dump(), "world": world.model_dump() if world else None}
     existing_roots = [asset for asset in existing if not asset.parentId]
     existing_by_id = {asset.id: asset for asset in existing_roots}
     existing_variants_by_parent: dict[str, list[Asset]] = {}

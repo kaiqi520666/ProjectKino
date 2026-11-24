@@ -215,6 +215,7 @@ export interface AdminModelItem {
   upstreamAvailable: boolean
   lastSyncedAt?: string | null
   isDefault: boolean
+  isDefaultLong?: boolean
   sort: number
   capabilities: Record<string, unknown>
   defaults: Record<string, unknown>
@@ -321,6 +322,7 @@ export function createAdminModel(body: {
   upstreamModelId: string
   enabled: boolean
   isDefault: boolean
+  isDefaultLong?: boolean
   sort: number
   capabilities?: Record<string, unknown>
   defaults?: Record<string, unknown>
@@ -340,6 +342,7 @@ export function updateAdminModel(
     upstreamModelId?: string
     enabled?: boolean
     isDefault?: boolean
+    isDefaultLong?: boolean
     sort?: number
     capabilities?: Record<string, unknown>
     defaults?: Record<string, unknown>

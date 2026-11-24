@@ -75,6 +75,12 @@ import VideoModelPicker from '../components/VideoModelPicker.vue'
 import VideoParamsPopover from '../components/VideoParamsPopover.vue'
 import { useBatchJobTracker } from '../composables/useBatchJobTracker'
 import { useModelCatalog } from '../composables/useModelCatalog'
+import {
+  isClipDurationExceededByModel,
+  modelMaxDuration,
+  modelMinDuration,
+  resolveDefaultVideoModel,
+} from '../model-defaults'
 import { computeStoryboardLocks, formatElapsedSeconds } from '../storyboard-job-helpers'
 import { useStoryboardJobStore } from '../storyboard-job-store'
 import { assetDisplayName, assetStateLabel, findAssetSiblings } from '../studio-assets'
@@ -149,13 +155,34 @@ const videoModelNames = computed<Record<string, string>>(() => {
   return map
 })
 
+function syncDefaultVideoModel(force = false) {
+  if (!videoModels.value.length) return
+  const currentValid =
+    !force
+    && selectedVideoModelId.value
+    && videoModels.value.some((m) => m.id === selectedVideoModelId.value)
+  if (currentValid) return
+  const projectCap = props.project.creation.settings.maxSegmentDuration ?? defaultSegmentDuration
+  const preferred = props.project.creation.settings.videoModelId
+  const resolved = resolveDefaultVideoModel(videoModels.value, projectCap, preferred)
+  if (resolved) selectedVideoModelId.value = resolved.id
+}
+
 onMounted(async () => {
   await ensureModelCatalog()
-  if (!selectedVideoModelId.value || !videoModels.value.some((m) => m.id === selectedVideoModelId.value)) {
-    const def = videoModels.value.find((m) => m.isDefault) ?? videoModels.value[0]
-    if (def) selectedVideoModelId.value = def.id
-  }
+  syncDefaultVideoModel()
 })
+
+watch(
+  () => [
+    props.project.id,
+    props.project.creation.settings.videoModelId,
+    props.project.creation.settings.maxSegmentDuration,
+  ] as const,
+  () => {
+    syncDefaultVideoModel(true)
+  },
+)
 
 const number = computed(() => Number(route.params.episode))
 const episode = computed(() => isEpisodeNumber(number.value, props.project.creation.settings.episodeCount)
@@ -538,13 +565,33 @@ const estimatedVideoQuote = computed(() => {
   }
 })
 
+const durationMismatch = computed(() =>
+  isClipDurationExceededByModel(clip.value?.durationSeconds, currentVideoModel.value),
+)
+
+const recommendedLongVideoModel = computed(() => {
+  const targetDur = clip.value?.durationSeconds ?? 30
+  const candidate = resolveDefaultVideoModel(
+    videoModels.value,
+    30,
+    props.project.creation.settings.videoModelId,
+  )
+  if (!candidate || modelMaxDuration(candidate) < targetDur) return null
+  return candidate
+})
+
+function switchToLongVideoModel() {
+  if (!recommendedLongVideoModel.value) return
+  selectedVideoModelId.value = recommendedLongVideoModel.value.id
+}
+
 watch(
-  () => [clip.value?.id, clip.value?.durationSeconds] as const,
+  () => [clip.value?.id, clip.value?.durationSeconds, currentVideoModel.value?.id] as const,
   ([, dur]) => {
     if (!dur) return
-    const minD = Number(currentVideoModel.value?.capabilities?.minDuration || 4)
-    const maxD = Number(currentVideoModel.value?.capabilities?.maxDuration || 15)
-    selectedDuration.value = Math.min(Math.max(dur, minD), maxD)
+    const minD = modelMinDuration(currentVideoModel.value)
+    const maxD = modelMaxDuration(currentVideoModel.value)
+    selectedDuration.value = dur > maxD ? dur : Math.max(dur, minD)
   },
   { immediate: true },
 )
@@ -1047,6 +1094,13 @@ async function generateClipVideo() {
     return
   }
 
+  if (durationMismatch.value.exceeded) {
+    ui.notify(
+      `当前片段 ${activeClip.durationSeconds} 秒超出所选模型上限 ${durationMismatch.value.maxDuration} 秒，请先切换支持 30 秒的模型或调短片段时长`,
+      'error',
+    )
+    return
+  }
   const clipIndex = activeClip.id
   const backendClipId = activeClip.backendId
   const isRedraw = !!activeClip.videoUrl
@@ -1560,6 +1614,24 @@ async function deleteClip() {
               @update:model-value="updatePrompt"
             />
           </div>
+          <div
+            v-if="durationMismatch.exceeded"
+            class="episode-clip-job-banner is-failed"
+            role="alert"
+          >
+            <AlertCircle :size="14" aria-hidden="true" />
+            <span class="episode-clip-job-banner-text">
+              当前片段 {{ clip.durationSeconds }} 秒超出所选模型上限 {{ durationMismatch.maxDuration }} 秒，请切换支持 30 秒的模型或调短片段时长。
+            </span>
+            <UiButton
+              v-if="recommendedLongVideoModel"
+              variant="outline"
+              size="sm"
+              @click="switchToLongVideoModel"
+            >
+              切换 {{ recommendedLongVideoModel.displayName }}
+            </UiButton>
+          </div>
           <div class="episode-prompt-actions">
             <div class="episode-video-controls">
               <VideoModelPicker
@@ -1611,7 +1683,7 @@ async function deleteClip() {
                   variant="primary"
                   size="sm"
                   :loading="submittingClipId === clip.backendId || isClipGenerating(clip)"
-                  :disabled="!clip.prompt.trim() || !currentVideoModel || locks.episodeActionsLocked || currentClipLocked || submittingClipId === clip.backendId"
+                  :disabled="!clip.prompt.trim() || !currentVideoModel || durationMismatch.exceeded || locks.episodeActionsLocked || currentClipLocked || submittingClipId === clip.backendId"
                   @click="generateClipVideo"
                 >
                   <template v-if="submittingClipId !== clip.backendId && !isClipGenerating(clip)" #leading><Video :size="15" aria-hidden="true" /></template>
@@ -1684,6 +1756,8 @@ async function deleteClip() {
       :clips="clips"
       :project-assets="project.assets ?? []"
       :project-ratio="project.creation.settings.ratio || '16:9'"
+      :segment-cap="cap"
+      :default-model-id="selectedVideoModelId || project.creation.settings.videoModelId"
       :active-clip-ids="activeClipIds"
       :video-models="videoModels"
       :initial-selected-ids="batchInitialIds"

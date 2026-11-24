@@ -154,6 +154,7 @@ class AdminModelItemOut(CamelModel):
     upstream_available: bool = True
     last_synced_at: datetime | None = None
     is_default: bool
+    is_default_long: bool = False
     sort: int
     capabilities: dict[str, Any] = Field(default_factory=dict)
     defaults: dict[str, Any] = Field(default_factory=dict)
@@ -172,6 +173,7 @@ class AdminModelCreateRequest(CamelModel):
     upstream_model_id: str = Field(min_length=1, max_length=200)
     enabled: bool = True
     is_default: bool = False
+    is_default_long: bool = False
     sort: int = 100
     capabilities: dict[str, Any] = Field(default_factory=dict)
     defaults: dict[str, Any] = Field(default_factory=dict)
@@ -187,6 +189,7 @@ class AdminModelUpdateRequest(CamelModel):
     upstream_model_id: str | None = Field(default=None, min_length=1, max_length=200)
     enabled: bool | None = None
     is_default: bool | None = None
+    is_default_long: bool | None = None
     sort: int | None = None
     capabilities: dict[str, Any] | None = None
     defaults: dict[str, Any] | None = None

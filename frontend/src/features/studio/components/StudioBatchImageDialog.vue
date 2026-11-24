@@ -8,6 +8,7 @@ import type { ModelCatalogItemOut } from '../api-types'
 import { assetKindIcons } from '../asset-icons'
 import { assetDisplayName, assetKindOptions, findParentAsset, planAssetImageWaves } from '../studio-assets'
 import type { StudioAsset, StudioAssetKind } from '../studio-assets'
+import { resolveDefaultImageModel, resolveImageTierForModel, type ImageTier } from '../model-defaults'
 import ImageModelPicker from './ImageModelPicker.vue'
 import ImageParamsPopover from './ImageParamsPopover.vue'
 
@@ -17,10 +18,14 @@ const props = withDefaults(
     activeCategory: StudioAssetKind
     activeAssetIds: ReadonlySet<string>
     imageModels: ModelCatalogItemOut[]
+    defaultModelId?: string
+    defaultTier?: ImageTier
     initialSelectedIds?: string[]
     submitting?: boolean
   }>(),
   {
+    defaultModelId: undefined,
+    defaultTier: undefined,
     initialSelectedIds: () => [],
     submitting: false,
   },
@@ -152,8 +157,9 @@ watch(open, (isOpen) => {
   ratioMode.value = 'auto'
   overrideRatio.value = '16:9'
   rootsOnly.value = false
-  const defaultModel = modelCatalogList.value.find((m) => m.isDefault)?.id || modelCatalogList.value[0]?.id || ''
-  selectedModelId.value = defaultModel
+  const resolvedModel = resolveDefaultImageModel(modelCatalogList.value, props.defaultModelId)
+  selectedModelId.value = resolvedModel?.id || ''
+  selectedTier.value = resolveImageTierForModel(resolvedModel, props.defaultTier)
   if (props.initialSelectedIds.length) {
     const allowed = new Set(selectableAssets.value.map((a) => a.backendId!))
     selectedIds.value = props.initialSelectedIds.filter((id) => allowed.has(id)).slice(0, 30)

@@ -8,6 +8,7 @@ import VideoModelPicker from './VideoModelPicker.vue'
 import VideoParamsPopover from './VideoParamsPopover.vue'
 import type { StudioAsset } from '../studio-assets'
 import type { StoryboardClip } from '../studio-storyboard'
+import { resolveDefaultVideoModel } from '../model-defaults'
 
 const props = withDefaults(
   defineProps<{
@@ -15,6 +16,8 @@ const props = withDefaults(
     clips: StoryboardClip[]
     projectAssets: StudioAsset[]
     projectRatio?: string
+    segmentCap?: 15 | 30
+    defaultModelId?: string
     activeClipIds: ReadonlySet<string>
     videoModels: ModelCatalogItemOut[]
     initialSelectedIds?: string[]
@@ -22,6 +25,8 @@ const props = withDefaults(
   }>(),
   {
     projectRatio: '16:9',
+    segmentCap: undefined,
+    defaultModelId: undefined,
     initialSelectedIds: () => [],
     submitting: false,
   },
@@ -171,13 +176,10 @@ watch(open, (isOpen) => {
   if (!isOpen) return
   durationMode.value = 'keep'
   selectedRatio.value = props.projectRatio || '16:9'
-  const hasLongClip = props.clips.some((c) => c.durationSeconds > 15)
-  const defaultModel = hasLongClip
-    ? (modelCatalogList.value.find((m) => Number(m.capabilities?.maxDuration || 15) >= 30)?.id
-      ?? modelCatalogList.value[0]?.id
-      ?? '')
-    : (modelCatalogList.value.find((m) => m.isDefault)?.id ?? modelCatalogList.value[0]?.id ?? '')
-  selectedModelId.value = defaultModel
+  const effectiveCap: 15 | 30 =
+    props.segmentCap === 30 || props.clips.some((c) => c.durationSeconds > 15) ? 30 : 15
+  const resolved = resolveDefaultVideoModel(modelCatalogList.value, effectiveCap, props.defaultModelId)
+  selectedModelId.value = resolved?.id ?? ''
 
   if (props.initialSelectedIds.length) {
     const allowed = new Set(selectableClips.value.map((c) => c.backendId!))

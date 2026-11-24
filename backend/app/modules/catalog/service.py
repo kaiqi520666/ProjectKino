@@ -59,7 +59,8 @@ async def list_enabled_catalog(
                 media_type=model.media_type,
                 category=model.category or "",
                 display_name=model.display_name,
-                is_default=model.is_default,
+                is_default=bool(model.is_default),
+                is_default_long=bool(model.is_default_long),
                 capabilities=model.capabilities,
                 defaults=model.defaults,
                 text_price=(
@@ -102,6 +103,16 @@ async def list_enabled_catalog(
     for items in buckets.values():
         if items and not any(item.is_default for item in items):
             items[0].is_default = True
+    video_items = buckets["video"]
+    if video_items and not any(item.is_default_long for item in video_items):
+        for item in video_items:
+            try:
+                max_dur = int((item.capabilities or {}).get("maxDuration") or 15)
+            except (TypeError, ValueError):
+                max_dur = 15
+            if max_dur >= 30:
+                item.is_default_long = True
+                break
     return ModelCatalogOut(**buckets)
 
 

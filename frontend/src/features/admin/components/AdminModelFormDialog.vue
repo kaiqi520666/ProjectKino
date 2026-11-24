@@ -95,6 +95,7 @@ const form = reactive({
   upstreamModelId: '',
   enabled: 'true',
   isDefault: 'false',
+  isDefaultLong: 'false',
   sort: '100',
   resolutions: ['720p'] as string[],
   ratios: [...ALL_RATIOS] as string[],
@@ -133,6 +134,7 @@ function initForm() {
     form.upstreamModelId = createImage ? 'gpt-image-2.6-x' : createText ? '@preset/ds-baidu' : ''
     form.enabled = 'true'
     form.isDefault = 'false'
+    form.isDefaultLong = 'false'
     form.sort = '50'
     form.resolutions = ['720p']
     form.ratios = [...ALL_RATIOS]
@@ -172,6 +174,7 @@ function initForm() {
   form.upstreamModelId = m.upstreamModelId
   form.enabled = m.enabled ? 'true' : 'false'
   form.isDefault = m.isDefault ? 'true' : 'false'
+  form.isDefaultLong = m.isDefaultLong ? 'true' : 'false'
   form.sort = String(m.sort)
 
   form.resolutions = Array.isArray(caps.resolutions) && caps.resolutions.length
@@ -206,6 +209,15 @@ watch(
   () => [open.value, props.target, props.defaultMediaType] as const,
   ([isOpen]) => {
     if (isOpen) initForm()
+  },
+)
+
+watch(
+  () => form.maxDuration,
+  (val) => {
+    if ((Number.parseInt(val, 10) || 15) < 30 && form.isDefaultLong === 'true') {
+      form.isDefaultLong = 'false'
+    }
   },
 )
 
@@ -355,6 +367,7 @@ async function submit() {
         upstreamModelId: form.upstreamModelId.trim(),
         enabled: form.enabled === 'true',
         isDefault: form.isDefault === 'true',
+        isDefaultLong: form.mediaType === 'video' && form.isDefaultLong === 'true',
         sort: sortNum,
         capabilities,
         defaults,
@@ -369,6 +382,7 @@ async function submit() {
         upstreamModelId: form.upstreamModelId.trim(),
         enabled: form.enabled === 'true',
         isDefault: form.isDefault === 'true',
+        isDefaultLong: form.mediaType === 'video' ? form.isDefaultLong === 'true' : false,
         sort: sortNum,
         capabilities,
         defaults,
@@ -614,7 +628,18 @@ async function submit() {
 
       <div class="admin-form-grid-3">
         <UiSelect v-model="form.enabled" label="后台开关" :options="enabledOptions" />
-        <UiSelect v-model="form.isDefault" label="是否默认" :options="defaultOptions" />
+        <UiSelect
+          v-model="form.isDefault"
+          :label="form.mediaType === 'video' ? '15s 默认' : '是否默认'"
+          :options="defaultOptions"
+        />
+        <UiSelect
+          v-if="form.mediaType === 'video'"
+          v-model="form.isDefaultLong"
+          label="30s 默认"
+          :options="defaultOptions"
+          :disabled="(Number.parseInt(form.maxDuration, 10) || 15) < 30"
+        />
         <div class="ui-field">
           <label class="ui-label">排序</label>
           <input v-model="form.sort" class="ui-input admin-mono" type="number" step="1" />

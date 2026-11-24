@@ -22,6 +22,12 @@ class ProjectSettings(Record):
     maxSegmentDuration: Literal[15, 30]
     secondsPerEpisode: Annotated[int, Field(strict=True, gt=0)] = 120
     backgroundMusic: bool = True
+    imageModelId: str | None = None
+    imageTier: Literal["web", "1k", "2k", "4k"] | None = None
+    videoModelId: str | None = None
+
+    def llm_dump(self) -> dict[str, object]:
+        return self.model_dump(exclude={"imageModelId", "imageTier", "videoModelId"})
 
 
 class Character(Record):

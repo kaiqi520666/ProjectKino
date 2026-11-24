@@ -47,11 +47,21 @@ class AiModel(TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint("media_type IN ('text', 'image', 'video')", name="media_type_allowed"),
         CheckConstraint("NOT is_default OR enabled", name="default_enabled"),
+        CheckConstraint(
+            "NOT is_default_long OR (enabled AND media_type = 'video')",
+            name="default_long_video_enabled",
+        ),
         Index(
             "uq_ai_models_default_media",
             "media_type",
             unique=True,
             postgresql_where=text("is_default"),
+        ),
+        Index(
+            "uq_ai_models_default_video_long",
+            "media_type",
+            unique=True,
+            postgresql_where=text("is_default_long"),
         ),
     )
 
@@ -66,7 +76,10 @@ class AiModel(TimestampMixin, Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     upstream_available: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    is_default_long: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     sort: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     capabilities: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")

@@ -449,7 +449,8 @@ onMounted(loadAll)
             <div class="admin-cell-primary" style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
               <span>{{ row.displayName }}</span>
               <span v-if="row.category" class="admin-badge admin-badge--info">{{ row.category }}</span>
-              <span v-if="row.isDefault" class="admin-badge admin-badge--gold">默认</span>
+              <span v-if="row.isDefault" class="admin-badge admin-badge--gold">{{ row.mediaType === 'video' ? '15s 默认' : '默认' }}</span>
+              <span v-if="row.mediaType === 'video' && row.isDefaultLong" class="admin-badge admin-badge--gold">30s 默认</span>
             </div>
             <div class="admin-cell-sub admin-mono">{{ row.id }} · 排序 {{ row.sort }}</div>
           </template>
@@ -512,7 +513,7 @@ onMounted(loadAll)
               <button
                 type="button"
                 class="ui-button ui-button--ghost ui-button--sm"
-                :disabled="row.isDefault"
+                :disabled="row.isDefault || row.isDefaultLong"
                 @click="openDeleteModel(row)"
               >
                 <Trash2 :size="13" />
