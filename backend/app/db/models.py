@@ -10,7 +10,7 @@ from app.modules.catalog.models import (
     TextModelPrice,
     VideoModelPrice,
 )
-from app.modules.credits.models import CreditLedger, CreditReservation
+from app.modules.credits.models import CreditLedger, CreditReservation, RedeemCode, RedeemCodeUse
 from app.modules.jobs.models import Job
 from app.modules.settings.models import SystemSetting
 from app.modules.studio.models import Episode, Project, ProjectAsset, StoryboardClip
@@ -26,6 +26,8 @@ __all__ = [
     "VideoModelPrice",
     "CreditReservation",
     "CreditLedger",
+    "RedeemCode",
+    "RedeemCodeUse",
     "Project",
     "Episode",
     "ProjectAsset",

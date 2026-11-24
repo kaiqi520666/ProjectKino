@@ -3,6 +3,8 @@ from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
+from pydantic import Field
+
 from app.core.schemas import CamelModel
 
 
@@ -10,6 +12,7 @@ class CreditBalanceOut(CamelModel):
     balance: Decimal
     frozen: Decimal
     usage_multiplier: Decimal
+    redeem_purchase_url: str = ""
 
 
 class CreditLedgerOut(CamelModel):
@@ -118,3 +121,84 @@ class CreditSummaryOut(CamelModel):
     bill_count: int
     breakdown: CreditBreakdownOut
     active_frozen_items: list[FrozenReservationItemOut]
+    redeem_purchase_url: str = ""
+
+
+class RedeemCodeRequest(CamelModel):
+    code: str = Field(min_length=1, max_length=64)
+
+
+class RedeemCodeResultOut(CamelModel):
+    credits: Decimal
+    balance: Decimal
+    batch_name: str = ""
+    redeemed_at: datetime
+
+
+class AdminRedeemBatchCreateRequest(CamelModel):
+    credits: Decimal = Field(gt=0, le=Decimal("10000000"))
+    count: int = Field(default=10, ge=1, le=500)
+    prefix: str = Field(default="", max_length=12)
+    batch_name: str = Field(default="", max_length=120)
+    max_uses: int = Field(default=1, ge=1, le=100000)
+    expires_at: datetime | None = None
+
+
+class AdminRedeemCodeItemOut(CamelModel):
+    id: UUID
+    code: str
+    batch_name: str
+    credits: Decimal
+    max_uses: int
+    used_count: int
+    status: Literal["active", "exhausted", "expired", "disabled"]
+    raw_status: Literal["active", "disabled"]
+    expires_at: datetime | None = None
+    created_at: datetime
+
+
+class AdminRedeemStatsOut(CamelModel):
+    total_codes: int
+    active_codes: int
+    used_count_total: int
+    redeemed_credits_total: Decimal
+
+
+class AdminRedeemCodeListOut(CamelModel):
+    items: list[AdminRedeemCodeItemOut]
+    total: int
+    stats: AdminRedeemStatsOut
+    batches: list[str]
+    purchase_url: str = ""
+
+
+class AdminRedeemBatchCreateOut(CamelModel):
+    count: int
+    credits: Decimal
+    batch_name: str
+    codes: list[str]
+
+
+class AdminRedeemCodeUseItemOut(CamelModel):
+    id: UUID
+    user_id: int
+    email: str
+    nickname: str
+    credits: Decimal
+    created_at: datetime
+
+
+class AdminRedeemCodeUseListOut(CamelModel):
+    items: list[AdminRedeemCodeUseItemOut]
+
+
+class AdminRedeemCodeStatusUpdateRequest(CamelModel):
+    status: Literal["active", "disabled"]
+
+
+class AdminRedeemBatchDisableRequest(CamelModel):
+    batch_name: str = Field(min_length=1, max_length=120)
+
+
+class AdminRedeemPurchaseUrlUpdateRequest(CamelModel):
+    purchase_url: str = Field(default="", max_length=500)

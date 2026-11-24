@@ -481,7 +481,7 @@ async def _run_script_step_job(
                         cache_read_tokens=run_usage.cache_read_tokens,
                         output_tokens=run_usage.output_tokens,
                         idempotency_key=f"llm:{job.id}:{step_key}:r{crash_no}:a{attempt_no}",
-                        reason=f"LLM 任务消耗 ({job.job_type}:{step_key})",
+                        reason=_format_llm_charge_reason(job.job_type, step_key),
                     )
                     db_job = await session.scalar(select(Job).where(Job.id == job_id))
                     if db_job is not None and ledger is not None:
@@ -734,7 +734,7 @@ async def _run_assets_extract_job(
                         cache_read_tokens=run_usage.cache_read_tokens,
                         output_tokens=run_usage.output_tokens,
                         idempotency_key=f"llm:{job.id}:assets:r{crash_no}:a{attempt_no}",
-                        reason="LLM 任务消耗 (assets_extract)",
+                        reason=_format_llm_charge_reason("assets_extract"),
                     )
                     db_job = await session.scalar(select(Job).where(Job.id == job_id))
                     if db_job is not None and ledger is not None:
@@ -744,6 +744,31 @@ async def _run_assets_extract_job(
                     await session.commit()
             except Exception:
                 logger.exception("llm_postpaid_charge_failed", job_id=str(job_id))
+
+
+def _format_llm_charge_reason(job_type: str, detail: str | None = None) -> str:
+    """将内部 LLM 任务类型与步骤标识格式化为面向用户的中文账单说明。"""
+    if job_type in ("script_generate", "script_regenerate"):
+        is_regen = job_type == "script_regenerate"
+        if detail == "outline":
+            return "重生成全剧大纲" if is_regen else "全剧大纲规划"
+        if detail and detail.startswith("ep") and detail[2:].isdigit():
+            ep_no = int(detail[2:])
+            return f"第 {ep_no} 集剧本重写" if is_regen else f"第 {ep_no} 集剧本生成"
+        return "重生成剧本" if is_regen else "剧本生成"
+    if job_type == "script_episode_regenerate":
+        return "单集剧本重写"
+    if job_type == "assets_extract":
+        return "项目资产识别"
+    if job_type == "storyboard_generate":
+        if detail == "clip_regenerate":
+            return "片段分镜重绘"
+        if detail == "all":
+            return "全剧分镜规划"
+        return "单集分镜规划"
+    if job_type == "canvas_text":
+        return "画布文本生成"
+    return "文本模型生成"
 
 
 def _clip_neighbor_context(row: StoryboardClip | None) -> dict[str, Any] | None:
@@ -1282,7 +1307,7 @@ async def _run_storyboard_job(
                         cache_read_tokens=run_usage.cache_read_tokens,
                         output_tokens=run_usage.output_tokens,
                         idempotency_key=f"llm:{job.id}:sb:r{crash_no}:a{attempt_no}",
-                        reason=f"LLM 任务消耗 (storyboard_generate/{action})",
+                        reason=_format_llm_charge_reason("storyboard_generate", action),
                     )
                     db_job = await session.scalar(select(Job).where(Job.id == job_id))
                     if db_job is not None and ledger is not None:
@@ -1552,7 +1577,7 @@ async def run_llm_job_core(
                         cache_read_tokens=run_usage.cache_read_tokens,
                         output_tokens=run_usage.output_tokens,
                         idempotency_key=f"llm:{job.id}",
-                        reason=f"LLM 任务消耗 ({job.job_type})",
+                        reason=_format_llm_charge_reason(job.job_type),
                     )
                     db_job = await session.scalar(select(Job).where(Job.id == job_id))
                     if db_job is not None and ledger is not None:
@@ -1987,12 +2012,12 @@ async def _execute_asset_image_under_slot(
             )
             if reservation is not None:
                 settle_reason = (
-                    f"画布生图完成结算 ({model_id}/{tier})"
+                    f"画布生图完成结算（{tier.upper()}）"
                     if is_canvas
                     else (
-                        f"片段分镜宫格完成结算 (片段{clip_index} · {model_id}/{tier})"
+                        f"片段 {clip_index} 分镜宫格完成结算（{tier.upper()}）"
                         if is_clip_grid
-                        else f"资产生图完成结算 ({model_id}/{tier})"
+                        else f"资产生图完成结算（{tier.upper()}）"
                     )
                 )
                 await settle_media_credits(
@@ -2173,12 +2198,12 @@ async def _execute_asset_image_under_slot(
             )
             if reservation is not None and not is_uncertain and reservation.status == "frozen":
                 release_reason = (
-                    f"画布生图失败退还冻结积分 ({code})"
+                    "画布生图失败，已退还冻结积分"
                     if is_canvas
                     else (
-                        f"片段分镜宫格失败退还冻结积分 ({code})"
+                        "片段分镜宫格失败，已退还冻结积分"
                         if is_clip_grid
-                        else f"资产生图失败退还冻结积分 ({code})"
+                        else "资产生图失败，已退还冻结积分"
                     )
                 )
                 await release_media_credits(
@@ -2523,9 +2548,9 @@ async def _execute_clip_video_under_slot(
                     session,
                     reservation_id=reservation.id,
                     reason=(
-                        f"画布视频完成结算 ({model_id}/{duration_seconds}s)"
+                        f"画布视频完成结算（{duration_seconds}s）"
                         if is_canvas
-                        else f"片段视频完成结算 ({model_id}/{duration_seconds}s)"
+                        else f"片段视频完成结算（{duration_seconds}s）"
                     ),
                 )
             if is_canvas and job.canvas_id is not None:
@@ -2628,9 +2653,9 @@ async def _execute_clip_video_under_slot(
                     session,
                     reservation_id=reservation.id,
                     reason=(
-                        f"画布视频失败退还冻结积分 ({code})"
+                        "画布视频失败，已退还冻结积分"
                         if is_canvas
-                        else f"片段视频失败退还冻结积分 ({code})"
+                        else "片段视频失败，已退还冻结积分"
                     ),
                 )
             if is_canvas and job.canvas_id is not None and canvas_node_id:

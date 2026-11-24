@@ -7,6 +7,7 @@ import {
   Server,
   Settings2,
   ShieldCheck,
+  Ticket,
   Users,
 } from 'lucide-vue-next'
 import { useRoute } from 'vue-router'
@@ -34,6 +35,7 @@ const activeAdminNav = computed(() => String(route.meta.adminNav || ''))
 const adminMenuItems = computed(() => [
   { key: 'overview', to: '/admin', label: '概览', icon: LayoutDashboard, badge: 0, danger: false },
   { key: 'users', to: '/admin/users', label: '用户与积分', icon: Users, badge: 0, danger: false },
+  { key: 'redeem-codes', to: '/admin/redeem-codes', label: '兑换码', icon: Ticket, badge: 0, danger: false },
   { key: 'jobs', to: '/admin/jobs', label: '任务与核对', icon: Activity, badge: props.adminReviewCount, danger: true },
   { key: 'models', to: '/admin/models', label: '供应商与定价', icon: Server, badge: 0, danger: false },
   { key: 'settings', to: '/admin/settings', label: '系统与 OSS', icon: Settings2, badge: 0, danger: false },

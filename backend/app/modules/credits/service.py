@@ -20,6 +20,7 @@ from app.modules.credits.schemas import (
     FrozenReservationItemOut,
 )
 from app.modules.jobs.models import Job
+from app.modules.settings.service import get_redeem_purchase_url
 from app.modules.studio.models import Project
 
 _QUANT = Decimal("0.0001")
@@ -91,8 +92,8 @@ async def grant_credits(
         return existing
 
     delta = _q(amount)
-    if operation == "grant" and delta <= 0:
-        raise AppError(400, "invalid_credit_amount", "赠送积分必须大于 0")
+    if operation in ("grant", "redeem") and delta <= 0:
+        raise AppError(400, "invalid_credit_amount", "入账积分必须大于 0")
     if operation == "adjust" and delta == 0:
         raise AppError(400, "invalid_credit_amount", "调账积分不能为 0")
 
@@ -649,6 +650,8 @@ def _build_bill_title(
         return "文本模型调用"
     if ledger.operation == "grant":
         return "积分赠送"
+    if ledger.operation == "redeem":
+        return "兑换码充值"
     if ledger.operation == "adjust":
         return "管理员调账"
     return ledger.reason or "积分变动"
@@ -755,7 +758,7 @@ async def list_user_bills(
 ) -> tuple[list[CreditBillItemOut], int]:
     conditions = [
         CreditLedger.user_id == user_id,
-        CreditLedger.operation.in_(("freeze", "llm_consume", "grant", "adjust")),
+        CreditLedger.operation.in_(("freeze", "llm_consume", "grant", "adjust", "redeem")),
     ]
     if start_at is not None:
         conditions.append(CreditLedger.created_at >= start_at)
@@ -773,7 +776,7 @@ async def list_user_bills(
             and_(CreditLedger.operation == "freeze", CreditReservation.business_type == "video")
         )
     elif category == "income":
-        conditions.append(CreditLedger.operation.in_(("grant", "adjust")))
+        conditions.append(CreditLedger.operation.in_(("grant", "adjust", "redeem")))
 
     if status == "frozen":
         conditions.append(
@@ -786,7 +789,7 @@ async def list_user_bills(
     elif status == "credited":
         conditions.append(
             and_(
-                CreditLedger.operation.in_(("grant", "adjust")),
+                CreditLedger.operation.in_(("grant", "adjust", "redeem")),
                 CreditLedger.balance_change >= 0,
             )
         )
@@ -919,7 +922,7 @@ async def get_user_credit_summary(
     granted_raw = await session.scalar(
         select(func.coalesce(func.sum(CreditLedger.balance_change), 0)).where(
             *time_conds,
-            CreditLedger.operation.in_(("grant", "adjust")),
+            CreditLedger.operation.in_(("grant", "adjust", "redeem")),
             CreditLedger.balance_change > 0,
         )
     )
@@ -937,7 +940,7 @@ async def get_user_credit_summary(
         await session.scalar(
             select(func.count(CreditLedger.id)).where(
                 *time_conds,
-                CreditLedger.operation.in_(("freeze", "llm_consume", "grant", "adjust")),
+                CreditLedger.operation.in_(("freeze", "llm_consume", "grant", "adjust", "redeem")),
             )
         )
         or 0
@@ -1032,6 +1035,7 @@ async def get_user_credit_summary(
                 )
             )
 
+    redeem_purchase_url = await get_redeem_purchase_url(session)
     return CreditSummaryOut(
         balance=_q(user.balance),
         frozen=_q(user.frozen),
@@ -1046,4 +1050,5 @@ async def get_user_credit_summary(
             video_spent=video_spent,
         ),
         active_frozen_items=active_items,
+        redeem_purchase_url=redeem_purchase_url,
     )

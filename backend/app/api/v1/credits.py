@@ -1,35 +1,69 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.schemas import ApiResponse
 from app.db.session import get_session
 from app.modules.auth.deps import get_current_user
 from app.modules.auth.models import User
+from app.modules.credits.redeem_service import redeem_code_for_user
 from app.modules.credits.schemas import (
     CreditBalanceOut,
     CreditBillListOut,
     CreditLedgerListOut,
     CreditSummaryOut,
+    RedeemCodeRequest,
+    RedeemCodeResultOut,
 )
 from app.modules.credits.service import (
     get_user_credit_summary,
     list_enriched_user_ledgers,
     list_user_bills,
 )
+from app.modules.settings.service import get_redeem_purchase_url
 
 router = APIRouter(prefix="/credits", tags=["credits"])
 
 
 @router.get("/balance", response_model=ApiResponse[CreditBalanceOut])
-async def get_balance(user: User = Depends(get_current_user)) -> ApiResponse[CreditBalanceOut]:
+async def get_balance(
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[CreditBalanceOut]:
+    purchase_url = await get_redeem_purchase_url(session)
     return ApiResponse(
         data=CreditBalanceOut(
             balance=user.balance,
             frozen=user.frozen,
             usage_multiplier=user.usage_multiplier,
+            redeem_purchase_url=purchase_url,
+        )
+    )
+
+
+@router.post("/redeem", response_model=ApiResponse[RedeemCodeResultOut])
+async def redeem_credits(
+    body: RedeemCodeRequest,
+    request: Request,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[RedeemCodeResultOut]:
+    code_row, ledger = await redeem_code_for_user(
+        session,
+        user_id=user.id,
+        raw_code=body.code,
+        redis=getattr(request.app.state, "redis", None),
+        settings=getattr(request.app.state, "settings", None),
+    )
+    await session.commit()
+    return ApiResponse(
+        data=RedeemCodeResultOut(
+            credits=code_row.credits,
+            balance=ledger.balance_after,
+            batch_name=code_row.batch_name,
+            redeemed_at=ledger.created_at or datetime.now(UTC),
         )
     )
 
@@ -78,7 +112,7 @@ async def get_bills(
 
 @router.get("/ledgers", response_model=ApiResponse[CreditLedgerListOut])
 async def get_ledgers(
-    operation: Literal["grant", "freeze", "settle", "release", "llm_consume", "adjust"]
+    operation: Literal["grant", "freeze", "settle", "release", "llm_consume", "adjust", "redeem"]
     | None = Query(default=None),
     start_at: datetime | None = Query(default=None),
     end_at: datetime | None = Query(default=None),

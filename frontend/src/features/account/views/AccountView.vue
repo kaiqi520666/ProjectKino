@@ -1,93 +1,39 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
-import { KeyRound, LogOut, Save, UserRound } from 'lucide-vue-next'
+import { computed } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { LogOut, ShieldCheck, UserRound, Wallet } from 'lucide-vue-next'
 import UiButton from '@/components/ui/UiButton.vue'
-import UiInput from '@/components/ui/UiInput.vue'
 import WorkspacePageHeader from '@/components/workspace/WorkspacePageHeader.vue'
 import { useUserAssetsStore } from '@/features/assets/user-assets-store'
 import { useCanvasStore } from '@/features/canvas/canvas-store'
 import { useModelCatalog } from '@/features/studio/composables/useModelCatalog'
 import { useStudioStore } from '@/features/studio/studio-store'
-import { extractErrorMessage } from '@/lib/format'
 import { useAuthStore } from '@/stores/auth'
-import { useUiStore } from '@/stores/ui'
-import AccountCreditsPanel from '../components/AccountCreditsPanel.vue'
 
+const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
-const ui = useUiStore()
 const studio = useStudioStore()
 const canvas = useCanvasStore()
 const userAssets = useUserAssetsStore()
 const { clearCatalog } = useModelCatalog()
 
-const nickname = ref(auth.user?.nickname ?? '')
-const savingProfile = ref(false)
-
-const currentPassword = ref('')
-const newPassword = ref('')
-const confirmPassword = ref('')
-const savingPassword = ref(false)
-
-const roleLabel = computed(() => {
-  if (auth.user?.role === 'admin') return '管理员'
-  if (auth.user?.role === 'operator') return '运营'
-  return '创作者'
-})
-
-const canSaveProfile = computed(() => {
-  const clean = nickname.value.trim()
-  return Boolean(clean) && clean !== (auth.user?.nickname ?? '') && !savingProfile.value
-})
-
-const passwordMismatch = computed(
-  () => Boolean(confirmPassword.value) && confirmPassword.value !== newPassword.value,
-)
-
-const canSavePassword = computed(
-  () =>
-    Boolean(currentPassword.value)
-    && newPassword.value.length >= 6
-    && confirmPassword.value === newPassword.value
-    && !savingPassword.value,
-)
-
-watch(
-  () => auth.user?.nickname,
-  (val) => {
-    if (val !== undefined) nickname.value = val
+const accountTabs = [
+  {
+    key: 'credits',
+    label: '积分与账单',
+    to: { name: 'account-credits' },
+    icon: Wallet,
   },
-)
+  {
+    key: 'security',
+    label: '账号与安全',
+    to: { name: 'account-security' },
+    icon: ShieldCheck,
+  },
+] as const
 
-async function saveProfile() {
-  if (!canSaveProfile.value) return
-  savingProfile.value = true
-  try {
-    await auth.updateProfile(nickname.value)
-    ui.notify('昵称已更新', 'success')
-  } catch (error) {
-    ui.notify(extractErrorMessage(error, '更新昵称失败'), 'error')
-  } finally {
-    savingProfile.value = false
-  }
-}
-
-async function savePassword() {
-  if (!canSavePassword.value) return
-  savingPassword.value = true
-  try {
-    await auth.changePassword(currentPassword.value, newPassword.value)
-    currentPassword.value = ''
-    newPassword.value = ''
-    confirmPassword.value = ''
-    ui.notify('密码已更新，其他设备会话已失效', 'success')
-  } catch (error) {
-    ui.notify(extractErrorMessage(error, '修改密码失败'), 'error')
-  } finally {
-    savingPassword.value = false
-  }
-}
+const activeTab = computed(() => String(route.meta.accountTab || 'credits'))
 
 async function handleLogout() {
   await auth.logout()
@@ -111,64 +57,22 @@ async function handleLogout() {
       </template>
     </WorkspacePageHeader>
 
-    <AccountCreditsPanel />
+    <nav class="account-tabs" aria-label="个人中心导航">
+      <RouterLink
+        v-for="tab in accountTabs"
+        :key="tab.key"
+        :to="tab.to"
+        class="account-tab"
+        :class="{ 'is-active': activeTab === tab.key }"
+        :aria-current="activeTab === tab.key ? 'page' : undefined"
+      >
+        <component :is="tab.icon" :size="15" aria-hidden="true" />
+        <span>{{ tab.label }}</span>
+      </RouterLink>
+    </nav>
 
-    <div class="account-grid">
-      <article class="account-card">
-        <header class="account-card-head">
-          <h2><UserRound :size="15" aria-hidden="true" />基本资料</h2>
-          <span class="account-role">{{ roleLabel }}</span>
-        </header>
-        <form class="account-form" @submit.prevent="saveProfile">
-          <div class="account-readonly-row">
-            <span class="ui-label">登录邮箱</span>
-            <p class="account-email">{{ auth.user?.email || '-' }}</p>
-          </div>
-          <UiInput v-model="nickname" label="昵称" placeholder="输入昵称" required />
-          <div class="account-form-actions">
-            <UiButton type="submit" variant="primary" size="sm" :disabled="!canSaveProfile" :loading="savingProfile">
-              <template #leading><Save :size="14" aria-hidden="true" /></template>
-              保存
-            </UiButton>
-          </div>
-        </form>
-      </article>
-
-      <article class="account-card">
-        <header class="account-card-head">
-          <h2><KeyRound :size="15" aria-hidden="true" />修改密码</h2>
-        </header>
-        <form class="account-form" @submit.prevent="savePassword">
-          <UiInput
-            v-model="currentPassword"
-            type="password"
-            label="当前密码"
-            autocomplete="current-password"
-            required
-          />
-          <UiInput
-            v-model="newPassword"
-            type="password"
-            label="新密码（至少 6 位）"
-            autocomplete="new-password"
-            required
-          />
-          <UiInput
-            v-model="confirmPassword"
-            type="password"
-            label="确认新密码"
-            autocomplete="new-password"
-            :error="passwordMismatch ? '两次输入的新密码不一致' : ''"
-            required
-          />
-          <div class="account-form-actions">
-            <UiButton type="submit" variant="primary" size="sm" :disabled="!canSavePassword" :loading="savingPassword">
-              <template #leading><Save :size="14" aria-hidden="true" /></template>
-              更新密码
-            </UiButton>
-          </div>
-        </form>
-      </article>
+    <div class="account-content">
+      <RouterView />
     </div>
   </section>
 </template>
@@ -179,88 +83,65 @@ async function handleLogout() {
   padding: 20px 24px 40px;
   display: flex;
   flex-direction: column;
-  gap: 18px;
-}
-
-.account-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
 }
 
-.account-card {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  padding: 18px 20px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 10px;
-  background: var(--color-surface);
-}
-
-.account-card-head {
+.account-tabs {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  gap: 6px;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-top: -4px;
 }
 
-.account-card-head h2 {
+.account-tab {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--color-text);
-}
-
-.account-role {
-  padding: 2px 8px;
-  border-radius: 999px;
-  border: 1px solid rgb(240 184 75 / 32%);
-  background: var(--gold-tint);
-  color: var(--color-gold-soft);
-  font-size: 11px;
-}
-
-.account-form {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.account-readonly-row {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.account-email {
-  margin: 0;
-  padding: 8px 10px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 7px;
-  background: var(--color-canvas);
+  padding: 9px 14px 11px;
   color: var(--color-muted);
-  font-size: 13px;
+  font-size: 13.5px;
+  font-weight: 500;
+  text-decoration: none;
+  border-radius: 7px 7px 0 0;
+  transition: color 0.16s ease, background-color 0.16s ease;
 }
 
-.account-form-actions {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 4px;
+.account-tab:hover {
+  color: var(--color-text);
+  background: rgb(255 255 255 / 3%);
 }
 
-@media (max-width: 820px) {
-  .account-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
+.account-tab.is-active {
+  color: var(--color-gold-soft);
+  font-weight: 600;
+}
+
+.account-tab.is-active::after {
+  content: '';
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--color-gold);
+}
+
+.account-content {
+  width: 100%;
+  min-width: 0;
 }
 
 @media (max-width: 640px) {
   .account-page {
     padding: 18px 16px 32px;
+  }
+
+  .account-tab {
+    padding: 8px 12px 10px;
+    font-size: 13px;
   }
 }
 </style>

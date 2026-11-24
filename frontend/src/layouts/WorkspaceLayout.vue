@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, provide, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Bell, Headphones, RefreshCw, Tags, Wallet } from 'lucide-vue-next'
+import { Bell, ExternalLink, Headphones, RefreshCw, Tags, Ticket, Wallet } from 'lucide-vue-next'
 import UiAlert from '@/components/ui/UiAlert.vue'
 import UiDataTable, { type DataTableColumn } from '@/components/ui/UiDataTable.vue'
 import UiDialog from '@/components/ui/UiDialog.vue'
 import WorkspaceHeader from '@/components/workspace/WorkspaceHeader.vue'
 import WorkspaceSidebar from '@/components/workspace/WorkspaceSidebar.vue'
 import type { WorkspaceBreadcrumb, WorkspaceUser } from '@/components/workspace/workspace-navigation'
-import { getAdminOverview, type CreditLedgerItem } from '@/features/admin/api'
+import RedeemCodeDialog from '@/features/account/components/RedeemCodeDialog.vue'
+import { fetchCreditBills, type CreditBillItem } from '@/features/account/credits-api'
+import { formatCreditReason } from '@/features/account/credits-helpers'
+import { getAdminOverview } from '@/features/admin/api'
 import { LEDGER_OP_LABELS } from '@/features/admin/format'
 import { useCanvasStore } from '@/features/canvas/canvas-store'
 import { useUserAssetsStore } from '@/features/assets/user-assets-store'
@@ -19,9 +22,7 @@ import {
   formatCredits,
   formatDateTime,
   formatSignedCredits,
-  formatTokenUsage,
 } from '@/lib/format'
-import { http, unwrap } from '@/lib/http'
 import { useAuthStore } from '@/stores/auth'
 import { useUiStore } from '@/stores/ui'
 import '@/styles/workspace.css'
@@ -47,18 +48,19 @@ const {
   refresh: refreshCatalog,
   clearCatalog,
 } = useModelCatalog()
-const ledgersLoading = ref(false)
-const ledgers = ref<CreditLedgerItem[]>([])
-const ledgersTotal = ref(0)
-const ledgerPage = ref(1)
-const ledgerPageSize = ref(20)
+const rechargeLoading = ref(false)
+const rechargeRecords = ref<CreditBillItem[]>([])
+const rechargeTotal = ref(0)
+const rechargePage = ref(1)
+const rechargePageSize = ref(15)
+const redeemDialogOpen = ref(false)
 
-const ledgerColumns: DataTableColumn[] = [
-  { key: 'createdAt', label: '时间' },
-  { key: 'operation', label: '类型' },
-  { key: 'balanceChange', label: '变动', align: 'right' },
-  { key: 'balanceRange', label: '变动前后' },
-  { key: 'reason', label: '说明 / Token 用量' },
+const rechargeColumns: DataTableColumn[] = [
+  { key: 'createdAt', label: '时间', width: '164px' },
+  { key: 'operation', label: '类型', width: '96px' },
+  { key: 'amount', label: '到账积分', align: 'right', width: '110px' },
+  { key: 'balanceAfter', label: '入账后余额', align: 'right', width: '120px' },
+  { key: 'reason', label: '说明' },
 ]
 
 const isAdminRoute = computed(() => route.matched.some((r) => Boolean(r.meta.requiresAdmin)))
@@ -70,6 +72,9 @@ const breadcrumbs = computed<WorkspaceBreadcrumb[]>(() => {
   const title = String(route.meta.title || '创作首页')
   if (isAdminRoute.value) {
     return [{ label: '后台', to: '/admin' }, { label: title }]
+  }
+  if (route.meta.workspaceNav === 'account') {
+    return [{ label: '我的', to: '/account/credits' }, { label: title }]
   }
   return [{ label: title }]
 })
@@ -87,10 +92,10 @@ async function refreshAdminReviewBadge() {
 
 provide('refreshAdminReviewBadge', refreshAdminReviewBadge)
 const panels = {
-  prices: { title: '模型价格表', description: '实时展示当前账号生效的模型与计费标准（已包含个人费率倍率）', icon: Tags, message: '' },
-  support: { title: '联系客服', description: '帧剧客户支持', icon: Headphones, message: '客服联系方式尚未配置。' },
-  announcements: { title: '系统公告', description: '平台消息', icon: Bell, message: '暂无新公告。' },
-  recharge: { title: '积分账户与流水明细', description: '查看可用余额、冻结额度与近期消费/充值记录', icon: Wallet, message: '' },
+  prices: { title: '模型价格表', description: '', icon: Tags, message: '' },
+  support: { title: '联系客服', description: '', icon: Headphones, message: '客服联系方式尚未配置。' },
+  announcements: { title: '系统公告', description: '', icon: Bell, message: '暂无新公告。' },
+  recharge: { title: '积分充值', description: '', icon: Wallet, message: '' },
 }
 const currentPanel = computed(() => panels[panel.value || 'prices'])
 const panelOpen = computed({
@@ -99,6 +104,10 @@ const panelOpen = computed({
 })
 const dialogSize = computed(() => (panel.value === 'prices' || panel.value === 'recharge' ? 'landscape' : undefined))
 const previousTitle = document.title
+const formattedMultiplier = computed(() => {
+  const val = Number(auth.user?.usageMultiplier ?? 1)
+  return Number.isFinite(val) ? `${val.toFixed(2)}×` : '1.00×'
+})
 
 async function loadPrices() {
   const data = await refreshCatalog()
@@ -107,32 +116,35 @@ async function loadPrices() {
   }
 }
 
-async function loadLedgers(resetPage = false) {
-  if (resetPage) ledgerPage.value = 1
-  ledgersLoading.value = true
+async function loadRechargeRecords(resetPage = false) {
+  if (resetPage) rechargePage.value = 1
+  rechargeLoading.value = true
   try {
     await auth.refreshBalance()
-    const res = await unwrap<{ items: CreditLedgerItem[]; total: number }>(
-      http.get('/credits/ledgers', {
-        params: {
-          limit: ledgerPageSize.value,
-          offset: (ledgerPage.value - 1) * ledgerPageSize.value,
-        },
-      }),
-    )
-    ledgers.value = res.items
-    ledgersTotal.value = res.total
+    const res = await fetchCreditBills({
+      category: 'income',
+      status: 'credited',
+      limit: rechargePageSize.value,
+      offset: (rechargePage.value - 1) * rechargePageSize.value,
+    })
+    rechargeRecords.value = res.items
+    rechargeTotal.value = res.total
   } catch (err) {
-    ui.notify(extractErrorMessage(err, '加载积分流水失败'), 'error')
+    ui.notify(extractErrorMessage(err, '加载充值记录失败'), 'error')
   } finally {
-    ledgersLoading.value = false
+    rechargeLoading.value = false
   }
+}
+
+function goToCreditBills() {
+  panel.value = null
+  void router.push({ name: 'account-credits' })
 }
 
 function openPanel(next: 'prices' | 'support' | 'announcements' | 'recharge') {
   panel.value = next
   if (next === 'prices') loadPrices()
-  if (next === 'recharge') loadLedgers(true)
+  if (next === 'recharge') loadRechargeRecords(true)
 }
 
 watch(() => route.fullPath, () => {
@@ -200,10 +212,7 @@ onUnmounted(() => { document.title = previousTitle })
     <UiDialog v-model:open="panelOpen" :size="dialogSize" :title="currentPanel.title" :description="currentPanel.description">
       <!-- 实时模型价格表 -->
       <div v-if="panel === 'prices'" class="ws-live-panel">
-        <div class="ws-live-bar">
-          <span class="ws-live-note">
-            当前账号费率倍率：<strong>{{ auth.user?.usageMultiplier || '1.00' }}x</strong>；FFmpeg 合成本集 / 全片视频免费。
-          </span>
+        <div class="ws-live-bar ws-live-bar--end">
           <button type="button" class="ui-button ui-button--secondary ui-button--sm" :disabled="catalogLoading" @click="loadPrices">
             <RefreshCw :size="13" :class="{ 'ui-spin': catalogLoading }" />
             <span>刷新价格</span>
@@ -286,7 +295,7 @@ onUnmounted(() => { document.title = previousTitle })
         </div>
       </div>
 
-      <!-- 个人积分账户与流水明细 -->
+      <!-- 积分充值与入账记录 -->
       <div v-else-if="panel === 'recharge'" class="ws-live-panel">
         <div class="ws-balance-cards">
           <div class="ws-balance-card">
@@ -299,31 +308,48 @@ onUnmounted(() => { document.title = previousTitle })
           </div>
           <div class="ws-balance-card">
             <span>账户费率倍率</span>
-            <strong>{{ auth.user?.usageMultiplier || '1.00' }}x</strong>
+            <strong>{{ formattedMultiplier }}</strong>
           </div>
         </div>
         <div class="ws-live-bar">
-          <span class="ws-live-note">
-            在线自助充值暂未开放，如需充值请联系管理员。
-          </span>
-          <button type="button" class="ui-button ui-button--secondary ui-button--sm" :disabled="ledgersLoading" @click="loadLedgers()">
-            <RefreshCw :size="13" :class="{ 'ui-spin': ledgersLoading }" />
-            <span>刷新</span>
-          </button>
+          <div class="ws-live-bar-actions">
+            <button type="button" class="ui-button ui-button--primary ui-button--sm" @click="redeemDialogOpen = true">
+              <Ticket :size="13" />
+              <span>兑换积分</span>
+            </button>
+            <a
+              v-if="auth.redeemPurchaseUrl"
+              :href="auth.redeemPurchaseUrl"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="ui-button ui-button--secondary ui-button--sm"
+            >
+              <span>购买兑换码</span>
+              <ExternalLink :size="12" />
+            </a>
+          </div>
+          <div class="ws-live-bar-actions">
+            <button type="button" class="ui-button ui-button--secondary ui-button--sm" @click="goToCreditBills">
+              <span>消费账单</span>
+            </button>
+            <button type="button" class="ui-button ui-button--secondary ui-button--sm" :disabled="rechargeLoading" @click="loadRechargeRecords()">
+              <RefreshCw :size="13" :class="{ 'ui-spin': rechargeLoading }" />
+              <span>刷新</span>
+            </button>
+          </div>
         </div>
         <UiDataTable
-          v-model:page="ledgerPage"
-          v-model:page-size="ledgerPageSize"
-          :columns="ledgerColumns"
-          :rows="ledgers"
+          v-model:page="rechargePage"
+          v-model:page-size="rechargePageSize"
+          :columns="rechargeColumns"
+          :rows="rechargeRecords"
           row-key="id"
-          :loading="ledgersLoading"
-          loading-text="正在加载积分流水..."
-          empty-text="暂无积分变动记录"
+          :loading="rechargeLoading"
+          empty-text="暂无充值与入账记录"
           compact
           paginated
-          :total="ledgersTotal"
-          @change="loadLedgers()"
+          :total="rechargeTotal"
+          @change="loadRechargeRecords()"
         >
           <template #cell-createdAt="{ row }">
             <span class="ws-mono">{{ formatDateTime(row.createdAt) }}</span>
@@ -331,22 +357,14 @@ onUnmounted(() => { document.title = previousTitle })
           <template #cell-operation="{ row }">
             <span class="ws-tag">{{ LEDGER_OP_LABELS[row.operation] || row.operation }}</span>
           </template>
-          <template #cell-balanceChange="{ row }">
-            <span
-              class="ws-mono"
-              :class="Number(row.balanceChange) > 0 ? 'is-pos' : Number(row.balanceChange) < 0 ? 'is-neg' : ''"
-            >
-              {{ formatSignedCredits(row.balanceChange) }}
-            </span>
+          <template #cell-amount="{ row }">
+            <span class="ws-mono is-pos">{{ formatSignedCredits(row.amount) }}</span>
           </template>
-          <template #cell-balanceRange="{ row }">
-            <span class="ws-mono">{{ formatCredits(row.balanceBefore) }} → {{ formatCredits(row.balanceAfter) }}</span>
+          <template #cell-balanceAfter="{ row }">
+            <span class="ws-mono">{{ formatCredits(row.balanceAfter) }}</span>
           </template>
           <template #cell-reason="{ row }">
-            <div>{{ row.reason || '-' }}</div>
-            <div v-if="formatTokenUsage(row.tokenUsage)" class="ws-token-sub ws-mono">
-              {{ formatTokenUsage(row.tokenUsage) }}
-            </div>
+            <span>{{ formatCreditReason(row.reason) || row.title || '-' }}</span>
           </template>
         </UiDataTable>
       </div>
@@ -357,12 +375,20 @@ onUnmounted(() => { document.title = previousTitle })
         <UiAlert tone="info" :title="currentPanel.message" />
       </div>
     </UiDialog>
+
+    <RedeemCodeDialog
+      v-model:open="redeemDialogOpen"
+      :purchase-url="auth.redeemPurchaseUrl"
+      @redeemed="loadRechargeRecords(true)"
+    />
   </div>
 </template>
 
 <style scoped>
 .ws-live-panel { display: flex; flex-direction: column; gap: 14px; }
 .ws-live-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.ws-live-bar--end { justify-content: flex-end; }
+.ws-live-bar-actions { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ws-live-note { font-size: 12px; color: var(--color-muted); }
 .ws-live-note strong { color: var(--color-gold-soft); }
 .ws-live-empty { padding: 32px 16px; text-align: center; color: var(--color-muted); font-size: 13px; }

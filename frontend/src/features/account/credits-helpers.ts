@@ -23,6 +23,7 @@ export const BILL_STATUS_LABELS: Record<CreditBillStatus, string> = {
 
 export const LEDGER_OP_LABELS_ACCOUNT: Record<string, string> = {
   grant: '积分赠送',
+  redeem: '兑换码',
   adjust: '账户调账',
   freeze: '任务预扣',
   settle: '消费结算',
@@ -50,6 +51,84 @@ export function computeBreakdownSegments(breakdown?: CreditBreakdown | null): Br
     { key: 'image', label: '图片生成', amount: image, percent: toPercent(image) },
     { key: 'text', label: '文本/剧本', amount: text, percent: toPercent(text) },
   ]
+}
+
+function normalizeSpecBadge(raw: string): string {
+  const trimmed = raw.trim()
+  if (/^\d+k$/iu.test(trimmed)) return trimmed.toUpperCase()
+  return trimmed
+}
+
+function formatClipLabel(raw: string): string {
+  const match = /^片段\s*(\d+)$/u.exec(raw.trim())
+  return match ? `片段 ${match[1]}` : raw.trim()
+}
+
+/**
+ * 将数据库中的账单/流水说明转换为面向用户的自然中文：
+ * - 兼容新格式（已是自然中文直接返回）与历史格式（LLM 任务消耗 / 预冻结内部模型 ID 等）；
+ * - 保留 27s、2K 等通用规格缩写，剔除内部 job_type、step_key、model_id 与异常 code。
+ */
+export function formatCreditReason(reason?: string | null): string {
+  const text = (reason ?? '').trim()
+  if (!text) return ''
+
+  // 1. 历史 LLM 任务说明：LLM 任务消耗 (script_generate:ep5 / storyboard_generate/episode / assets_extract ...)
+  const llmMatch = /^LLM\s*任务消耗\s*[（(]([^）)]+)[）)]$/u.exec(text)
+  if (llmMatch) {
+    const inner = llmMatch[1]!.trim()
+    const [jobType, detail] = inner.split(/[:/]/u)
+    if (jobType === 'script_generate' || jobType === 'script_regenerate') {
+      const isRegen = jobType === 'script_regenerate'
+      if (detail === 'outline') return isRegen ? '重生成全剧大纲' : '全剧大纲规划'
+      const epMatch = /^ep(\d+)$/iu.exec(detail ?? '')
+      if (epMatch) return isRegen ? `第 ${epMatch[1]} 集剧本重写` : `第 ${epMatch[1]} 集剧本生成`
+      return isRegen ? '重生成剧本' : '剧本生成'
+    }
+    if (jobType === 'storyboard_generate') {
+      if (detail === 'clip_regenerate') return '片段分镜重绘'
+      if (detail === 'all') return '全剧分镜规划'
+      return '单集分镜规划'
+    }
+    const llmJobLabels: Record<string, string> = {
+      assets_extract: '项目资产识别',
+      script_episode_regenerate: '单集剧本重写',
+      canvas_text: '画布文本生成',
+    }
+    return llmJobLabels[jobType] ?? '文本模型生成'
+  }
+
+  // 2. 历史媒体预冻结说明：xxx预冻结 (目标 · model_id/规格)
+  const freezeMatch = /^(批量)?(片段生视频|片段分镜宫格|资产生图|画布生图|画布生视频)预冻结\s*[（(]([^·]+?)\s*·\s*[^/）)]+\/([^）)]+)[）)]$/u.exec(text)
+  if (freezeMatch) {
+    const batchPrefix = freezeMatch[1] ?? ''
+    const kind = freezeMatch[2]!
+    const target = freezeMatch[3]!.trim()
+    const spec = normalizeSpecBadge(freezeMatch[4]!)
+    if (kind === '片段生视频') return `${batchPrefix}${formatClipLabel(target)} 视频生成（${spec}）`
+    if (kind === '片段分镜宫格') return `${batchPrefix}${formatClipLabel(target)} 分镜宫格图（${spec}）`
+    if (kind === '资产生图') return `${batchPrefix}资产「${target}」生图（${spec}）`
+    if (kind === '画布生图') return `${batchPrefix}画布「${target}」生图（${spec}）`
+    if (kind === '画布生视频') return `${batchPrefix}画布「${target}」视频生成（${spec}）`
+  }
+
+  // 3. 历史媒体完成结算说明：xxx完成结算 ([片段N · ]model_id/规格)
+  const gridSettleMatch = /^片段分镜宫格完成结算\s*[（(]([^·]+?)\s*·\s*[^/）)]+\/([^）)]+)[）)]$/u.exec(text)
+  if (gridSettleMatch) {
+    return `${formatClipLabel(gridSettleMatch[1]!)} 分镜宫格完成结算（${normalizeSpecBadge(gridSettleMatch[2]!)}）`
+  }
+  const mediaSettleMatch = /^(画布生图|资产生图|画布视频|片段视频)完成结算\s*[（(][^/）)]+\/([^）)]+)[）)]$/u.exec(text)
+  if (mediaSettleMatch) {
+    return `${mediaSettleMatch[1]}完成结算（${normalizeSpecBadge(mediaSettleMatch[2]!)}）`
+  }
+
+  // 4. 历史失败退还说明：xxx失败退还冻结积分 (error_code)
+  const releaseMatch = /^(画布生图|片段分镜宫格|资产生图|画布视频|片段视频)失败退还冻结积分\s*[（(][^）)]+[）)]$/u.exec(text)
+  if (releaseMatch) {
+    return `${releaseMatch[1]}失败，已退还冻结积分`
+  }
+
+  return text
 }
 
 export function formatRateSpec(
@@ -142,7 +221,7 @@ export function buildBillsCsv(items: readonly CreditBillItem[]): string {
       formatSignedCredits(item.amount),
       formatCredits(item.originalAmount),
       formatCredits(item.balanceAfter),
-      item.reason || '-',
+      formatCreditReason(item.reason) || '-',
     ].map(escapeCsvCell).join(',')
   })
   return `\uFEFF${[header.join(','), ...rows].join('\n')}`
@@ -163,7 +242,7 @@ export function buildLedgersCsv(items: readonly EnrichedCreditLedgerItem[]): str
       formatCredits(item.frozenAfter),
       source,
       item.modelName || item.modelId || '-',
-      item.reason || '-',
+      formatCreditReason(item.reason) || '-',
     ].map(escapeCsvCell).join(',')
   })
   return `\uFEFF${[header.join(','), ...rows].join('\n')}`

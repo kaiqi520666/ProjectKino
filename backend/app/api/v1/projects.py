@@ -1037,7 +1037,7 @@ async def batch_generate_asset_images(
             model_id=model.id,
             amount=unit_price,
             rate_snapshot=rate_snapshot,
-            reason=f"批量资产生图预冻结 ({asset.name} · {model.id}/{body.tier})",
+            reason=f"批量资产「{asset.name}」生图（{body.tier.upper()}）",
         )
         asset.image_status = "generating"
         asset.image_model_id = model.id
@@ -1148,7 +1148,7 @@ async def generate_asset_image(
         model_id=model.id,
         amount=amount,
         rate_snapshot=rate_snapshot,
-        reason=f"资产生图预冻结 ({asset.name} · {model.id}/{body.tier})",
+        reason=f"资产「{asset.name}」生图（{body.tier.upper()}）",
     )
     asset.image_status = "generating"
     asset.image_model_id = model.id
@@ -1536,7 +1536,7 @@ async def batch_generate_clip_videos(
             model_id=model.id,
             amount=amount,
             rate_snapshot=rate_snapshot,
-            reason=f"批量片段生视频预冻结 (片段{clip.clip_index} · {model.id}/{effective_duration}s)",
+            reason=f"批量片段 {clip.clip_index} 视频生成（{effective_duration}s）",
         )
         clip.video_status = "generating"
         clip.video_model_id = model.id
@@ -1693,7 +1693,7 @@ async def generate_clip_video(
         model_id=model.id,
         amount=amount,
         rate_snapshot=rate_snapshot,
-        reason=f"片段生视频预冻结 (片段{clip.clip_index} · {model.id}/{clip.duration_seconds}s)",
+        reason=f"片段 {clip.clip_index} 视频生成（{clip.duration_seconds}s）",
     )
     clip.video_status = "generating"
     clip.video_model_id = model.id
@@ -1816,7 +1816,7 @@ async def generate_clip_storyboard_grid(
         model_id=model.id,
         amount=amount,
         rate_snapshot=rate_snapshot,
-        reason=f"片段分镜宫格预冻结 (片段{clip.clip_index} · {model.id}/{body.tier})",
+        reason=f"片段 {clip.clip_index} 分镜宫格图（{body.tier.upper()}）",
     )
     await session.commit()
     await execute_asset_image_job.kiq(str(job.id))

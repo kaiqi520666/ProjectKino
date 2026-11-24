@@ -2,7 +2,7 @@ import { http, unwrap } from '@/lib/http'
 
 export type CreditBillCategory = 'text' | 'image' | 'video' | 'income'
 export type CreditBillStatus = 'charged' | 'frozen' | 'refunded' | 'credited'
-export type CreditLedgerOperation = 'grant' | 'freeze' | 'settle' | 'release' | 'llm_consume' | 'adjust'
+export type CreditLedgerOperation = 'grant' | 'freeze' | 'settle' | 'release' | 'llm_consume' | 'adjust' | 'redeem'
 
 export interface CreditBillTimelineEvent {
   operation: string
@@ -109,6 +109,18 @@ export interface CreditSummary {
   billCount: number
   breakdown: CreditBreakdown
   activeFrozenItems: FrozenReservationItem[]
+  redeemPurchaseUrl?: string
+}
+
+export interface RedeemCodeResult {
+  credits: string
+  balance: string
+  batchName: string
+  redeemedAt: string
+}
+
+export function redeemCreditCode(code: string) {
+  return unwrap<RedeemCodeResult>(http.post('/credits/redeem', { code: code.trim() }))
 }
 
 export function fetchCreditSummary(params?: { startAt?: string; endAt?: string }) {

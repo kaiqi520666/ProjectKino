@@ -21,6 +21,10 @@ DEFAULT_OSS_SETTINGS: dict[str, Any] = {
     "timeout_seconds": 30,
 }
 
+DEFAULT_REDEEM_SETTINGS: dict[str, Any] = {
+    "purchase_url": "",
+}
+
 
 async def get_setting(
     session: AsyncSession,
@@ -58,3 +62,22 @@ async def get_registration_policy(session: AsyncSession) -> tuple[Decimal, Decim
     if multiplier <= 0:
         multiplier = Decimal("1")
     return initial_credits, multiplier
+
+
+async def get_redeem_purchase_url(session: AsyncSession) -> str:
+    cfg = await get_setting(session, "redeem", DEFAULT_REDEEM_SETTINGS)
+    raw = str(cfg.get("purchase_url") or "").strip()
+    if raw and raw.startswith(("http://", "https://")):
+        return raw
+    return ""
+
+
+async def set_redeem_purchase_url(session: AsyncSession, url: str) -> str:
+    cleaned = url.strip()
+    if cleaned:
+        if len(cleaned) > 500 or not cleaned.startswith(("http://", "https://")):
+            from app.core.errors import AppError
+
+            raise AppError(400, "invalid_purchase_url", "购买链接必须以 http:// 或 https:// 开头")
+    await upsert_setting(session, "redeem", {"purchase_url": cleaned})
+    return cleaned

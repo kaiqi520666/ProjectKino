@@ -3,7 +3,7 @@ import tempfile
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import structlog
@@ -58,7 +58,25 @@ from app.modules.catalog.models import (
 )
 from app.modules.catalog.upstream_sync import sync_provider_models_in_session
 from app.modules.credits.models import CreditReservation
-from app.modules.credits.schemas import CreditLedgerOut
+from app.modules.credits.redeem_service import (
+    disable_redeem_batch,
+    generate_redeem_codes,
+    list_admin_redeem_codes,
+    list_redeem_code_uses,
+    resolve_redeem_status,
+    update_redeem_code_status,
+)
+from app.modules.credits.schemas import (
+    AdminRedeemBatchCreateOut,
+    AdminRedeemBatchCreateRequest,
+    AdminRedeemBatchDisableRequest,
+    AdminRedeemCodeItemOut,
+    AdminRedeemCodeListOut,
+    AdminRedeemCodeStatusUpdateRequest,
+    AdminRedeemCodeUseListOut,
+    AdminRedeemPurchaseUrlUpdateRequest,
+    CreditLedgerOut,
+)
 from app.modules.credits.service import (
     grant_credits,
     list_user_ledgers,
@@ -70,6 +88,7 @@ from app.modules.settings.service import (
     DEFAULT_OSS_SETTINGS,
     get_registration_policy,
     get_setting,
+    set_redeem_purchase_url,
     upsert_setting,
 )
 from app.modules.storage.media import (
@@ -1625,3 +1644,108 @@ async def admin_purge_archived_project(
             "deletedOssCount": deleted_oss,
         }
     )
+
+
+@router.get("/redeem-codes", response_model=ApiResponse[AdminRedeemCodeListOut])
+async def admin_list_redeem_codes(
+    status: Literal["active", "exhausted", "expired", "disabled"] | None = Query(default=None),
+    batch_name: str | None = Query(default=None, max_length=120),
+    keyword: str | None = Query(default=None, max_length=100),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    _admin: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[AdminRedeemCodeListOut]:
+    data = await list_admin_redeem_codes(
+        session,
+        status_filter=status,
+        batch_name=batch_name,
+        keyword=keyword,
+        limit=limit,
+        offset=offset,
+    )
+    return ApiResponse(data=data)
+
+
+@router.post("/redeem-codes/batch", response_model=ApiResponse[AdminRedeemBatchCreateOut])
+async def admin_create_redeem_codes(
+    body: AdminRedeemBatchCreateRequest,
+    admin: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[AdminRedeemBatchCreateOut]:
+    rows = await generate_redeem_codes(
+        session,
+        credits=body.credits,
+        count=body.count,
+        prefix=body.prefix,
+        batch_name=body.batch_name,
+        max_uses=body.max_uses,
+        expires_at=body.expires_at,
+        created_by=admin.id,
+    )
+    await session.commit()
+    return ApiResponse(
+        data=AdminRedeemBatchCreateOut(
+            count=len(rows),
+            credits=rows[0].credits if rows else body.credits,
+            batch_name=rows[0].batch_name if rows else body.batch_name.strip(),
+            codes=[r.code for r in rows],
+        )
+    )
+
+
+@router.put("/redeem-codes/purchase-url", response_model=ApiResponse[dict])
+async def admin_update_redeem_purchase_url(
+    body: AdminRedeemPurchaseUrlUpdateRequest,
+    _admin: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[dict]:
+    saved = await set_redeem_purchase_url(session, body.purchase_url)
+    await session.commit()
+    return ApiResponse(data={"purchaseUrl": saved})
+
+
+@router.get("/redeem-codes/{code_id}/uses", response_model=ApiResponse[AdminRedeemCodeUseListOut])
+async def admin_get_redeem_code_uses(
+    code_id: UUID,
+    _admin: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[AdminRedeemCodeUseListOut]:
+    items = await list_redeem_code_uses(session, code_id=code_id)
+    return ApiResponse(data=AdminRedeemCodeUseListOut(items=items))
+
+
+@router.patch("/redeem-codes/{code_id}", response_model=ApiResponse[AdminRedeemCodeItemOut])
+async def admin_update_redeem_code_status(
+    code_id: UUID,
+    body: AdminRedeemCodeStatusUpdateRequest,
+    _admin: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[AdminRedeemCodeItemOut]:
+    row = await update_redeem_code_status(session, code_id=code_id, status=body.status)
+    await session.commit()
+    return ApiResponse(
+        data=AdminRedeemCodeItemOut(
+            id=row.id,
+            code=row.code,
+            batch_name=row.batch_name,
+            credits=row.credits,
+            max_uses=row.max_uses,
+            used_count=row.used_count,
+            status=resolve_redeem_status(row),
+            raw_status="disabled" if row.status == "disabled" else "active",
+            expires_at=row.expires_at,
+            created_at=row.created_at,
+        )
+    )
+
+
+@router.post("/redeem-codes/batch-disable", response_model=ApiResponse[dict])
+async def admin_disable_redeem_batch(
+    body: AdminRedeemBatchDisableRequest,
+    _admin: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[dict]:
+    disabled_count = await disable_redeem_batch(session, batch_name=body.batch_name)
+    await session.commit()
+    return ApiResponse(data={"batchName": body.batch_name.strip(), "disabledCount": disabled_count})

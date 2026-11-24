@@ -416,3 +416,90 @@ export function purgeAdminProject(projectId: string) {
     http.delete(`/admin/projects/${projectId}/purge`),
   )
 }
+
+export type AdminRedeemCodeStatus = 'active' | 'exhausted' | 'expired' | 'disabled'
+
+export interface AdminRedeemCodeItem {
+  id: string
+  code: string
+  batchName: string
+  credits: string
+  maxUses: number
+  usedCount: number
+  status: AdminRedeemCodeStatus
+  rawStatus: 'active' | 'disabled'
+  expiresAt?: string | null
+  createdAt: string
+}
+
+export interface AdminRedeemStats {
+  totalCodes: number
+  activeCodes: number
+  usedCountTotal: number
+  redeemedCreditsTotal: string
+}
+
+export interface AdminRedeemCodeList {
+  items: AdminRedeemCodeItem[]
+  total: number
+  stats: AdminRedeemStats
+  batches: string[]
+  purchaseUrl: string
+}
+
+export interface AdminRedeemBatchCreateResult {
+  count: number
+  credits: string
+  batchName: string
+  codes: string[]
+}
+
+export interface AdminRedeemCodeUseItem {
+  id: string
+  userId: number
+  email: string
+  nickname: string
+  credits: string
+  createdAt: string
+}
+
+export function listAdminRedeemCodes(params: {
+  status?: AdminRedeemCodeStatus
+  batch_name?: string
+  keyword?: string
+  limit?: number
+  offset?: number
+} = {}) {
+  return unwrap<AdminRedeemCodeList>(http.get('/admin/redeem-codes', { params }))
+}
+
+export function createAdminRedeemBatch(body: {
+  credits: string
+  count: number
+  prefix?: string
+  batchName?: string
+  maxUses?: number
+  expiresAt?: string | null
+}) {
+  return unwrap<AdminRedeemBatchCreateResult>(http.post('/admin/redeem-codes/batch', body))
+}
+
+export function updateAdminRedeemPurchaseUrl(purchaseUrl: string) {
+  return unwrap<{ purchaseUrl: string }>(
+    http.put('/admin/redeem-codes/purchase-url', { purchaseUrl }),
+  )
+}
+
+export function listAdminRedeemCodeUses(codeId: string) {
+  return unwrap<{ items: AdminRedeemCodeUseItem[] }>(http.get(`/admin/redeem-codes/${codeId}/uses`))
+}
+
+export function updateAdminRedeemCodeStatus(codeId: string, status: 'active' | 'disabled') {
+  return unwrap<AdminRedeemCodeItem>(http.patch(`/admin/redeem-codes/${codeId}`, { status }))
+}
+
+export function disableAdminRedeemBatch(batchName: string) {
+  return unwrap<{ batchName: string; disabledCount: number }>(
+    http.post('/admin/redeem-codes/batch-disable', { batchName }),
+  )
+}

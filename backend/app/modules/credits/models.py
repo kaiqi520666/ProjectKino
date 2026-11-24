@@ -1,3 +1,4 @@
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -5,12 +6,15 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
+    DateTime,
     ForeignKey,
     Index,
+    Integer,
     Numeric,
     String,
     Text,
     UniqueConstraint,
+    func,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -57,7 +61,7 @@ class CreditLedger(TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_credit_ledgers_idempotency_key"),
         CheckConstraint(
-            "operation IN ('grant', 'freeze', 'settle', 'release', 'llm_consume', 'adjust')",
+            "operation IN ('grant', 'freeze', 'settle', 'release', 'llm_consume', 'adjust', 'redeem')",
             name="operation_allowed",
         ),
         CheckConstraint("frozen_before >= 0 AND frozen_after >= 0", name="frozen_nonnegative"),
@@ -84,3 +88,53 @@ class CreditLedger(TimestampMixin, Base):
     frozen_after: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
     token_usage: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class RedeemCode(TimestampMixin, Base):
+    """积分兑换码（一次性卡密或限次口令码）。"""
+
+    __tablename__ = "redeem_codes"
+    __table_args__ = (
+        UniqueConstraint("code_normalized", name="uq_redeem_codes_normalized"),
+        CheckConstraint("credits > 0", name="credits_positive"),
+        CheckConstraint("max_uses >= 1", name="max_uses_positive"),
+        CheckConstraint("used_count >= 0 AND used_count <= max_uses", name="used_count_bounds"),
+        CheckConstraint("status IN ('active', 'disabled')", name="status_allowed"),
+        Index("ix_redeem_codes_batch_created", "batch_name", "created_at"),
+        Index("ix_redeem_codes_status_created", "status", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    code: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_normalized: Mapped[str] = mapped_column(String(64), nullable=False)
+    batch_name: Mapped[str] = mapped_column(String(120), nullable=False, server_default="")
+    credits: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
+    max_uses: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    used_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("users.id"))
+
+
+class RedeemCodeUse(Base):
+    """兑换码核销记录；联合唯一约束防止同人重复核销同一码。"""
+
+    __tablename__ = "redeem_code_uses"
+    __table_args__ = (
+        UniqueConstraint("code_id", "user_id", name="uq_redeem_code_uses_code_user"),
+        Index("ix_redeem_code_uses_code_created", "code_id", "created_at"),
+        Index("ix_redeem_code_uses_user_created", "user_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    code_id: Mapped[UUID] = mapped_column(
+        ForeignKey("redeem_codes.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), nullable=False)
+    credits: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
+    ledger_id: Mapped[UUID | None] = mapped_column(ForeignKey("credit_ledgers.id"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )

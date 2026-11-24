@@ -17,7 +17,6 @@ test('workspace pages share a layout without requiring a workspace URL prefix', 
     ['/projects', 'projects', 'studio'],
     ['/canvas', 'canvas', 'canvas'],
     ['/assets', 'assets', 'assets'],
-    ['/account', 'account', 'account'],
   ]) {
     const route = router.resolve(path!)
     assert.equal(route.name, name)
@@ -27,10 +26,31 @@ test('workspace pages share a layout without requiring a workspace URL prefix', 
   }
 })
 
+test('account sub-pages are nested under /account with route-driven tabs', () => {
+  const root = router.resolve('/account')
+  assert.equal(root.name, 'account')
+  assert.equal(root.matched.length, 3)
+  assert.equal(root.matched[0]!.path, '/workspace')
+  assert.equal(root.meta.workspaceNav, 'account')
+
+  for (const [name, suffix, tab] of [
+    ['account-credits', 'credits', 'credits'],
+    ['account-security', 'security', 'security'],
+  ] as const) {
+    const route = router.resolve({ name })
+    assert.equal(route.path, `/account/${suffix}`)
+    assert.equal(route.meta.workspaceNav, 'account')
+    assert.equal(route.meta.accountTab, tab)
+    assert.equal(route.matched.some((record) => record.meta.requiresAuth === true), true)
+  }
+})
+
 test('named navigation resolves to the agreed short URLs', () => {
   assert.equal(router.resolve({ name: 'canvas' }).path, '/canvas')
   assert.equal(router.resolve({ name: 'assets' }).path, '/assets')
   assert.equal(router.resolve({ name: 'account' }).path, '/account')
+  assert.equal(router.resolve({ name: 'account-credits' }).path, '/account/credits')
+  assert.equal(router.resolve({ name: 'account-security' }).path, '/account/security')
 })
 
 test('the canvas editor resolves outside the workspace layout', () => {
@@ -54,7 +74,7 @@ test('studio steps and episode detail are scoped under one project', () => {
 })
 
 test('protected workspace, canvas, and admin routes carry auth and role meta', () => {
-  for (const path of ['/workspace', '/projects', '/projects/p1/script', '/canvas', '/canvas/c1', '/assets', '/account']) {
+  for (const path of ['/workspace', '/projects', '/projects/p1/script', '/canvas', '/canvas/c1', '/assets', '/account', '/account/credits', '/account/security']) {
     const resolved = router.resolve(path)
     assert.equal(
       resolved.matched.some((record) => record.meta.requiresAuth === true),
@@ -63,7 +83,7 @@ test('protected workspace, canvas, and admin routes carry auth and role meta', (
     )
   }
 
-  for (const path of ['/admin', '/admin/users', '/admin/models', '/admin/jobs', '/admin/projects', '/admin/settings']) {
+  for (const path of ['/admin', '/admin/users', '/admin/redeem-codes', '/admin/models', '/admin/jobs', '/admin/projects', '/admin/settings']) {
     const resolved = router.resolve(path)
     assert.equal(
       resolved.matched.some((record) => record.meta.requiresAuth === true),

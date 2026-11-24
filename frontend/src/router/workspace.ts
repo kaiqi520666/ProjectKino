@@ -26,6 +26,25 @@ export const workspaceRoutes: RouteRecordRaw[] = [{
     },
     { path: '/canvas', name: 'canvas', component: () => import('@/features/canvas/views/CanvasListView.vue'), meta: { title: '画布', workspaceNav: 'canvas' } },
     { path: '/assets', name: 'assets', component: () => import('@/features/assets/views/AssetsLibraryView.vue'), meta: { title: '素材', workspaceNav: 'assets' } },
-    { path: '/account', name: 'account', component: () => import('@/features/account/views/AccountView.vue'), meta: { title: '我的', workspaceNav: 'account' } },
+    {
+      path: '/account',
+      component: () => import('@/features/account/views/AccountView.vue'),
+      meta: { workspaceNav: 'account' },
+      children: [
+        { path: '', name: 'account', redirect: { name: 'account-credits' } },
+        {
+          path: 'credits',
+          name: 'account-credits',
+          component: () => import('@/features/account/views/AccountCreditsView.vue'),
+          meta: { title: '积分与账单', accountTab: 'credits' },
+        },
+        {
+          path: 'security',
+          name: 'account-security',
+          component: () => import('@/features/account/views/AccountSecurityView.vue'),
+          meta: { title: '账号与安全', accountTab: 'security' },
+        },
+      ],
+    },
   ],
 }]

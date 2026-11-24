@@ -23,11 +23,13 @@ export interface CreditBalanceResponse {
   balance: string
   frozen: string
   usageMultiplier: string
+  redeemPurchaseUrl?: string
 }
 
 export const useAuthStore = defineStore('auth', () => {
   const token = ref<string | null>(readStoredToken())
   const user = ref<AuthUser | null>(null)
+  const redeemPurchaseUrl = ref('')
   const loading = ref(false)
   let hydratePromise: Promise<AuthUser | null> | null = null
 
@@ -107,6 +109,7 @@ export const useAuthStore = defineStore('auth', () => {
     if (!token.value) return
     try {
       const data = await unwrap<CreditBalanceResponse>(http.get('/credits/balance'))
+      redeemPurchaseUrl.value = data.redeemPurchaseUrl ?? ''
       if (user.value) {
         user.value = {
           ...user.value,
@@ -137,6 +140,7 @@ export const useAuthStore = defineStore('auth', () => {
   return {
     token,
     user,
+    redeemPurchaseUrl,
     loading,
     isAuthenticated,
     isAdmin,

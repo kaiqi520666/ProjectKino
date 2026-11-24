@@ -36,14 +36,19 @@ export function formatCompactCount(value: unknown): string {
   return String(Math.round(num))
 }
 
-export function formatTokenUsage(usage?: Record<string, unknown> | null): string {
+export function formatTokenUsage(
+  usage?: Record<string, unknown> | null,
+  options?: { includeModel?: boolean },
+): string {
   if (!usage || typeof usage !== 'object') return ''
   const parts: string[] = []
   const input = usage.inputTokens ?? usage.input_tokens ?? usage.prompt_tokens
   const output = usage.outputTokens ?? usage.output_tokens ?? usage.completion_tokens
   const cacheHit = usage.cacheReadTokens ?? usage.cache_hit_tokens ?? usage.cache_read_tokens
-  const model = usage.modelId ?? usage.model
-  if (model) parts.push(String(model))
+  if (options?.includeModel) {
+    const model = usage.modelId ?? usage.model
+    if (model) parts.push(String(model))
+  }
   if (input !== undefined && input !== null) parts.push(`输入 ${formatCompactCount(input)}`)
   if (cacheHit !== undefined && cacheHit !== null && Number(cacheHit) > 0) {
     parts.push(`缓存命中 ${formatCompactCount(cacheHit)}`)

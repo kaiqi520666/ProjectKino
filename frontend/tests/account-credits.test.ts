@@ -4,23 +4,35 @@ import {
   buildBillsCsv,
   buildLedgersCsv,
   computeBreakdownSegments,
+  formatCreditReason,
   formatLedgerChangeDisplay,
   formatRateSpec,
 } from '../src/features/account/credits-helpers.ts'
 import { formatCompactCount, formatTokenUsage } from '../src/lib/format.ts'
 
-test('formatTokenUsage reads camelCase backend tokenUsage and snake_case fallback', () => {
+test('formatTokenUsage reads camelCase backend tokenUsage and hides modelId by default', () => {
   assert.equal(formatCompactCount(850), '850')
   assert.equal(formatCompactCount(12400), '12.4k')
   assert.equal(formatCompactCount(1_250_000), '1.25M')
 
   const camel = formatTokenUsage({
-    modelId: 'deepseek-chat',
+    modelId: 'or-ds-baidu',
     inputTokens: 12400,
     cacheReadTokens: 8100,
     outputTokens: 2300,
   })
-  assert.equal(camel, 'deepseek-chat · 输入 12.4k · 缓存命中 8.1k · 输出 2.3k')
+  assert.equal(camel, '输入 12.4k · 缓存命中 8.1k · 输出 2.3k')
+
+  const withModel = formatTokenUsage(
+    {
+      modelId: 'or-ds-baidu',
+      inputTokens: 12400,
+      cacheReadTokens: 8100,
+      outputTokens: 2300,
+    },
+    { includeModel: true },
+  )
+  assert.equal(withModel, 'or-ds-baidu · 输入 12.4k · 缓存命中 8.1k · 输出 2.3k')
 
   const snake = formatTokenUsage({
     model: 'deepseek-reasoner',
@@ -28,7 +40,37 @@ test('formatTokenUsage reads camelCase backend tokenUsage and snake_case fallbac
     output_tokens: 120,
     cache_hit_tokens: 0,
   })
-  assert.equal(snake, 'deepseek-reasoner · 输入 500 · 输出 120')
+  assert.equal(snake, '输入 500 · 输出 120')
+})
+
+test('formatCreditReason translates legacy English codes into clean Chinese while preserving 27s and 2K', () => {
+  assert.equal(formatCreditReason('LLM 任务消耗 (script_generate:outline)'), '全剧大纲规划')
+  assert.equal(formatCreditReason('LLM 任务消耗 (script_generate:ep5)'), '第 5 集剧本生成')
+  assert.equal(formatCreditReason('LLM 任务消耗 (script_regenerate:ep2)'), '第 2 集剧本重写')
+  assert.equal(formatCreditReason('LLM 任务消耗 (storyboard_generate/episode)'), '单集分镜规划')
+  assert.equal(formatCreditReason('LLM 任务消耗 (storyboard_generate/clip_regenerate)'), '片段分镜重绘')
+  assert.equal(formatCreditReason('LLM 任务消耗 (assets_extract)'), '项目资产识别')
+  assert.equal(
+    formatCreditReason('片段生视频预冻结 (片段1 · cc-sd2.5-flash-t-480/27s)'),
+    '片段 1 视频生成（27s）',
+  )
+  assert.equal(
+    formatCreditReason('片段分镜宫格预冻结 (片段1 · gpt-image-2.6-flare/2k)'),
+    '片段 1 分镜宫格图（2K）',
+  )
+  assert.equal(
+    formatCreditReason('资产生图预冻结 (主角 · gpt-image-2.6-flare/2k)'),
+    '资产「主角」生图（2K）',
+  )
+  assert.equal(
+    formatCreditReason('片段视频完成结算 (cc-sd2.5-flash-t-480/27s)'),
+    '片段视频完成结算（27s）',
+  )
+  assert.equal(
+    formatCreditReason('画布生图失败退还冻结积分 (provider_timeout)'),
+    '画布生图失败，已退还冻结积分',
+  )
+  assert.equal(formatCreditReason('片段 1 分镜宫格规划'), '片段 1 分镜宫格规划')
 })
 
 test('computeBreakdownSegments calculates category percentages cleanly', () => {
@@ -63,8 +105,8 @@ test('formatRateSpec formats media rate snapshots and falls back to token usage'
     '720p · 15s · 1.2 积分/秒',
   )
   assert.equal(
-    formatRateSpec(null, { modelId: 'deepseek-chat', inputTokens: 1000, outputTokens: 200 }),
-    'deepseek-chat · 输入 1k · 输出 200',
+    formatRateSpec(null, { modelId: 'or-ds-baidu', inputTokens: 1000, outputTokens: 200 }),
+    '输入 1k · 输出 200',
   )
 })
 

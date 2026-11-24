@@ -19,6 +19,12 @@ export const adminRoutes: RouteRecordRaw[] = [
         component: () => import('@/features/admin/views/AdminUsersView.vue'),
       },
       {
+        path: 'redeem-codes',
+        name: 'admin-redeem-codes',
+        meta: { title: '兑换码', adminNav: 'redeem-codes', workspaceNav: 'admin', requiresAdmin: true },
+        component: () => import('@/features/admin/views/AdminRedeemCodesView.vue'),
+      },
+      {
         path: 'jobs',
         name: 'admin-jobs',
         meta: { title: '任务与核对', adminNav: 'jobs', workspaceNav: 'admin', requiresAdmin: true },

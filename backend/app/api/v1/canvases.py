@@ -247,7 +247,7 @@ async def generate_canvas_node_endpoint(
             model_id=model.id,
             amount=amount,
             rate_snapshot=rate_snapshot,
-            reason=f"画布生图预冻结 ({canvas.name} · {model.id}/{tier})",
+            reason=f"画布「{canvas.name}」生图（{tier.upper()}）",
         )
         await session.commit()
         await execute_asset_image_job.kiq(str(job.id))
@@ -345,7 +345,7 @@ async def generate_canvas_node_endpoint(
         model_id=model.id,
         amount=amount,
         rate_snapshot=rate_snapshot,
-        reason=f"画布生视频预冻结 ({canvas.name} · {model.id}/{duration_seconds}s)",
+        reason=f"画布「{canvas.name}」视频生成（{duration_seconds}s）",
     )
     await session.commit()
     await execute_clip_video_job.kiq(str(job.id))

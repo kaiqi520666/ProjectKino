@@ -9,6 +9,7 @@ import type { CreditBillItem, EnrichedCreditLedgerItem } from '../credits-api'
 import {
   BILL_CATEGORY_LABELS,
   BILL_STATUS_LABELS,
+  formatCreditReason,
   LEDGER_OP_LABELS_ACCOUNT,
 } from '../credits-helpers'
 
@@ -111,7 +112,7 @@ async function copyJobId(jobId: string) {
           <span v-else class="credit-detail-badge is-ledger">
             {{ LEDGER_OP_LABELS_ACCOUNT[detail.item.operation] || detail.item.operation }}
           </span>
-          <h3>{{ detail.kind === 'bill' ? detail.item.title : (detail.item.reason || '积分流水') }}</h3>
+          <h3>{{ detail.kind === 'bill' ? detail.item.title : (formatCreditReason(detail.item.reason) || '积分流水') }}</h3>
           <p class="credit-detail-time">{{ formatDateTime(currentItem.createdAt) }}</p>
         </div>
         <div class="credit-detail-amount-box">
@@ -156,9 +157,6 @@ async function copyJobId(jobId: string) {
           <dt>使用模型</dt>
           <dd>
             <strong>{{ currentItem.modelName || currentItem.modelId }}</strong>
-            <small v-if="currentItem.modelName && currentItem.modelId" class="credit-detail-sub">
-              ({{ currentItem.modelId }})
-            </small>
           </dd>
         </div>
         <div v-if="currentItem.jobType">
@@ -194,7 +192,7 @@ async function copyJobId(jobId: string) {
         </div>
         <div class="is-full">
           <dt>账务说明</dt>
-          <dd>{{ currentItem.reason || '-' }}</dd>
+          <dd>{{ formatCreditReason(currentItem.reason) || '-' }}</dd>
         </div>
       </dl>
 
@@ -252,7 +250,7 @@ async function copyJobId(jobId: string) {
                 <strong>{{ LEDGER_OP_LABELS_ACCOUNT[ev.operation] || ev.operation }}</strong>
                 <span class="credit-timeline-time">{{ formatDateTime(ev.createdAt) }}</span>
               </div>
-              <p>{{ ev.reason }}</p>
+              <p>{{ formatCreditReason(ev.reason) }}</p>
               <div class="credit-timeline-deltas">
                 <span>可用 {{ formatSignedCredits(ev.balanceChange) }}</span>
                 <span v-if="Number(ev.frozenChange) !== 0">冻结 {{ formatSignedCredits(ev.frozenChange) }}</span>

@@ -45,6 +45,7 @@ export const RESERVATION_STATUS_LABELS: Record<string, string> = {
 
 export const LEDGER_OP_LABELS: Record<string, string> = {
   grant: '积分赠送',
+  redeem: '兑换码',
   adjust: '账户调账',
   freeze: '任务预扣',
   settle: '消费结算',

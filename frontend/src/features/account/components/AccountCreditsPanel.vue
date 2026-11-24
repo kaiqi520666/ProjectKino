@@ -8,6 +8,7 @@ import {
   Clock,
   Coins,
   Download,
+  ExternalLink,
   FileText,
   Film,
   Image as ImageIcon,
@@ -16,13 +17,19 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
+  Ticket,
   Wallet,
   X,
 } from 'lucide-vue-next'
 import UiButton from '@/components/ui/UiButton.vue'
 import UiDataTable, { type DataTableColumn } from '@/components/ui/UiDataTable.vue'
 import UiDateRangePicker from '@/components/ui/UiDateRangePicker.vue'
-import { toUtcIsoBounds, type DateRangeValue } from '@/components/ui/date-range'
+import {
+  createDateRangePreset,
+  isDateRangeEqual,
+  toUtcIsoBounds,
+  type DateRangeValue,
+} from '@/components/ui/date-range'
 import UiSelect from '@/components/ui/UiSelect.vue'
 import { JOB_STATUS_LABELS, JOB_TYPE_LABELS } from '@/features/admin/format'
 import {
@@ -50,11 +57,13 @@ import {
   buildBillsCsv,
   buildLedgersCsv,
   computeBreakdownSegments,
+  formatCreditReason,
   formatLedgerChangeDisplay,
   formatRateSpec,
   LEDGER_OP_LABELS_ACCOUNT,
 } from '../credits-helpers'
 import CreditDetailDialog, { type CreditDetailPayload } from './CreditDetailDialog.vue'
+import RedeemCodeDialog from './RedeemCodeDialog.vue'
 
 type ViewMode = 'bills' | 'ledgers'
 
@@ -62,7 +71,7 @@ const auth = useAuthStore()
 const ui = useUiStore()
 
 const viewMode = ref<ViewMode>('bills')
-const dateRange = ref<DateRangeValue>({ start: null, end: null })
+const dateRange = ref<DateRangeValue>(createDateRangePreset('today'))
 const keyword = ref('')
 const billCategory = ref<'' | CreditBillCategory>('')
 const billStatus = ref<'' | CreditBillStatus>('')
@@ -87,6 +96,7 @@ const ledgersPageSize = ref(15)
 const exporting = ref(false)
 const detailOpen = ref(false)
 const activeDetail = ref<CreditDetailPayload | null>(null)
+const redeemOpen = ref(false)
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -112,6 +122,7 @@ const ledgerOperationOptions = [
   { value: 'freeze', label: '任务预扣' },
   { value: 'settle', label: '消费结算' },
   { value: 'release', label: '失败退还' },
+  { value: 'redeem', label: '兑换码' },
   { value: 'grant', label: '积分赠送' },
   { value: 'adjust', label: '账户调账' },
 ]
@@ -153,6 +164,7 @@ const ledgerColumns: DataTableColumn[] = [
 const activeBalance = computed(() => summary.value?.balance ?? auth.user?.balance ?? '0')
 const activeFrozen = computed(() => summary.value?.frozen ?? auth.user?.frozen ?? '0')
 const activeMultiplier = computed(() => Number(summary.value?.usageMultiplier ?? auth.user?.usageMultiplier ?? 1))
+const redeemPurchaseUrl = computed(() => summary.value?.redeemPurchaseUrl || auth.redeemPurchaseUrl || '')
 const isNegativeBalance = computed(() => Number(activeBalance.value) < 0)
 const hasFrozenCredits = computed(
   () => Number(activeFrozen.value) > 0 || (summary.value?.activeFrozenItems.length ?? 0) > 0,
@@ -164,6 +176,7 @@ const hasPeriodSpend = computed(() => Number(summary.value?.totalSpent ?? 0) > 0
 const periodLabel = computed(() => {
   const { start, end } = dateRange.value
   if (!start && !end) return '全部时间'
+  if (isDateRangeEqual(dateRange.value, createDateRangePreset('today'))) return '今天'
   if (start && end) return start === end ? start : `${start} 至 ${end}`
   if (start) return `${start} 起`
   return `至 ${end}`
@@ -171,8 +184,7 @@ const periodLabel = computed(() => {
 
 const hasActiveFilters = computed(() =>
   Boolean(
-    dateRange.value.start
-    || dateRange.value.end
+    !isDateRangeEqual(dateRange.value, createDateRangePreset('today'))
     || keyword.value.trim()
     || (viewMode.value === 'bills' ? (billCategory.value || billStatus.value) : ledgerOperation.value),
   ),
@@ -276,7 +288,7 @@ function handleDateRangeChange() {
 }
 
 function resetFilters() {
-  dateRange.value = { start: null, end: null }
+  dateRange.value = createDateRangePreset('today')
   keyword.value = ''
   billCategory.value = ''
   billStatus.value = ''
@@ -324,7 +336,7 @@ async function exportCsv() {
         return
       }
       csv = buildBillsCsv(res.items)
-      filename = `framedrama-bills-${stamp}.csv`
+      filename = `credit-bills-${stamp}.csv`
       if (res.total > res.items.length) {
         ui.notify(`已导出最近 ${res.items.length} 条消费账单（共 ${res.total} 条，建议缩小时间范围分批导出）`, 'info')
       }
@@ -342,7 +354,7 @@ async function exportCsv() {
         return
       }
       csv = buildLedgersCsv(res.items)
-      filename = `framedrama-ledgers-${stamp}.csv`
+      filename = `credit-ledgers-${stamp}.csv`
       if (res.total > res.items.length) {
         ui.notify(`已导出最近 ${res.items.length} 条资金流水（共 ${res.total} 条，建议缩小时间范围分批导出）`, 'info')
       }
@@ -386,7 +398,6 @@ onMounted(() => {
     <header class="credits-panel-head">
       <div class="credits-panel-title">
         <h2><Wallet :size="16" aria-hidden="true" />积分与账单</h2>
-        <span class="credits-panel-subtitle">透明查看账户余额、冻结明细与每笔创作消费</span>
       </div>
       <div class="credits-panel-head-actions">
         <UiButton variant="outline" size="sm" :loading="exporting" :disabled="exporting || isRefreshing" @click="exportCsv">
@@ -414,9 +425,27 @@ onMounted(() => {
             {{ activeMultiplier < 1 ? `专属 ${(activeMultiplier * 10).toFixed(1).replace(/\.0$/, '')} 折` : `费率 ${activeMultiplier.toFixed(2)}×` }}
           </span>
         </div>
-        <div class="credits-balance-hero" :class="{ 'is-neg': isNegativeBalance }">
-          <strong>{{ formatCredits(activeBalance) }}</strong>
-          <span>积分</span>
+        <div class="credits-balance-row">
+          <div class="credits-balance-hero" :class="{ 'is-neg': isNegativeBalance }">
+            <strong>{{ formatCredits(activeBalance) }}</strong>
+            <span>积分</span>
+          </div>
+          <div class="credits-balance-actions">
+            <UiButton variant="primary" size="sm" @click="redeemOpen = true">
+              <template #leading><Ticket :size="13" aria-hidden="true" /></template>
+              兑换积分
+            </UiButton>
+            <a
+              v-if="redeemPurchaseUrl"
+              :href="redeemPurchaseUrl"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="credits-buy-btn"
+            >
+              <span>购买兑换码</span>
+              <ExternalLink :size="12" aria-hidden="true" />
+            </a>
+          </div>
         </div>
         <p v-if="isNegativeBalance" class="credits-neg-warn">
           余额已为负数（文本按实际 Token 事后扣费），请补充积分后再继续生成。
@@ -668,8 +697,11 @@ onMounted(() => {
                 <LayoutDashboard :size="11" aria-hidden="true" />{{ row.canvasName || '画布' }}
               </RouterLink>
             </div>
-            <div v-if="row.reason && row.reason !== row.title" class="credits-row-sub">
-              {{ row.reason }}
+            <div
+              v-if="formatCreditReason(row.reason) && formatCreditReason(row.reason) !== row.title"
+              class="credits-row-sub"
+            >
+              {{ formatCreditReason(row.reason) }}
             </div>
           </div>
         </div>
@@ -767,7 +799,7 @@ onMounted(() => {
 
       <template #cell-reason="{ row }">
         <div class="credits-bill-title-line">
-          <span>{{ row.reason || '-' }}</span>
+          <span>{{ formatCreditReason(row.reason) || '-' }}</span>
           <RouterLink
             v-if="row.projectId"
             class="credits-source-chip"
@@ -798,6 +830,7 @@ onMounted(() => {
     </UiDataTable>
 
     <CreditDetailDialog v-model:open="detailOpen" :detail="activeDetail" />
+    <RedeemCodeDialog v-model:open="redeemOpen" :purchase-url="redeemPurchaseUrl" @redeemed="refreshAll(true)" />
   </article>
 </template>
 
@@ -904,10 +937,46 @@ onMounted(() => {
   font-weight: 500;
 }
 
+.credits-balance-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .credits-balance-hero {
   display: flex;
   align-items: baseline;
   gap: 6px;
+}
+
+.credits-balance-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.credits-buy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 11px;
+  border-radius: 7px;
+  border: 1px solid rgb(240 184 75 / 32%);
+  background: rgb(240 184 75 / 8%);
+  color: var(--color-gold-soft);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-decoration: none;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.credits-buy-btn:hover {
+  border-color: rgb(240 184 75 / 56%);
+  background: rgb(240 184 75 / 15%);
 }
 
 .credits-balance-hero strong {

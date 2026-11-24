@@ -449,8 +449,8 @@ onMounted(() => loadUsers(true))
         </template>
         <template #cell-reason="{ row }">
           <div>{{ row.reason || '-' }}</div>
-          <div v-if="formatTokenUsage(row.tokenUsage)" class="admin-cell-sub admin-mono">
-            {{ formatTokenUsage(row.tokenUsage) }}
+          <div v-if="formatTokenUsage(row.tokenUsage, { includeModel: true })" class="admin-cell-sub admin-mono">
+            {{ formatTokenUsage(row.tokenUsage, { includeModel: true }) }}
           </div>
         </template>
       </UiDataTable>
