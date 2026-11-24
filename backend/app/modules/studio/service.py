@@ -656,6 +656,91 @@ async def persist_extracted_assets(
     return saved
 
 
+def _build_storyboard_clip_row(
+    *,
+    project_id: UUID,
+    episode_id: UUID,
+    clip: Any,
+    assets_by_code: dict[str, ProjectAsset],
+) -> StoryboardClip:
+    refs = []
+    for ref in clip.references:
+        matched = assets_by_code.get(ref.assetId)
+        matched_name = (
+            f"{matched.name} · {matched.variant_label}"
+            if matched and matched.variant_label
+            else (matched.name if matched else ref.name)
+        )
+        refs.append(
+            {
+                "index": ref.index,
+                "assetId": str(matched.id) if matched else ref.assetId,
+                "assetCode": ref.assetId,
+                "name": matched_name,
+                "kind": ref.kind,
+            }
+        )
+    return StoryboardClip(
+        project_id=project_id,
+        episode_id=episode_id,
+        clip_index=clip.id,
+        duration_seconds=max(1, round(clip.durationSeconds)),
+        prompt=clip.prompt,
+        prompt_customized=False,
+        references=refs,
+        beats=list(clip.beats) if clip.beats else None,
+        blocking=clip.blocking or None,
+        cuts=[cut.model_dump() for cut in clip.cuts] if clip.cuts else None,
+    )
+
+
+async def persist_storyboard_batch(
+    session: AsyncSession,
+    project: Project,
+    *,
+    episode_number: int,
+    clips: list[Any],
+    replace_existing: bool = False,
+) -> int:
+    ep = await session.scalar(
+        select(Episode).where(
+            Episode.project_id == project.id,
+            Episode.number == episode_number,
+        )
+    )
+    if ep is None:
+        return 0
+    assets_by_code = {
+        a.asset_code: a
+        for a in await session.scalars(
+            select(ProjectAsset).where(ProjectAsset.project_id == project.id)
+        )
+    }
+    clip_indices = [clip.id for clip in clips]
+    if replace_existing:
+        await session.execute(delete(StoryboardClip).where(StoryboardClip.episode_id == ep.id))
+        await session.flush()
+    elif clip_indices:
+        await session.execute(
+            delete(StoryboardClip).where(
+                StoryboardClip.episode_id == ep.id,
+                StoryboardClip.clip_index.in_(clip_indices),
+            )
+        )
+        await session.flush()
+    for clip in clips:
+        session.add(
+            _build_storyboard_clip_row(
+                project_id=project.id,
+                episode_id=ep.id,
+                clip=clip,
+                assets_by_code=assets_by_code,
+            )
+        )
+    await session.flush()
+    return len(clips)
+
+
 async def persist_storyboard_result(
     session: AsyncSession,
     project: Project,
@@ -675,35 +760,12 @@ async def persist_storyboard_result(
         await session.execute(delete(StoryboardClip).where(StoryboardClip.episode_id == ep.id))
         await session.flush()
         for clip in board.clips:
-            refs = []
-            for ref in clip.references:
-                matched = assets_by_code.get(ref.assetId)
-                matched_name = (
-                    f"{matched.name} · {matched.variant_label}"
-                    if matched and matched.variant_label
-                    else (matched.name if matched else ref.name)
-                )
-                refs.append(
-                    {
-                        "index": ref.index,
-                        "assetId": str(matched.id) if matched else ref.assetId,
-                        "assetCode": ref.assetId,
-                        "name": matched_name,
-                        "kind": ref.kind,
-                    }
-                )
             session.add(
-                StoryboardClip(
+                _build_storyboard_clip_row(
                     project_id=project.id,
                     episode_id=ep.id,
-                    clip_index=clip.id,
-                    duration_seconds=max(1, round(clip.durationSeconds)),
-                    prompt=clip.prompt,
-                    prompt_customized=False,
-                    references=refs,
-                    beats=list(clip.beats) if clip.beats else None,
-                    blocking=clip.blocking or None,
-                    cuts=[cut.model_dump() for cut in clip.cuts] if clip.cuts else None,
+                    clip=clip,
+                    assets_by_code=assets_by_code,
                 )
             )
     await session.flush()

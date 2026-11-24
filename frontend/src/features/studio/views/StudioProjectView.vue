@@ -4,24 +4,22 @@ import { useRoute, useRouter } from 'vue-router'
 import { Check, Heading, Pencil, X } from 'lucide-vue-next'
 import EmptyState from '@/components/business/EmptyState.vue'
 import UiButton from '@/components/ui/UiButton.vue'
-import { useAuthStore } from '@/stores/auth'
-import { useGenerationStore } from '@/stores/generation'
 import { useUiStore } from '@/stores/ui'
-import { apiErrorMessage, getProjectDetail, isRetryableApiError, renameProjectApi, watchJob } from '../api'
+import { apiErrorMessage, getProjectDetail, renameProjectApi } from '../api'
 import { useAssetExtractStore } from '../asset-extract-store'
 import { artStyles } from '../components/art-styles'
 import { contentLanguages, formatDurationLabel } from '../components/drama-creation'
 import { isScriptJobType } from '../script-job-helpers'
 import { useScriptJobStore } from '../script-job-store'
+import { useStoryboardJobStore } from '../storyboard-job-store'
 import { useStudioStore } from '../studio-store'
 
 const route = useRoute()
 const router = useRouter()
-const auth = useAuthStore()
 const studio = useStudioStore()
 const scriptJobs = useScriptJobStore()
 const assetExtractJobs = useAssetExtractStore()
-const generation = useGenerationStore()
+const storyboardJobs = useStoryboardJobStore()
 const ui = useUiStore()
 const loadingProject = ref(false)
 const loadError = ref('')
@@ -55,6 +53,9 @@ async function ensureProjectLoaded(id: string) {
     if (existingAssetJob) {
       assetExtractJobs.trackExtractJob(existing.id, existingAssetJob)
     }
+    for (const activeJob of existing.activeJobs ?? []) {
+      storyboardJobs.trackStoryboardJob(existing.id, activeJob)
+    }
     return
   }
   loadingProject.value = true
@@ -70,41 +71,7 @@ async function ensureProjectLoaded(id: string) {
     if (activeAssetJob) {
       assetExtractJobs.trackExtractJob(detail.id, activeAssetJob)
     }
-    const runningJob = hydrated.activeJobs?.find(
-      (item) =>
-        !isScriptJobType(item.jobType)
-        && item.jobType !== 'assets_extract'
-        && item.jobType !== 'asset_image'
-        && item.jobType !== 'clip_video',
-    )
-    if (runningJob && !generation.isRunning) {
-      void generation.runTask(
-        {
-          title: '正在恢复后台生成任务',
-          subtitle: detail.name,
-          description: runningJob.stepLabel || '正在同步后台任务进度',
-          hint: '后台任务仍在继续执行，完成后自动刷新项目内容',
-          formatError: apiErrorMessage,
-          canRetryError: isRetryableApiError,
-          successMessage: () => '后台任务已完成',
-        },
-        async (controls) => {
-          controls.setJobId(runningJob.id)
-          controls.setProgress(runningJob.progress)
-          try {
-            await watchJob(runningJob.id, (job) => {
-              controls.setProgress(job.progress)
-              if (job.stepLabel) controls.setDescription(job.stepLabel)
-            })
-            const refreshed = await getProjectDetail(id)
-            studio.hydrateProjectDetail(refreshed)
-            return refreshed
-          } finally {
-            void auth.refreshBalance()
-          }
-        },
-      )
-    }
+    storyboardJobs.trackFromProjectDetail(detail)
   } catch (error) {
     loadError.value = apiErrorMessage(error)
   } finally {

@@ -16,7 +16,12 @@ from app.modules.studio.models import ProjectAsset, StoryboardClip
 logger = structlog.get_logger(__name__)
 
 _MEDIA_JOB_TYPES = {"asset_image", "clip_video", "canvas_image", "canvas_video"}
-_AUTO_RECOVER_LLM_JOB_TYPES = {"script_generate", "script_regenerate", "assets_extract"}
+_AUTO_RECOVER_LLM_JOB_TYPES = {
+    "script_generate",
+    "script_regenerate",
+    "assets_extract",
+    "storyboard_generate",
+}
 _LLM_JOB_TYPES = {
     "script_generate",
     "script_regenerate",
@@ -148,7 +153,11 @@ async def sweep_stale_jobs_once(
                 else:
                     job.status = "failed"
                     job.error_code = "worker_lease_expired"
-                    job.error_message = "后台多次意外中断，已暂停自动恢复，请点击继续生成剩余分集"
+                    job.error_message = (
+                        "后台多次意外中断，已暂停自动恢复，请点击继续生成剩余分集"
+                        if job.job_type in ("script_generate", "script_regenerate")
+                        else "后台多次意外中断，已暂停自动恢复，请重新发起任务"
+                    )
                     job.finished_at = current
                     to_publish.append(job)
                     counts["failed"] += 1

@@ -95,3 +95,24 @@ class Job(TimestampMixin, Base):
     usage_summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    @property
+    def job_meta(self) -> dict[str, Any] | None:
+        """Return whitelisted routing and batch-progress keys for UI reload recovery."""
+        payload = self.input_payload
+        if not isinstance(payload, dict):
+            return None
+        safe_keys = (
+            "action",
+            "episodeNumber",
+            "episodeId",
+            "clipId",
+            "insertAfterClipId",
+            "durationSeconds",
+            "clipCount",
+            "completedBatches",
+            "totalBatches",
+            "segmentCount",
+        )
+        meta = {key: payload[key] for key in safe_keys if key in payload}
+        return meta or None

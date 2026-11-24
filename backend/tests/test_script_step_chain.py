@@ -12,8 +12,11 @@ from app.core.config import Settings
 from app.core.errors import AppError
 from app.modules.credits.models import CreditLedger
 from app.modules.jobs.models import Job
+from app.modules.jobs.schemas import JobOut
 from app.modules.jobs.service import claim_job_lease
 from app.modules.llm_engine.schema import (
+    Asset,
+    AssetResult,
     Beat,
     Character,
     Episode,
@@ -24,7 +27,18 @@ from app.modules.llm_engine.schema import (
     SceneCard,
     ScriptResult,
 )
-from app.modules.studio.models import Project
+from app.modules.llm_engine.schema import (
+    StoryboardClip as LlmStoryboardClip,
+)
+from app.modules.studio.models import (
+    Episode as DbEpisode,
+)
+from app.modules.studio.models import (
+    Project,
+)
+from app.modules.studio.models import (
+    StoryboardClip as DbStoryboardClip,
+)
 from app.workers import ai_tasks
 from app.workers.llm_limiter import (
     acquire_llm_slot,
@@ -641,4 +655,264 @@ async def test_assets_extract_streams_per_kind_with_zero_db_hold_and_retries(mon
         (False, ["S01"]),
         (True, ["C01", "S01"]),
     ]
+
+
+def test_job_meta_property_exposes_only_safe_routing_fields() -> None:
+    now = datetime.now(UTC)
+    job = Job(
+        id=uuid4(),
+        user_id=1,
+        project_id=uuid4(),
+        job_type="storyboard_generate",
+        target_id="2",
+        status="running",
+        step_index=2,
+        step_total=4,
+        step_label="第 2 集已落库 1/3 批",
+        progress=40,
+        input_payload={
+            "action": "episode",
+            "episodeNumber": 2,
+            "completedBatches": 1,
+            "totalBatches": 3,
+            "segmentCount": 10,
+            "feedback": "绝不能暴露给列表轮询的用户修改意见",
+            "lastBlocking": {"segmentId": 4, "blocking": "内部调度状态"},
+        },
+        created_at=now,
+    )
+    assert job.job_meta == {
+        "action": "episode",
+        "episodeNumber": 2,
+        "completedBatches": 1,
+        "totalBatches": 3,
+        "segmentCount": 10,
+    }
+    dumped = JobOut.model_validate(job).model_dump(by_alias=True)
+    assert dumped["jobMeta"] == job.job_meta
+    assert "feedback" not in dumped["jobMeta"]
+    assert "lastBlocking" not in dumped["jobMeta"]
+
+
+async def test_storyboard_job_streams_batches_with_zero_db_hold_and_resumes_from_checkpoint(
+    monkeypatch,
+):
+    proj_settings = _sample_settings(episode_count=1)
+    project = Project(
+        id=uuid4(),
+        user_id=1,
+        name=proj_settings.name,
+        mode="story",
+        source_text="雨夜出租车。",
+        settings=proj_settings.model_dump(),
+    )
+    ep_row = DbEpisode(
+        id=uuid4(),
+        project_id=project.id,
+        number=1,
+        title="第1集标题",
+        summary="第1集梗概",
+        script="第一场",
+        target_seconds=120,
+        seconds=120.0,
+    )
+    now = datetime.now(UTC)
+    job = Job(
+        id=uuid4(),
+        user_id=1,
+        project_id=project.id,
+        job_type="storyboard_generate",
+        target_id="1",
+        status="queued",
+        step_index=0,
+        step_total=3,
+        step_label="第 1 集分镜任务已排队",
+        progress=0,
+        input_payload={"action": "episode", "episodeNumber": 1},
+        created_at=now,
+        dispatch_after=now,
+        next_attempt_at=now,
+    )
+
+    saved_clip_indices: set[int] = set()
+
+    class _StoryboardFakeDB(FakeStepChainDB):
+        def session_factory(self):
+            db = self
+
+            class _Session:
+                async def __aenter__(self):
+                    db.active_sessions += 1
+                    return self
+
+                async def __aexit__(self, *args):
+                    db.active_sessions -= 1
+                    return None
+
+                async def scalar(self, stmt):
+                    desc = stmt.column_descriptions[0]
+                    expr_name = str(desc.get("name") or "")
+                    if expr_name == "count" or str(desc.get("expr")).lower().startswith("count("):
+                        return len(saved_clip_indices)
+                    entity = desc.get("entity")
+                    if entity is Job:
+                        return db.job
+                    if entity is Project:
+                        return db.project
+                    if entity is DbEpisode:
+                        return ep_row
+                    if entity is DbStoryboardClip:
+                        return None
+                    return len(saved_clip_indices)
+
+                async def execute(self, stmt):
+                    return None
+
+                async def commit(self) -> None:
+                    return None
+
+                async def refresh(self, obj) -> None:
+                    return None
+
+            return _Session()
+
+    db = _StoryboardFakeDB(project, job)
+    db.outline = _sample_outline(1)
+    db.episodes[1] = _sample_episode(1)
+    redis = FakeEventRedis()
+    settings = Settings(environment="test", script_step_max_retries=2)
+    persist_calls: list[tuple[bool, int, list[int]]] = []
+    resume_args: list[tuple[int, dict[str, Any] | None]] = []
+    active_sessions_during_llm: list[int] = []
+
+    def _dummy_clip(idx: int) -> LlmStoryboardClip:
+        return LlmStoryboardClip(
+            id=idx,
+            durationSeconds=10.0,
+            prompt=f"镜头 {idx} 提示词",
+            assetIds=["C01"],
+            references=[],
+            beats=(idx, idx),
+            blocking=f"blocking-{idx}",
+            cuts=[],
+        )
+
+    async def fake_build_script(session, proj):
+        return ScriptResult(settings=proj_settings, outline=db.outline, episodes=[db.episodes[1]])
+
+    async def fake_build_assets(session, proj, *, include_variants=True):
+        return AssetResult(
+            settings=proj_settings,
+            assets=[
+                Asset(
+                    id="C01",
+                    kind="character",
+                    name="陈默",
+                    description="司机",
+                    prompt="p1",
+                    episodeNumbers=[1],
+                )
+            ],
+        )
+
+    async def fake_persist_batch(
+        session, proj, *, episode_number, clips, replace_existing=False
+    ):
+        if replace_existing:
+            saved_clip_indices.clear()
+        for clip in clips:
+            saved_clip_indices.add(clip.id)
+        persist_calls.append((replace_existing, episode_number, [c.id for c in clips]))
+        return len(clips)
+
+    attempts = 0
+
+    async def fake_storyboard_episode(
+        model,
+        episode,
+        script,
+        assets,
+        *,
+        feedback="",
+        initial_blocking=None,
+        start_batch_index=1,
+        usage=None,
+        on_progress=None,
+        on_batch_ready=None,
+    ):
+        nonlocal attempts
+        attempts += 1
+        active_sessions_during_llm.append(db.active_sessions)
+        resume_args.append((start_batch_index, initial_blocking))
+        if attempts == 1:
+            assert start_batch_index == 1
+            assert initial_blocking is None
+            if on_batch_ready is not None:
+                await on_batch_ready(
+                    1,
+                    2,
+                    [_dummy_clip(i) for i in range(1, 5)],
+                    {"segmentId": 4, "blocking": "b1"},
+                )
+            raise ModelHTTPError(status_code=429, model_name="test-model", body="rate limit")
+
+        assert start_batch_index == 2
+        assert initial_blocking == {"segmentId": 4, "blocking": "b1"}
+        if on_batch_ready is not None:
+            await on_batch_ready(
+                2,
+                2,
+                [_dummy_clip(5), _dummy_clip(6)],
+                {"segmentId": 6, "blocking": "b2"},
+            )
+        return None
+
+    monkeypatch.setattr(ai_tasks, "build_script_result_from_db", fake_build_script)
+    monkeypatch.setattr(ai_tasks, "build_asset_result_from_db", fake_build_assets)
+    monkeypatch.setattr(ai_tasks, "persist_storyboard_batch", fake_persist_batch)
+    monkeypatch.setattr(ai_tasks, "split_episode", lambda ep, cap: list(range(6)))
+    monkeypatch.setattr(ai_tasks, "storyboard_episode", fake_storyboard_episode)
+
+    # Attempt 1: batch 1 commits atomically then 429 schedules auto-retry with checkpoint
+    await ai_tasks.run_llm_job_core(
+        sessions=db.session_factory,
+        redis=redis,
+        settings=settings,
+        job_id=job.id,
+        model_override=(TestModel(), "test-model"),
+    )
+    assert job.status == "queued"
+    assert job.input_payload["stepAttempts"] == 1
+    assert job.input_payload["completedBatches"] == 1
+    assert job.input_payload["totalBatches"] == 2
+    assert job.input_payload["segmentCount"] == 6
+    assert job.input_payload["lastBlocking"] == {"segmentId": 4, "blocking": "b1"}
+    assert persist_calls == [(True, 1, [1, 2, 3, 4])]
+
+    # Attempt 2: resumes at batch 2 using lastBlocking, completes cleanly
+    job.dispatch_after = datetime.now(UTC) - timedelta(seconds=1)
+    await ai_tasks.run_llm_job_core(
+        sessions=db.session_factory,
+        redis=redis,
+        settings=settings,
+        job_id=job.id,
+        model_override=(TestModel(), "test-model"),
+    )
+    assert job.status == "succeeded"
+    assert job.progress == 100
+    assert active_sessions_during_llm == [0, 0]
+    assert resume_args == [(1, None), (2, {"segmentId": 4, "blocking": "b1"})]
+    assert "lastBlocking" not in job.input_payload
+    assert job.input_payload["completedBatches"] == 2
+    assert job.result_payload == {
+        "projectId": str(project.id),
+        "episodeNumber": 1,
+        "episodes": [1],
+        "clipCount": 6,
+    }
+    assert persist_calls == [
+        (True, 1, [1, 2, 3, 4]),
+        (False, 1, [5, 6]),
+    ]
+
 

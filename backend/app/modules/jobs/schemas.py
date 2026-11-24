@@ -17,6 +17,7 @@ class JobOut(CamelModel):
     step_label: str
     progress: int
     result_payload: dict[str, Any] | None = None
+    job_meta: dict[str, Any] | None = None
     error_code: str | None = None
     error_message: str | None = None
     usage_summary: dict[str, Any] | None = None

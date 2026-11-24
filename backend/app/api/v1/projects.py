@@ -454,6 +454,63 @@ async def remove_project_asset(
     return ApiResponse(data={"deleted": True})
 
 
+async def _assert_no_active_episode_board_or_compose_job(
+    session: AsyncSession,
+    *,
+    project_id: UUID,
+    episode: Episode,
+) -> None:
+    active_jobs = list(
+        await session.scalars(
+            select(Job).where(
+                Job.project_id == project_id,
+                Job.status.in_(("queued", "running")),
+                Job.job_type.in_(("storyboard_generate", "episode_compose")),
+            )
+        )
+    )
+    if not active_jobs:
+        return
+    episode_clip_ids: set[str] | None = None
+    for active in active_jobs:
+        payload = active.input_payload if isinstance(active.input_payload, dict) else {}
+        payload_ep = payload.get("episodeNumber")
+        matches_episode = payload_ep == episode.number
+        if not matches_episode and active.job_type == "episode_compose":
+            matches_episode = active.target_id == str(episode.id) or payload.get("episodeId") == str(
+                episode.id
+            )
+        if (
+            not matches_episode
+            and active.job_type == "storyboard_generate"
+            and payload.get("action") == "clip_regenerate"
+            and payload_ep is None
+        ):
+            if episode_clip_ids is None:
+                episode_clip_ids = {
+                    str(cid)
+                    for cid in await session.scalars(
+                        select(StoryboardClip.id).where(StoryboardClip.episode_id == episode.id)
+                    )
+                }
+            matches_episode = (
+                active.target_id in episode_clip_ids
+                or payload.get("clipId") in episode_clip_ids
+            )
+        if matches_episode:
+            if active.job_type == "episode_compose":
+                raise AppError(
+                    409,
+                    "episode_compose_in_progress",
+                    f"第 {episode.number} 集正在合成视频，请等待当前任务完成后再试",
+                )
+            raise AppError(
+                409,
+                "episode_storyboard_in_progress",
+                f"第 {episode.number} 集已有分镜任务正在执行，请等待当前任务完成后再试",
+            )
+
+
 @router.post(
     "/{project_id}/episodes/{episode_number}/storyboard/generate",
     response_model=ApiResponse[ProjectJobAcceptedOut],
@@ -468,6 +525,14 @@ async def generate_episode_storyboard(
 ) -> ApiResponse[ProjectJobAcceptedOut]:
     await assert_llm_balance_positive(session, user.id)
     project = await get_owned_project(session, project_id=project_id, user_id=user.id)
+    ep = await session.scalar(
+        select(Episode).where(Episode.project_id == project.id, Episode.number == episode_number)
+    )
+    if ep is None:
+        raise AppError(404, "episode_not_found", f"第 {episode_number} 集不存在")
+    await _assert_no_active_episode_board_or_compose_job(
+        session, project_id=project.id, episode=ep
+    )
     feedback = body.feedback.strip() if body else ""
     job = await create_job(
         session,
@@ -476,6 +541,7 @@ async def generate_episode_storyboard(
         job_type="storyboard_generate",
         target_id=str(episode_number),
         input_payload={
+            "action": "episode",
             "episodeNumber": episode_number,
             **({"feedback": feedback} if feedback else {}),
         },
@@ -508,6 +574,12 @@ async def regenerate_episode_clip(
     )
     if clip is None:
         raise AppError(404, "clip_not_found", "片段不存在")
+    ep = await session.scalar(select(Episode).where(Episode.id == clip.episode_id))
+    if ep is None:
+        raise AppError(404, "episode_not_found", "所属分集不存在")
+    await _assert_no_active_episode_board_or_compose_job(
+        session, project_id=project.id, episode=ep
+    )
     feedback = body.feedback.strip()
     job = await create_job(
         session,
@@ -517,6 +589,7 @@ async def regenerate_episode_clip(
         target_id=str(clip.id),
         input_payload={
             "action": "clip_regenerate",
+            "episodeNumber": ep.number,
             "clipId": str(clip.id),
             "refreshReferences": body.refresh_references,
             **({"feedback": feedback} if feedback else {}),
@@ -548,6 +621,9 @@ async def generate_new_episode_clip(
     )
     if ep is None:
         raise AppError(404, "episode_not_found", f"第 {episode_number} 集不存在")
+    await _assert_no_active_episode_board_or_compose_job(
+        session, project_id=project.id, episode=ep
+    )
     cap = int((project.settings or {}).get("maxSegmentDuration") or 15)
     if body.duration_seconds > cap:
         raise AppError(
@@ -1243,6 +1319,9 @@ async def batch_generate_clip_videos(
     )
     if episode is None:
         raise AppError(404, "episode_not_found", f"第 {episode_number} 集不存在")
+    await _assert_no_active_episode_board_or_compose_job(
+        session, project_id=project.id, episode=episode
+    )
 
     ratio = (body.ratio or "").strip() or str(project.settings.get("ratio") or "16:9")
     model, limits = await _validate_video_model_and_infra(
@@ -1630,6 +1709,9 @@ async def compose_project_episode(
     )
     if episode is None:
         raise AppError(404, "episode_not_found", f"第 {episode_number} 集不存在")
+    await _assert_no_active_episode_board_or_compose_job(
+        session, project_id=project.id, episode=episode
+    )
 
     clips = list(
         await session.scalars(

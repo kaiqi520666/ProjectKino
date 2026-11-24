@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { CheckCircle2, ChevronRight, Clapperboard, Clock3, Film } from 'lucide-vue-next'
+import { AlertTriangle, CheckCircle2, ChevronRight, Clapperboard, Clock3, Film, Loader2 } from 'lucide-vue-next'
 import StudioEpisodeList from '../components/StudioEpisodeList.vue'
+import { resolveStoryboardOverviewBadge } from '../storyboard-job-helpers'
+import { useStoryboardJobStore } from '../storyboard-job-store'
 import { episodeLabel, readEpisode } from '../studio-project'
 import type { StudioProject } from '../studio-project'
 
 const props = defineProps<{ project: StudioProject }>()
+const storyboardJobs = useStoryboardJobStore()
 const total = computed(() => props.project.creation.settings.episodeCount)
 
 function cardPreview(number: number) {
@@ -24,8 +27,19 @@ function cardPreview(number: number) {
 function cardStatus(number: number) {
   const ep = readEpisode(props.project, number)
   const board = props.project.storyboards?.[number]
+  const job = storyboardJobs.getEpisodeJob(props.project.id, number)
+  if (job?.status === 'running' || job?.status === 'failed') {
+    return resolveStoryboardOverviewBadge({
+      hasPersistedStoryboard: Boolean(board?.clips.length),
+      clipCount: board?.clips.length ?? 0,
+      job,
+    })
+  }
   if (!board?.clips.length) {
-    return { tone: 'pending' as const, complete: false, label: '待拆分镜', detail: '' }
+    return resolveStoryboardOverviewBadge({
+      hasPersistedStoryboard: false,
+      clipCount: 0,
+    })
   }
   const clipCount = board.clips.length
   const readyCount = board.clips.filter((clip) => clip.videoUrl).length
@@ -54,6 +68,10 @@ function cardStatus(number: number) {
       <template #default="{ number }">
         <RouterLink
           class="storyboard-card"
+          :class="{
+            'is-running': cardStatus(number).tone === 'running',
+            'is-failed': cardStatus(number).tone === 'failed',
+          }"
           :to="{ name: 'studio-episode', params: { projectId: project.id, episode: number } }"
           :aria-labelledby="`storyboard-card-title-${number}`"
         >
@@ -65,7 +83,9 @@ function cardStatus(number: number) {
           <p class="storyboard-card-preview">{{ cardPreview(number) }}</p>
           <div class="storyboard-card-meta">
             <span class="storyboard-status" :class="`is-${cardStatus(number).tone}`">
-              <CheckCircle2 v-if="cardStatus(number).complete" :size="13" aria-hidden="true" />
+              <Loader2 v-if="cardStatus(number).tone === 'running'" class="is-spin" :size="13" aria-hidden="true" />
+              <AlertTriangle v-else-if="cardStatus(number).tone === 'failed'" :size="13" aria-hidden="true" />
+              <CheckCircle2 v-else-if="cardStatus(number).complete" :size="13" aria-hidden="true" />
               <Clapperboard v-else-if="cardStatus(number).tone !== 'pending'" :size="13" aria-hidden="true" />
               <Clock3 v-else :size="13" aria-hidden="true" />
               {{ cardStatus(number).label }}
@@ -82,6 +102,8 @@ function cardStatus(number: number) {
 .studio-storyboard { padding-top: 20px; }
 .storyboard-card { display: flex; flex-direction: column; height: 100%; min-height: 126px; padding: 14px 16px; border: 1px solid var(--border-subtle); border-radius: var(--radius-panel); background: var(--color-surface); overflow-wrap: anywhere; transition: border-color .15s, background-color .15s; }
 .storyboard-card:hover { border-color: rgb(240 184 75 / 45%); background: var(--surface-hover); }
+.storyboard-card.is-running { border-color: rgb(240 184 75 / 35%); }
+.storyboard-card.is-failed { border-color: rgb(239 68 68 / 32%); }
 .storyboard-card:focus-visible { outline: 2px solid var(--color-gold); outline-offset: 2px; }
 .storyboard-card-heading { display: grid; grid-template-columns: 30px minmax(0, 1fr) 16px; align-items: center; gap: 10px; margin-bottom: 6px; }
 .storyboard-card h2 { margin: 0; font-size: 15px; font-weight: 600; line-height: 1.4; }
@@ -90,9 +112,13 @@ function cardStatus(number: number) {
 .storyboard-card:is(:hover, :focus-visible) .storyboard-card-arrow { color: var(--color-gold-soft); }
 .storyboard-card-preview { display: -webkit-box; overflow: hidden; margin: 0 0 12px; color: var(--color-muted); font-size: 14px; line-height: 1.65; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .storyboard-card-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; padding-top: 10px; border-top: 1px solid var(--border-subtle); font-size: 12px; }
-.storyboard-status { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px; font-weight: 500; line-height: 1.5; }
+.storyboard-status { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px; font-weight: 500; line-height: 1.5; flex-shrink: 0; }
 .storyboard-status.is-pending { background: rgb(255 255 255 / 4%); color: var(--color-muted); }
 .storyboard-status.is-ready { background: var(--gold-tint); color: var(--color-gold-soft); }
+.storyboard-status.is-running { background: var(--gold-tint); color: var(--color-gold-soft); border: 1px solid rgb(240 184 75 / 30%); }
+.storyboard-status.is-failed { background: rgb(239 68 68 / 14%); color: #f87171; border: 1px solid rgb(239 68 68 / 32%); }
 .storyboard-status.is-done { background: rgb(74 222 128 / 12%); color: var(--color-success); }
-.storyboard-card-duration { color: var(--color-muted); }
+.storyboard-card-duration { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-muted); }
+.is-spin { animation: storyboard-spin 1s linear infinite; }
+@keyframes storyboard-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 </style>

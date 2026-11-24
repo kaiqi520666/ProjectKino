@@ -27,6 +27,8 @@ const props = defineProps<{
   checkedIds: ReadonlySet<string>
   checkedCount: number
   reordering: boolean
+  locked?: boolean
+  regeneratingClipId?: string
   isClipGenerating: (clip: StoryboardClip) => boolean
   clipJobProgress: (clip: StoryboardClip) => string
   clipFailedReason: (clip: StoryboardClip) => string
@@ -47,8 +49,20 @@ const clipList = useTemplateRef<HTMLOListElement>('clipList')
 const dragSourceIndex = ref<number | null>(null)
 const dragOverIndex = ref<number | null>(null)
 
+function isClipRegenerating(clip: StoryboardClip) {
+  return Boolean(props.regeneratingClipId && clip.backendId === props.regeneratingClipId)
+}
+
+function isClipBusy(clip: StoryboardClip) {
+  return props.isClipGenerating(clip) || isClipRegenerating(clip)
+}
+
+function clipBusyText(clip: StoryboardClip) {
+  return isClipRegenerating(clip) ? '重拆中' : props.clipJobProgress(clip)
+}
+
 function handleDragStart(index: number, event: DragEvent) {
-  if (props.selectMode || props.reordering || props.clips.length <= 1) {
+  if (props.selectMode || props.reordering || props.locked || props.clips.length <= 1) {
     event.preventDefault()
     return
   }
@@ -108,7 +122,7 @@ defineExpose({ scrollToEnd, focusSelectedOrAdd })
           <UiButton
             variant="outline"
             size="sm"
-            :disabled="reordering || selectedClipIndex <= 0"
+            :disabled="locked || reordering || selectedClipIndex <= 0"
             title="将当前选中片段向前移动一位"
             @click="emit('move', selectedClipIndex, selectedClipIndex - 1)"
           >
@@ -117,7 +131,7 @@ defineExpose({ scrollToEnd, focusSelectedOrAdd })
           <UiButton
             variant="outline"
             size="sm"
-            :disabled="reordering || selectedClipIndex >= clips.length - 1"
+            :disabled="locked || reordering || selectedClipIndex >= clips.length - 1"
             title="将当前选中片段向后移动一位"
             @click="emit('move', selectedClipIndex, selectedClipIndex + 1)"
           >
@@ -126,12 +140,12 @@ defineExpose({ scrollToEnd, focusSelectedOrAdd })
         </template>
         <template v-if="persisted && selectMode">
           <span class="episode-meta">已选 {{ checkedCount }} 段</span>
-          <UiButton variant="primary" size="sm" :disabled="!checkedCount" @click="emit('openBatchFromSelection')">
+          <UiButton variant="primary" size="sm" :disabled="locked || !checkedCount" @click="emit('openBatchFromSelection')">
             <template #leading><Video :size="13" aria-hidden="true" /></template>
             生成 / 重生成已选 ({{ checkedCount }})
           </UiButton>
         </template>
-        <UiButton v-if="persisted" :variant="selectMode ? 'secondary' : 'outline'" size="sm" @click="emit('toggleSelectMode')">
+        <UiButton v-if="persisted" :variant="selectMode ? 'secondary' : 'outline'" size="sm" :disabled="locked" @click="emit('toggleSelectMode')">
           <template #leading><CheckSquare :size="13" aria-hidden="true" /></template>
           {{ selectMode ? '退出多选' : '多选' }}
         </UiButton>
@@ -143,7 +157,7 @@ defineExpose({ scrollToEnd, focusSelectedOrAdd })
         v-for="(item, idx) in clips"
         :key="item.backendId || item.id"
         :class="{ 'is-dragging': dragSourceIndex === idx, 'is-drop-target': dragOverIndex === idx && dragSourceIndex !== idx }"
-        :draggable="!selectMode && !reordering && clips.length > 1"
+        :draggable="!selectMode && !reordering && !locked && clips.length > 1"
         @dragstart="handleDragStart(idx, $event)"
         @dragover="handleDragOver(idx, $event)"
         @drop="handleDrop(idx, $event)"
@@ -153,7 +167,7 @@ defineExpose({ scrollToEnd, focusSelectedOrAdd })
           type="button"
           class="episode-clip"
           :class="{
-            'is-generating': isClipGenerating(item),
+            'is-generating': isClipBusy(item),
             'is-checked': selectMode && !!item.backendId && checkedIds.has(item.backendId),
           }"
           :aria-pressed="selectedClipId === item.id"
@@ -171,7 +185,7 @@ defineExpose({ scrollToEnd, focusSelectedOrAdd })
             />
             <Clapperboard v-else :size="22" :stroke-width="1.5" aria-hidden="true" />
             <span
-              v-if="!isClipGenerating(item) && (item.videoStatus === 'failed' || clipFailedReason(item))"
+              v-if="!isClipBusy(item) && (item.videoStatus === 'failed' || clipFailedReason(item))"
               class="episode-clip-failed"
               :class="{ 'is-review': item.lastJobStatus === 'review' }"
               :title="clipFailedReason(item) || '视频生成失败'"
@@ -179,10 +193,10 @@ defineExpose({ scrollToEnd, focusSelectedOrAdd })
               <Clock v-if="item.lastJobStatus === 'review'" :size="13" aria-hidden="true" />
               <AlertCircle v-else :size="13" aria-hidden="true" />
             </span>
-            <Check v-else-if="item.videoUrl && !isClipGenerating(item)" class="episode-clip-ready" :size="15" aria-label="已有视频" />
-            <span v-if="isClipGenerating(item)" class="episode-clip-loading-mask">
+            <Check v-else-if="item.videoUrl && !isClipBusy(item)" class="episode-clip-ready" :size="15" aria-label="已有视频" />
+            <span v-if="isClipBusy(item)" class="episode-clip-loading-mask">
               <Loader2 class="is-spin" :size="15" aria-hidden="true" />
-              <span>{{ clipJobProgress(item) }}</span>
+              <span>{{ clipBusyText(item) }}</span>
             </span>
           </span>
           <span class="episode-clip-caption"><strong>片段 {{ item.id }}</strong><span>{{ item.durationSeconds }} 秒</span></span>
@@ -193,7 +207,7 @@ defineExpose({ scrollToEnd, focusSelectedOrAdd })
           type="button"
           class="episode-clip-check"
           :class="{ 'is-checked': checkedIds.has(item.backendId) }"
-          :disabled="isClipGenerating(item)"
+          :disabled="locked || isClipBusy(item)"
           :aria-label="`选择片段 ${item.id}`"
           @click.stop="emit('toggleCheck', item)"
         >
@@ -201,7 +215,7 @@ defineExpose({ scrollToEnd, focusSelectedOrAdd })
         </button>
 
         <button
-          v-if="item.videoUrl && !isClipGenerating(item)"
+          v-if="item.videoUrl && !isClipBusy(item)"
           type="button"
           class="episode-clip-play"
           :aria-label="`播放片段 ${item.id}`"
@@ -212,7 +226,7 @@ defineExpose({ scrollToEnd, focusSelectedOrAdd })
         </button>
 
         <UiIconButton
-          v-if="!selectMode && !isClipGenerating(item)"
+          v-if="!selectMode && !locked && !isClipBusy(item)"
           class="episode-clip-delete"
           :label="`删除片段 ${item.id}`"
           @click="emit('delete', item.id, $event)"
@@ -221,7 +235,7 @@ defineExpose({ scrollToEnd, focusSelectedOrAdd })
         </UiIconButton>
       </li>
       <li>
-        <button type="button" class="episode-clip episode-clip-add" @click="emit('add')">
+        <button type="button" class="episode-clip episode-clip-add" :disabled="locked" @click="emit('add')">
           <Plus :size="22" aria-hidden="true" />
           新增片段
         </button>

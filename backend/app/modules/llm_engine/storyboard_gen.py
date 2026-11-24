@@ -1,4 +1,5 @@
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Annotated, Literal
 
@@ -32,6 +33,7 @@ MIN_CUT_SECONDS = 2.0
 MAX_CUT_SECONDS = 5.0
 CUT_LENGTH_LIMIT = MAX_CUT_SECONDS + 1.0
 DESIGN_BATCH_SEGMENTS = 4
+BatchReadyCallback = Callable[[int, int, list[StoryboardClip], dict], Awaitable[None]]
 
 CameraMove = Literal["固定镜头", "缓慢推镜", "快速推镜", "缓慢拉镜", "平稳横移", "跟拍", "摇镜", "手持跟随"]
 Stability = Literal["稳定", "微晃", "晃动"]
@@ -411,6 +413,53 @@ def _beat_payload(beat: Beat, names: dict[str, str]) -> dict:
     }
 
 
+def _build_storyboard_clips(
+    segments: list[Segment],
+    designs: dict[int, SegmentDesign],
+    *,
+    script: ScriptResult,
+    assets: AssetResult,
+    catalog: dict[str, Asset],
+    names: dict[str, str],
+) -> list[StoryboardClip]:
+    clips: list[StoryboardClip] = []
+    for segment in segments:
+        design = designs[segment.index]
+        by_index = {cut.index: cut for cut in design.cuts}
+        ordered = _reference_order(design.references, catalog)
+        clips.append(
+            StoryboardClip(
+                id=segment.index,
+                durationSeconds=segment.seconds,
+                prompt=compose_seedance(segment, design, script, assets),
+                assetIds=ordered,
+                references=[
+                    StoryboardReference(
+                        index=position + 1,
+                        assetId=asset_id,
+                        name=_display_asset_name(asset_id, catalog, names),
+                        kind=_asset_kind(asset_id, catalog),
+                    )
+                    for position, asset_id in enumerate(ordered)
+                ],
+                beats=segment.beat_range,
+                blocking=design.blocking,
+                cuts=[
+                    StoryboardCut(
+                        index=cut.index,
+                        seconds=cut.seconds,
+                        shotSize=by_index[cut.index].shotSize,
+                        camera=by_index[cut.index].camera,
+                        framePrompt=by_index[cut.index].framePrompt,
+                        beats=cut.beat_range,
+                    )
+                    for cut in segment.cuts
+                ],
+            )
+        )
+    return clips
+
+
 async def write_designs(
     model: Model,
     episode: Episode,
@@ -420,8 +469,13 @@ async def write_designs(
     assets: AssetResult | None = None,
     feedback: str = "",
     initial_blocking: dict | None = None,
+    start_batch_index: int = 1,
     usage: RunUsage | None = None,
     on_progress: ProgressCallback | None = None,
+    on_batch_complete: Callable[
+        [int, int, list[Segment], dict[int, SegmentDesign], dict], Awaitable[None]
+    ]
+    | None = None,
 ) -> dict[int, SegmentDesign]:
     names = {card.id: card.name for card in script.outline.characters}
     scene_names = {card.id: card.name for card in script.outline.scenes}
@@ -488,6 +542,8 @@ async def write_designs(
     previous_blocking: dict | None = initial_blocking
     total_batches = (len(segments) + DESIGN_BATCH_SEGMENTS - 1) // DESIGN_BATCH_SEGMENTS
     for batch_idx, start in enumerate(range(0, len(segments), DESIGN_BATCH_SEGMENTS), 1):
+        if batch_idx < start_batch_index:
+            continue
         batch = segments[start : start + DESIGN_BATCH_SEGMENTS]
         pct = 15 + int((batch_idx - 1) / max(1, total_batches) * 75)
         await _notify(
@@ -550,7 +606,8 @@ async def write_designs(
             usage=usage,
             usage_limits=SHARED_USAGE_LIMITS,
         )
-        designs.update({segment.id: segment for segment in result.output.segments})
+        batch_designs = {segment.id: segment for segment in result.output.segments}
+        designs.update(batch_designs)
         last_segment = batch[-1]
         previous_blocking = {
             "segmentId": last_segment.index,
@@ -558,6 +615,10 @@ async def write_designs(
             "scene": scene_names.get(last_segment.scene.sceneId, last_segment.scene.sceneId),
             "blocking": designs[last_segment.index].blocking,
         }
+        if on_batch_complete is not None:
+            await on_batch_complete(
+                batch_idx, total_batches, batch, batch_designs, previous_blocking
+            )
     return designs
 
 
@@ -568,11 +629,45 @@ async def storyboard_episode(
     assets: AssetResult,
     *,
     feedback: str = "",
+    initial_blocking: dict | None = None,
+    start_batch_index: int = 1,
     usage: RunUsage | None = None,
     on_progress: ProgressCallback | None = None,
+    on_batch_ready: BatchReadyCallback | None = None,
 ) -> EpisodeStoryboard:
+    catalog = {asset.id: asset for asset in assets.assets}
+    used = episode_asset_ids(episode)
+    missing = [asset_id for asset_id in used if asset_id not in catalog]
+    if missing:
+        raise ValueError(f"第 {episode.number} 集引用了资产表里没有的编号：{missing}")
+
+    names = {
+        **{card.id: card.name for card in script.outline.characters},
+        **{card.id: card.name for card in script.outline.scenes},
+        **{prop.id: prop.name for prop in script.outline.props},
+    }
     cap = script.settings.maxSegmentDuration
     segments = split_episode(episode, cap)
+
+    async def _handle_batch(
+        batch_idx: int,
+        total_batches: int,
+        batch_segments: list[Segment],
+        batch_designs: dict[int, SegmentDesign],
+        next_blocking: dict,
+    ) -> None:
+        if on_batch_ready is None:
+            return
+        batch_clips = _build_storyboard_clips(
+            batch_segments,
+            batch_designs,
+            script=script,
+            assets=assets,
+            catalog=catalog,
+            names=names,
+        )
+        await on_batch_ready(batch_idx, total_batches, batch_clips, next_blocking)
+
     designs = await write_designs(
         model,
         episode,
@@ -580,59 +675,23 @@ async def storyboard_episode(
         script,
         assets=assets,
         feedback=feedback,
+        initial_blocking=initial_blocking,
+        start_batch_index=start_batch_index,
         usage=usage,
         on_progress=on_progress,
+        on_batch_complete=_handle_batch if on_batch_ready is not None else None,
     )
 
-    catalog = {asset.id: asset for asset in assets.assets}
-    used = episode_asset_ids(episode)
-    missing = [asset_id for asset_id in used if asset_id not in catalog]
-    if missing:
-        raise ValueError(f"第 {episode.number} 集引用了资产表里没有的编号：{missing}")
-
-    clips: list[StoryboardClip] = []
-    names = {
-        **{card.id: card.name for card in script.outline.characters},
-        **{card.id: card.name for card in script.outline.scenes},
-        **{prop.id: prop.name for prop in script.outline.props},
-    }
-    referenced_in_episode: list[str] = []
-    for segment in segments:
-        design = designs[segment.index]
-        by_index = {cut.index: cut for cut in design.cuts}
-        ordered = _reference_order(design.references, catalog)
-        referenced_in_episode.extend(ordered)
-        clips.append(
-            StoryboardClip(
-                id=segment.index,
-                durationSeconds=segment.seconds,
-                prompt=compose_seedance(segment, design, script, assets),
-                assetIds=ordered,
-                references=[
-                    StoryboardReference(
-                        index=position + 1,
-                        assetId=asset_id,
-                        name=_display_asset_name(asset_id, catalog, names),
-                        kind=_asset_kind(asset_id, catalog),
-                    )
-                    for position, asset_id in enumerate(ordered)
-                ],
-                beats=segment.beat_range,
-                blocking=design.blocking,
-                cuts=[
-                    StoryboardCut(
-                        index=cut.index,
-                        seconds=cut.seconds,
-                        shotSize=by_index[cut.index].shotSize,
-                        camera=by_index[cut.index].camera,
-                        framePrompt=by_index[cut.index].framePrompt,
-                        beats=cut.beat_range,
-                    )
-                    for cut in segment.cuts
-                ],
-            )
-        )
-
+    designed_segments = [s for s in segments if s.index in designs]
+    clips = _build_storyboard_clips(
+        designed_segments,
+        designs,
+        script=script,
+        assets=assets,
+        catalog=catalog,
+        names=names,
+    )
+    referenced_in_episode = [aid for clip in clips for aid in clip.assetIds]
     episode_asset_refs = list(dict.fromkeys([*used, *referenced_in_episode]))
     return EpisodeStoryboard(
         number=episode.number,

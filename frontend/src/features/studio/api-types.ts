@@ -170,6 +170,7 @@ export interface JobOut {
   stepLabel: string
   progress: number
   resultPayload?: Record<string, unknown> | null
+  jobMeta?: Record<string, unknown> | null
   errorCode?: string | null
   errorMessage?: string | null
   usageSummary?: Record<string, unknown> | null
