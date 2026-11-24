@@ -1336,7 +1336,6 @@ async function deleteClip() {
             <Clock :size="12" aria-hidden="true" />
             {{ elapsedLabel }}
           </span>
-          <span class="episode-job-banner-hint">可切换其他分集并行操作</span>
         </div>
       </div>
       <div class="episode-batch-track" role="progressbar" :aria-valuenow="episodeJob.progress" aria-valuemin="0" aria-valuemax="100">
@@ -1653,13 +1652,6 @@ async function deleteClip() {
       </div>
 
       <div v-else-if="locks.isEpisodeSplitRunning" class="episode-skeleton-panel" aria-live="polite">
-        <div class="episode-skeleton-head">
-          <Loader2 class="is-spin" :size="20" aria-hidden="true" />
-          <div>
-            <strong>正在按剧本拆解第 {{ number }} 集分镜…</strong>
-            <p>每完成 4 个片段将实时落库并展示，你也可以先切去其他分集并行拆镜</p>
-          </div>
-        </div>
         <div class="episode-skeleton-grid" aria-hidden="true">
           <div
             v-for="idx in Math.min(8, Math.max(4, episodeJob?.segmentCount || 4))"
@@ -2027,7 +2019,6 @@ async function deleteClip() {
   font-variant-numeric: tabular-nums;
   color: var(--color-gold-soft);
 }
-.episode-job-banner-hint { color: var(--color-muted); }
 .episode-job-alert-actions { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .episode-skeleton-panel {
   flex: 1;
@@ -2037,14 +2028,6 @@ async function deleteClip() {
   padding: 24px;
   min-height: 280px;
 }
-.episode-skeleton-head {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  color: var(--color-gold-soft);
-}
-.episode-skeleton-head strong { display: block; font-size: 15px; margin-bottom: 4px; }
-.episode-skeleton-head p { margin: 0; font-size: 13px; color: var(--color-muted); }
 .episode-skeleton-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));

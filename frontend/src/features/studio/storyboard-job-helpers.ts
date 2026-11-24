@@ -187,7 +187,7 @@ export function resolveStoryboardOverviewBadge(params: {
       tone: 'done',
       complete: true,
       label: `已拆 · ${clipCount} 段`,
-      detail: `共 ${clipCount} 个分镜片段，点击继续编辑提示词与生视频`,
+      detail: '',
     }
   }
 
@@ -195,7 +195,7 @@ export function resolveStoryboardOverviewBadge(params: {
     tone: 'pending',
     complete: false,
     label: '待拆分镜',
-    detail: '尚未生成分镜片段，点击进入拆镜',
+    detail: '',
   }
 }
 

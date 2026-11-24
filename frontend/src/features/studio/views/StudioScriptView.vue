@@ -817,13 +817,6 @@ onBeforeRouteUpdate(canLeave)
           </article>
 
           <div v-else-if="scriptJobRunning && activeJob" class="script-planning-skeleton">
-            <div class="script-planning-head">
-              <Loader2 class="script-live-spinner" :size="18" aria-hidden="true" />
-              <div>
-                <h3>{{ activeJob.stepLabel || '正在规划全剧分集大纲与世界观' }}</h3>
-                <p>大纲保存后会立即解锁各集剧情卡片，随后每写完一集都会实时呈现；期间你可以自由切集浏览或离开当前页面。</p>
-              </div>
-            </div>
             <div class="script-skeleton-lines" aria-hidden="true">
               <span class="script-skeleton-line is-wide" />
               <span class="script-skeleton-line is-medium" />
@@ -1027,9 +1020,6 @@ onBeforeRouteUpdate(canLeave)
   border-radius: 8px;
   background: rgb(255 255 255 / 1.8%);
 }
-.script-planning-head { display: flex; align-items: flex-start; gap: 12px; }
-.script-planning-head h3 { margin: 0 0 6px; color: var(--color-text); font-size: 14px; font-weight: 600; }
-.script-planning-head p { color: var(--color-muted); font-size: 13px; line-height: 1.65; }
 .script-skeleton-lines { display: grid; gap: 10px; }
 .script-skeleton-line {
   display: block;

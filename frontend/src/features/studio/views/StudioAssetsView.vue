@@ -1107,10 +1107,6 @@ async function deleteAsset() {
             </li>
           </ul>
           <div v-else-if="extractRunning" class="studio-asset-skeleton-wrap">
-            <p class="studio-asset-skeleton-hint">
-              <Loader2 class="is-spin" :size="14" aria-hidden="true" />
-              正在后台设计{{ group.label }}设定与文生图提示词，完成后将实时呈现；你可以自由切换其他分类或返回阅读剧本。
-            </p>
             <ul class="studio-asset-list" aria-hidden="true">
               <li v-for="idx in 3" :key="idx">
                 <div class="studio-asset-card studio-asset-skeleton-card">
@@ -1257,7 +1253,6 @@ async function deleteAsset() {
 .assets-extract-error-text span { color: var(--color-text); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .assets-extract-error-actions { display: flex; flex-shrink: 0; align-items: center; gap: 8px; }
 .studio-asset-skeleton-wrap { display: grid; gap: 14px; padding-top: 6px; }
-.studio-asset-skeleton-hint { display: inline-flex; align-items: center; gap: 8px; margin: 0; color: var(--color-muted); font-size: 13px; }
 .studio-asset-skeleton-card { pointer-events: none; min-height: 112px; }
 .studio-asset-skeleton-box {
   background: linear-gradient(90deg, rgb(255 255 255 / 4%), rgb(255 255 255 / 9%), rgb(255 255 255 / 4%));
