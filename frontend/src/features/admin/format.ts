@@ -44,10 +44,14 @@ export const RESERVATION_STATUS_LABELS: Record<string, string> = {
 }
 
 export const LEDGER_OP_LABELS: Record<string, string> = {
+  grant: '积分赠送',
+  adjust: '账户调账',
+  freeze: '任务预扣',
+  settle: '消费结算',
+  release: '失败退还',
+  llm_consume: '文本扣费',
   register_grant: '注册赠送',
   admin_grant: '管理员调账',
-  freeze: '预扣冻结',
-  settle: '任务结算',
   refund: '失败退还',
   text_deduct: '文本扣费',
 }

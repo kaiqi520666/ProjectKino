@@ -237,3 +237,173 @@ async def test_media_freeze_settle_and_release_lifecycle():
         idempotency_key="grant:1",
     )
     assert user.balance == Decimal("57.0000")
+
+
+def test_build_credit_bill_item_merges_freeze_with_settle_release_and_llm():
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+
+    from app.modules.credits.models import CreditLedger, CreditReservation
+    from app.modules.credits.service import build_credit_bill_item
+
+    t0 = datetime(2026, 11, 24, 10, 0, 0, tzinfo=UTC)
+    t1 = t0 + timedelta(seconds=42)
+    res_id = uuid4()
+    job_id = uuid4()
+    proj_id = uuid4()
+
+    freeze_ledger = CreditLedger(
+        id=uuid4(),
+        user_id=1,
+        reservation_id=res_id,
+        job_id=job_id,
+        idempotency_key=f"freeze:video:{job_id}",
+        operation="freeze",
+        balance_change=Decimal("-12.0000"),
+        frozen_change=Decimal("12.0000"),
+        balance_before=Decimal("100.0000"),
+        balance_after=Decimal("88.0000"),
+        frozen_before=Decimal("0.0000"),
+        frozen_after=Decimal("12.0000"),
+        reason="分镜片段视频预扣",
+        created_at=t0,
+    )
+    settle_ledger = CreditLedger(
+        id=uuid4(),
+        user_id=1,
+        reservation_id=res_id,
+        job_id=job_id,
+        idempotency_key=f"settle:{res_id}",
+        operation="settle",
+        balance_change=Decimal("0.0000"),
+        frozen_change=Decimal("-12.0000"),
+        balance_before=Decimal("88.0000"),
+        balance_after=Decimal("88.0000"),
+        frozen_before=Decimal("12.0000"),
+        frozen_after=Decimal("0.0000"),
+        reason="分镜片段视频生成成功结算",
+        created_at=t1,
+    )
+    reservation = CreditReservation(
+        id=res_id,
+        user_id=1,
+        business_type="video",
+        business_id=job_id,
+        model_id="cc-sd2-fast-720",
+        amount=Decimal("12.0000"),
+        consumed=Decimal("12.0000"),
+        status="settled",
+        rate_snapshot={
+            "modelId": "cc-sd2-fast-720",
+            "ruleKey": "720p",
+            "unit": "second",
+            "durationSeconds": 10,
+            "basePrice": "1.2",
+            "usageMultiplier": "1.0000",
+        },
+        created_at=t0,
+    )
+    job = SimpleNamespace(
+        id=job_id,
+        job_type="clip_video",
+        status="succeeded",
+        project_id=proj_id,
+        canvas_id=None,
+        input_payload={},
+    )
+
+    settled_bill = build_credit_bill_item(
+        freeze_ledger,
+        reservation=reservation,
+        paired_ledgers=[settle_ledger],
+        job=job,  # type: ignore[arg-type]
+        project_name="夜行档案",
+        canvas_name=None,
+        model_name="Seedance 2.0 Fast",
+    )
+    assert settled_bill.category == "video"
+    assert settled_bill.status == "charged"
+    assert settled_bill.amount == Decimal("-12.0000")
+    assert settled_bill.original_amount == Decimal("12.0000")
+    assert settled_bill.title == "生成分镜视频"
+    assert settled_bill.project_name == "夜行档案"
+    assert settled_bill.model_name == "Seedance 2.0 Fast"
+    assert settled_bill.settled_at == t1
+    assert [ev.operation for ev in settled_bill.timeline] == ["freeze", "settle"]
+
+    # Released reservation -> refunded with 0 net charge
+    release_ledger = CreditLedger(
+        id=uuid4(),
+        user_id=1,
+        reservation_id=res_id,
+        job_id=job_id,
+        idempotency_key=f"release:{res_id}",
+        operation="release",
+        balance_change=Decimal("12.0000"),
+        frozen_change=Decimal("-12.0000"),
+        balance_before=Decimal("88.0000"),
+        balance_after=Decimal("100.0000"),
+        frozen_before=Decimal("12.0000"),
+        frozen_after=Decimal("0.0000"),
+        reason="上游失败自动退还",
+        created_at=t1,
+    )
+    reservation.status = "released"
+    reservation.consumed = Decimal("0.0000")
+    refunded_bill = build_credit_bill_item(
+        freeze_ledger,
+        reservation=reservation,
+        paired_ledgers=[release_ledger],
+        job=job,  # type: ignore[arg-type]
+        project_name="夜行档案",
+        canvas_name=None,
+        model_name="Seedance 2.0 Fast",
+    )
+    assert refunded_bill.status == "refunded"
+    assert refunded_bill.amount == Decimal("0.0000")
+    assert refunded_bill.original_amount == Decimal("12.0000")
+    assert refunded_bill.balance_after == Decimal("100.0000")
+
+    # LLM consume -> text category with model extracted from tokenUsage
+    llm_ledger = CreditLedger(
+        id=uuid4(),
+        user_id=1,
+        job_id=job_id,
+        idempotency_key=f"llm:{job_id}",
+        operation="llm_consume",
+        balance_change=Decimal("-0.3500"),
+        frozen_change=Decimal("0.0000"),
+        balance_before=Decimal("100.0000"),
+        balance_after=Decimal("99.6500"),
+        frozen_before=Decimal("0.0000"),
+        frozen_after=Decimal("0.0000"),
+        token_usage={
+            "modelId": "deepseek-chat",
+            "inputTokens": 12000,
+            "cacheReadTokens": 8000,
+            "outputTokens": 2500,
+        },
+        reason="生成全剧剧本",
+        created_at=t0,
+    )
+    llm_bill = build_credit_bill_item(
+        llm_ledger,
+        reservation=None,
+        paired_ledgers=[],
+        job=SimpleNamespace(
+            id=job_id,
+            job_type="script_generate",
+            status="succeeded",
+            project_id=proj_id,
+            canvas_id=None,
+            input_payload={},
+        ),  # type: ignore[arg-type]
+        project_name="夜行档案",
+        canvas_name=None,
+        model_name="DeepSeek V3",
+    )
+    assert llm_bill.category == "text"
+    assert llm_bill.status == "charged"
+    assert llm_bill.amount == Decimal("-0.3500")
+    assert llm_bill.model_id == "deepseek-chat"
+    assert llm_bill.model_name == "DeepSeek V3"

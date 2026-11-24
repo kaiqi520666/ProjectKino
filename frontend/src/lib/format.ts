@@ -28,17 +28,27 @@ export function formatSignedCredits(value?: string | number | null): string {
   return formatCredits(num)
 }
 
+export function formatCompactCount(value: unknown): string {
+  const num = Number(value)
+  if (!Number.isFinite(num)) return String(value)
+  if (Math.abs(num) >= 1_000_000) return `${(num / 1_000_000).toFixed(2).replace(/\.?0+$/, '')}M`
+  if (Math.abs(num) >= 1_000) return `${(num / 1_000).toFixed(1).replace(/\.0$/, '')}k`
+  return String(Math.round(num))
+}
+
 export function formatTokenUsage(usage?: Record<string, unknown> | null): string {
   if (!usage || typeof usage !== 'object') return ''
   const parts: string[] = []
-  const input = usage.input_tokens ?? usage.prompt_tokens
-  const output = usage.output_tokens ?? usage.completion_tokens
-  const cacheHit = usage.cache_hit_tokens
-  const model = usage.model
+  const input = usage.inputTokens ?? usage.input_tokens ?? usage.prompt_tokens
+  const output = usage.outputTokens ?? usage.output_tokens ?? usage.completion_tokens
+  const cacheHit = usage.cacheReadTokens ?? usage.cache_hit_tokens ?? usage.cache_read_tokens
+  const model = usage.modelId ?? usage.model
   if (model) parts.push(String(model))
-  if (input !== undefined) parts.push(`入 ${input}`)
-  if (output !== undefined) parts.push(`出 ${output}`)
-  if (cacheHit !== undefined && Number(cacheHit) > 0) parts.push(`缓存命中 ${cacheHit}`)
+  if (input !== undefined && input !== null) parts.push(`输入 ${formatCompactCount(input)}`)
+  if (cacheHit !== undefined && cacheHit !== null && Number(cacheHit) > 0) {
+    parts.push(`缓存命中 ${formatCompactCount(cacheHit)}`)
+  }
+  if (output !== undefined && output !== null) parts.push(`输出 ${formatCompactCount(output)}`)
   return parts.join(' · ')
 }
 
