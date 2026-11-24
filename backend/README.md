@@ -1,4 +1,4 @@
-# FrameDrama 后端
+# ProjectKino 后端
 
 基于 FastAPI + PostgreSQL + Redis + Taskiq 的后端服务。以下命令均在 `backend` 目录下执行。
 

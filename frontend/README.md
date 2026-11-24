@@ -1,11 +1,11 @@
-# FrameDrama Frontend
+# ProjectKino Frontend
 
 Vue 3 + TypeScript + Vite + Tailwind CSS v4 的黑金短剧创作前端工程，已完整接入正式后端（`backend`）的认证鉴权、项目持久化、剧本生成、资产库与批量生图、分镜与批量生视频、本集 FFmpeg 免费合成、积分流水以及管理后台。
 
 ## 本地运行
 
 ```powershell
-cd E:\App\codex\FrameDrama\frontend
+cd frontend
 npm install
 npm run dev
 ```

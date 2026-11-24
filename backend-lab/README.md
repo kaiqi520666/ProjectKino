@@ -1,4 +1,4 @@
-# 帧剧后端验证
+# ProjectKino 后端验证
 
 输入故事梗概、UTF-8 小说或剧本原稿。Pydantic AI 先规划分集（角色 / 场景 / 道具编号 + 逐集计划），再逐集生成**结构化剧本**。整条流水线对应前端三步：**剧本确认 → 资产生成 → 分镜制作**。
 
@@ -17,7 +17,7 @@
 uv sync --locked
 uv run --locked python -m unittest discover -s tests -v
 uv run --locked --env-file .env python -m framedrama_lab sample-settings.json --story '失忆法医发现线索都指向三年前死亡的自己。' --output output/story.json
-uv run --locked --env-file .env python -m framedrama_lab sample-settings.json --source-file 'E:/App/codex/video-script/剧本.txt' --output output/adaptation.json --markdown output/adaptation.md
+uv run --locked --env-file .env python -m framedrama_lab sample-settings.json --source-file './path/to/source.txt' --output output/adaptation.json --markdown output/adaptation.md
 uv run --locked --env-file .env uvicorn framedrama_lab.api:app --reload --port 8000
 ```
 
