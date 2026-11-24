@@ -8,6 +8,7 @@ import {
   parsePromptLine,
   remapPromptOnReferenceReorder,
   remapPromptOnSlotRemove,
+  removeStoryboardGridPromptBlock,
 } from '../src/components/business/prompt-references.ts'
 
 test('parsePromptLine parses unified @[...] tokens across all modalities and removed markers', () => {
@@ -135,4 +136,33 @@ test('remapPromptOnReferenceReorder atomically swaps same-modality slots without
   const noop = remapPromptOnReferenceReorder('@[图片1] 与 @[视频1]', prev, crossModalOnly)
   assert.equal(noop.changed, false)
   assert.equal(noop.prompt, '@[图片1] 与 @[视频1]')
+})
+
+test('removeStoryboardGridPromptBlock strips grid header and drive block without touching cuts', () => {
+  const promptWithGrid = [
+    '@[图片1] = 林晚',
+    '@[图片2] = 美术教室',
+    '@[图片3] = 分镜宫格（3×3）',
+    '',
+    '【分镜宫格驱动】',
+    '@[图片3] 为 3×3 无字分镜宫格图，按从左到右、从上到下（格1→格9）依次对应本段各镜头构图：',
+    '镜头1=格1–格2；镜头2=格3–格4；镜头3=格5。',
+    '全程仅输出单画幅全屏连续镜头，严禁出现宫格分屏、黑边或画中画。',
+    '',
+    '【人物关系与构图逻辑】',
+    '美术教室，大窗在左。林晚：站在讲台左侧。',
+    '',
+    '【镜头1｜0-5s】',
+    '画面：女教师站在讲台前翻动教案。',
+  ].join('\n')
+
+  const stripped = removeStoryboardGridPromptBlock(promptWithGrid)
+  assert.equal(stripped.changed, true)
+  assert.equal(stripped.prompt.includes('【分镜宫格驱动】'), false)
+  assert.equal(stripped.prompt.includes('分镜宫格'), false)
+  assert.equal(stripped.prompt.includes('【镜头1｜0-5s】'), true)
+
+  const remapped = remapPromptOnSlotRemove(stripped.prompt, 'image', 3, '分镜宫格（3×3）')
+  assert.equal(remapped.removedCount, 0)
+  assert.equal(remapped.prompt.includes('@[已移除:'), false)
 })

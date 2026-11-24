@@ -16,6 +16,8 @@ import type {
   PersistedEpisodeOut,
   ProjectDetailOut,
   ProjectJobAcceptedOut,
+  ProjectMetaOut,
+  ProjectMetaUpdatePayload,
   ProjectSummaryOut,
 } from './api-types'
 import type { StudioAssetDraft, StudioAssetKind } from './studio-assets'
@@ -35,8 +37,12 @@ export function getProjectDetail(projectId: string) {
   return unwrap<ProjectDetailOut>(http.get(`/projects/${projectId}`))
 }
 
+export function updateProjectApi(projectId: string, body: ProjectMetaUpdatePayload) {
+  return unwrap<ProjectMetaOut>(http.patch(`/projects/${projectId}`, body))
+}
+
 export function renameProjectApi(projectId: string, name: string) {
-  return unwrap<{ id: string; name: string }>(http.patch(`/projects/${projectId}`, { name }))
+  return updateProjectApi(projectId, { name })
 }
 
 export function archiveProjectApi(projectId: string) {
@@ -256,6 +262,20 @@ export function startGenerateClipVideo(
 ) {
   return unwrap<ProjectJobAcceptedOut>(
     http.post(`/projects/${projectId}/clips/${clipId}/generate-video`, body),
+  )
+}
+
+export function startGenerateClipStoryboardGrid(
+  projectId: string,
+  clipId: string,
+  body: {
+    modelId: string
+    tier: 'web' | '1k' | '2k' | '4k'
+    ratio?: string
+  },
+) {
+  return unwrap<ProjectJobAcceptedOut>(
+    http.post(`/projects/${projectId}/clips/${clipId}/generate-storyboard-grid`, body),
   )
 }
 

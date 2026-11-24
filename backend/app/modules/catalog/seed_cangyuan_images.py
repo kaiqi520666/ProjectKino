@@ -10,6 +10,7 @@ from app.modules.catalog.models import AiModel, AiProvider, ImageModelPrice
 
 IMAGE_TIERS = ["web", "1k", "2k", "4k"]
 IMAGE_RATIOS = ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "5:4", "4:5", "21:9", "9:21", "auto"]
+GEMINI_IMAGE_RATIOS = ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "5:4", "4:5", "21:9", "auto"]
 DEFAULT_ASSET_RATIOS = {"character": "16:9", "scene": "16:9", "prop": "1:1"}
 
 
@@ -25,6 +26,12 @@ class CangyuanImageSpec:
     sort: int
     is_default: bool = False
     quality: str = "high"
+    tiers: tuple[str, ...] = tuple(IMAGE_TIERS)
+    ratios: tuple[str, ...] = tuple(IMAGE_RATIOS)
+    max_reference_images: int = 9
+    supports_mask: bool = True
+    protocol: str = "gpt_image"
+    poll_by_submit_endpoint: bool = False
 
 
 CANGYUAN_IMAGE_SPECS: list[CangyuanImageSpec] = [
@@ -104,6 +111,27 @@ CANGYUAN_IMAGE_SPECS: list[CangyuanImageSpec] = [
         },
         sort=31,
     ),
+    CangyuanImageSpec(
+        model_id="gemini-nano-banana-2.1",
+        upstream_model_id="gemini-nano-banana-2.1",
+        category="Gemini 图像",
+        display_name="Nano Banana 2.1",
+        description="Google Gemini 图像模型，支持 1K/2K/4K 高清创作与最多 14 张参考图",
+        series=None,
+        prices={
+            "1k": Decimal("8.0000"),
+            "2k": Decimal("8.0000"),
+            "4k": Decimal("10.0000"),
+        },
+        sort=40,
+        is_default=False,
+        tiers=("1k", "2k", "4k"),
+        ratios=tuple(GEMINI_IMAGE_RATIOS),
+        max_reference_images=14,
+        supports_mask=False,
+        protocol="gemini_quality",
+        poll_by_submit_endpoint=True,
+    ),
 ]
 
 
@@ -112,7 +140,7 @@ async def seed_cangyuan_image_models(
     *,
     overwrite_prices: bool = False,
 ) -> dict[str, int]:
-    """幂等写入 5 款苍渊图片模型（走 -x 统一路由），保留原有 gpt-image-2 / gpt-image-2.5 主键。"""
+    """幂等写入苍渊图片模型（GPT Image + Gemini 图像），保留原有主键与默认设置。"""
     provider = await session.scalar(select(AiProvider).where(AiProvider.key == "cangyuan"))
     if provider is None:
         raise RuntimeError("未找到 key='cangyuan' 的图片供应商，请先初始化基础供应商")
@@ -128,15 +156,22 @@ async def seed_cangyuan_image_models(
         caps = {
             "description": spec.description,
             "variant": spec.series or "",
-            "tiers": list(IMAGE_TIERS),
-            "ratios": list(IMAGE_RATIOS),
+            "tiers": list(spec.tiers),
+            "ratios": list(spec.ratios),
             "aspectRatios": dict(DEFAULT_ASSET_RATIOS),
-            "maxReferenceImages": 9,
-            "supportsMask": True,
+            "maxReferenceImages": spec.max_reference_images,
+            "supportsMask": spec.supports_mask,
         }
-        config: dict[str, str] = {"quality": spec.quality}
-        if spec.series:
-            config["series"] = spec.series
+        config: dict[str, object]
+        if spec.protocol == "gemini_quality":
+            config = {
+                "protocol": spec.protocol,
+                "pollBySubmitEndpoint": spec.poll_by_submit_endpoint,
+            }
+        else:
+            config = {"quality": spec.quality}
+            if spec.series:
+                config["series"] = spec.series
 
         model = existing_models.get(spec.model_id)
         if model is None:

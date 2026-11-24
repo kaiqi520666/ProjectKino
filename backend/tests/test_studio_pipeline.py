@@ -374,7 +374,8 @@ async def test_append_assets_and_storyboard_pipeline_works_with_shared_usage():
                 {
                     "id": seg["id"],
                     "references": [seg["sceneId"], "C01"],
-                    "blocking": "女性站在床边偏左，面向墙壁。",
+                    "sceneLayout": "昏暗卧室，床铺在画面左侧，老旧白墙在右侧，冷色月光从左侧窗棂斜入",
+                    "characterPositions": ["林晚：站在床边偏左，面朝右侧墙壁"],
                     "soundscape": "深夜老楼微弱回声",
                     "music": "低频悬疑铺底",
                     "cuts": [
@@ -534,7 +535,8 @@ async def test_analyze_assets_auto_variants_and_storyboard_variant_binding():
                 {
                     "id": seg["id"],
                     "references": refs,
-                    "blocking": "女性站在床边偏左，面向墙壁。",
+                    "sceneLayout": "深夜停电卧室，床铺在画面左侧，老旧墙面在右侧，冷蓝月光从左侧窗外透入",
+                    "characterPositions": ["林晚：站在床边偏左，面朝右侧墙壁"],
                     "soundscape": "雨夜风声",
                     "music": "",
                     "cuts": [
@@ -665,7 +667,8 @@ async def test_storyboard_passes_director_feedback():
             {
                 "id": seg["id"],
                 "references": ["S01", "C01"],
-                "blocking": "女性面向右侧墙面站立。",
+                "sceneLayout": "深夜卧室，床铺在左侧，老旧墙面在右侧，台灯微光偏左照亮墙角",
+                "characterPositions": ["林晚：站在床尾偏左，面朝右侧墙面"],
                 "soundscape": "深夜钟表滴答声",
                 "music": "",
                 "cuts": [
@@ -729,7 +732,8 @@ async def test_regenerate_clip_locked_refs_and_refreshed_refs():
                     json.dumps(
                         {
                             "references": [],
-                            "blocking": "女性立于床尾左侧，右手扶墙。",
+                            "sceneLayout": "深夜卧室，床尾在画面左侧，斑驳墙面在右侧，冷光从左窗斜入",
+                            "characterPositions": ["林晚：立于床尾左侧，右手扶墙，面朝右侧墙面"],
                             "soundscape": "雨点拍打玻璃与低沉敲墙声",
                             "music": "",
                             "cuts": [
@@ -812,7 +816,10 @@ async def test_regenerate_clip_locked_refs_and_refreshed_refs():
                                 {
                                     "id": seg["id"],
                                     "references": ["S01_v1", "C01_v1"],
-                                    "blocking": "女性立于门侧，面向黑暗卧室。",
+                                    "sceneLayout": (
+                                        "深夜停电卧室，房门在画面左侧，床铺在右侧深处，冷蓝月光从左窗斜入"
+                                    ),
+                                    "characterPositions": ["林晚：立于左侧门边，面朝右侧黑暗卧室"],
                                     "soundscape": "停电后的死寂与窗外风声",
                                     "music": "",
                                     "cuts": [
@@ -903,7 +910,10 @@ async def test_generate_new_clip_supports_30s_duration_pacing():
                     json.dumps(
                         {
                             "references": ["C01_v1", "S01_v1"],
-                            "blocking": "女性沿右侧墙面缓慢移动至门框附近。",
+                            "sceneLayout": (
+                                "深夜停电卧室，门框在画面左前方，老旧墙面在右侧，冷蓝月光从左侧窗户斜入"
+                            ),
+                            "characterPositions": ["林晚：站在右侧墙面近处，侧身面朝墙面裂缝"],
                             "soundscape": "窗外细雨与墙内回响",
                             "music": "",
                             "cuts": cuts,
@@ -1357,3 +1367,175 @@ async def test_design_kind_batches_large_asset_lists():
     )
     assert sorted(batch_sizes) == [5, ASSET_DESIGN_BATCH_SIZE]
     assert len(designs) == total_items
+
+
+@pytest.mark.asyncio
+async def test_storyboard_rejects_cross_clip_and_action_pollution_and_passes_scene_layout_only():
+    settings = ProjectSettings(
+        name="教室构图测试",
+        ratio="16:9",
+        visualStyle="live-action",
+        episodeCount=1,
+        maxSegmentDuration=15,
+    )
+    script = await generate_script(
+        FunctionModel(_script_responder(count=1)),
+        settings,
+        Source.from_text("story", "半夜墙体传出诡异敲击声。"),
+    )
+    assets = _make_sample_assets(settings)
+    batch1_attempts = 0
+    seen_payloads: list[dict] = []
+
+    def sb_respond(messages, _info):
+        nonlocal batch1_attempts
+        user = next(p for m in messages for p in m.parts if isinstance(p, UserPromptPart))
+        data = json.loads(user.content)
+        is_first_batch = data["segments"][0]["id"] == 1
+        if is_first_batch:
+            batch1_attempts += 1
+        else:
+            seen_payloads.append(data)
+
+        segs = []
+        for seg in data["segments"]:
+            if is_first_batch and batch1_attempts == 1:
+                scene_layout = "承接上段：深夜卧室，大窗在画面左侧"
+                positions = ["林晚：站在床边偏左，面朝右侧墙壁"]
+            elif is_first_batch and batch1_attempts == 2:
+                scene_layout = "深夜卧室，大窗在画面左侧"
+                positions = ["上课后，林晚站在床边偏左，面朝右侧墙壁"]
+            elif is_first_batch and batch1_attempts == 3:
+                scene_layout = "深夜卧室，大窗在画面左侧"
+                positions = ["林晚：起身从后门离开，面朝右侧墙壁"]
+            else:
+                scene_layout = "深夜卧室，床铺在画面左侧，斑驳白墙在右侧，冷色月光从左窗斜入"
+                positions = ["林晚：站在床边偏左，面朝右侧墙壁"]
+            segs.append(
+                {
+                    "id": seg["id"],
+                    "references": ["S01", "C01"],
+                    "sceneLayout": scene_layout,
+                    "characterPositions": positions,
+                    "soundscape": "深夜钟表滴答声",
+                    "music": "",
+                    "cuts": [
+                        {
+                            "index": cut["index"],
+                            "shotSize": "中景",
+                            "camera": "固定镜头",
+                            "lens": "35mm",
+                            "cameraPosition": "平视",
+                            "composition": "三分法",
+                            "shot": "穿深色家居服的年轻女性停步于床尾左侧，侧耳倾听右侧墙面。",
+                            "eyeline": "右侧墙面",
+                            "focus": "女性侧脸",
+                            "stability": "稳定",
+                            "framePrompt": "电影写实中景，深夜卧室，年轻女性侧耳听墙。",
+                        }
+                        for cut in seg["cuts"]
+                    ],
+                }
+            )
+        return ModelResponse(parts=[TextPart(json.dumps({"segments": segs}, ensure_ascii=False))])
+
+    board = await storyboard(FunctionModel(sb_respond), script, assets, only_episode=1)
+    assert batch1_attempts == 4
+    clip0 = board.episodes[0].clips[0]
+    expected_layout = "深夜卧室，床铺在画面左侧，斑驳白墙在右侧，冷色月光从左窗斜入"
+    expected_block = f"【人物关系与构图逻辑】\n{expected_layout}。林晚：站在床边偏左，面朝右侧墙壁。"
+    assert expected_block in clip0.prompt
+    assert "承接上段" not in clip0.prompt
+    if seen_payloads:
+        for payload in seen_payloads:
+            assert "previousBlocking" not in payload
+            assert "previousSceneLayout" in payload
+            assert payload["previousSceneLayout"]["sceneLayout"] == expected_layout
+            assert "林晚" not in payload["previousSceneLayout"]["sceneLayout"]
+
+
+@pytest.mark.asyncio
+async def test_freeform_clip_sanitizes_legacy_prev_blocking_and_enforces_static_spatial_fields():
+    settings = ProjectSettings(
+        name="教室构图测试",
+        ratio="16:9",
+        visualStyle="live-action",
+        episodeCount=1,
+        maxSegmentDuration=15,
+    )
+    script = await generate_script(
+        FunctionModel(_script_responder(count=1)),
+        settings,
+        Source.from_text("story", "半夜墙体传出诡异敲击声。"),
+    )
+    assets = _make_sample_assets(settings)
+    attempts = 0
+    captured_payloads: list[dict] = []
+
+    def responder(messages, _info):
+        nonlocal attempts
+        attempts += 1
+        user = next(p for m in messages for p in m.parts if isinstance(p, UserPromptPart))
+        data = json.loads(user.content)
+        if attempts == 1:
+            captured_payloads.append(data)
+        cuts = [
+            {
+                "index": idx,
+                "seconds": 4.0,
+                "shotSize": "中景",
+                "camera": "固定镜头",
+                "lens": "50mm",
+                "cameraPosition": "平视",
+                "composition": "三分法",
+                "shot": "穿深色家居服的年轻女性停在床边左侧，抬眼望向斑驳墙面。",
+                "dialogue": "台词：{}",
+                "eyeline": "右侧墙面",
+                "focus": "女性眼神",
+                "stability": "稳定",
+                "framePrompt": "电影写实中景，深夜卧室。",
+            }
+            for idx in range(1, 4)
+        ]
+        if attempts == 1:
+            body = {
+                "references": ["S01", "C01"],
+                "sceneLayout": "深夜卧室，大窗在左",
+                "characterPositions": ["林晚：回到床边偏左，转身离开房间"],
+                "soundscape": "窗外细雨",
+                "music": "",
+                "cuts": cuts,
+            }
+        else:
+            body = {
+                "references": ["S01", "C01"],
+                "sceneLayout": "深夜卧室，床铺在左，老旧白墙在右，大窗在左侧晨光斜入",
+                "characterPositions": ["林晚：站在床尾偏左，面朝右侧墙面"],
+                "soundscape": "窗外细雨",
+                "music": "",
+                "cuts": cuts,
+            }
+        return ModelResponse(parts=[TextPart(json.dumps(body, ensure_ascii=False))])
+
+    spec = await generate_new_clip_storyboard(
+        FunctionModel(responder),
+        script=script,
+        episode=script.episodes[0],
+        assets=assets,
+        duration_seconds=12,
+        prev_clip={
+            "clipIndex": 1,
+            "blocking": "承接上段：深夜卧室，大窗在左侧。林晚站在床边偏左。",
+            "promptExcerpt": "前段摘要",
+        },
+    )
+    assert attempts == 2
+    assert "blocking" not in captured_payloads[0]["prevClip"]
+    assert captured_payloads[0]["prevClip"]["sceneLayout"] == "深夜卧室，大窗在左侧"
+    expected_freeform_block = (
+        "【人物关系与构图逻辑】\n"
+        "深夜卧室，床铺在左，老旧白墙在右，大窗在左侧晨光斜入。"
+        "林晚：站在床尾偏左，面朝右侧墙面。"
+    )
+    assert expected_freeform_block in spec.prompt
+

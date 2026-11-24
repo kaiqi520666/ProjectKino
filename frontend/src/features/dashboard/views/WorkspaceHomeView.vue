@@ -19,6 +19,7 @@ import {
   startGenerateProject,
 } from '@/features/studio/api'
 import { useScriptJobStore } from '@/features/studio/script-job-store'
+import { resolveProjectProgress } from '@/features/projects/project-progress'
 import type { StudioProject } from '@/features/studio/studio-project'
 import { useStudioStore } from '@/features/studio/studio-store'
 import { useUiStore } from '@/stores/ui'
@@ -76,6 +77,21 @@ async function deleteProject() {
   }
 }
 
+function recentProjectProgress(project: StudioProject) {
+  const stats = project.progressStats
+  return resolveProjectProgress({
+    scriptConfirmed: project.scriptConfirmed,
+    episodeCount: stats?.episodeCount ?? Object.keys(project.episodes).length,
+    plannedEpisodeCount: stats?.plannedEpisodeCount ?? project.creation.settings.episodeCount,
+    assetCount: stats?.assetCount ?? (project.assets?.length ?? 0),
+    assetImageReadyCount: stats?.assetImageReadyCount ?? (project.assets?.filter((a) => Boolean(a.imageUrl)).length ?? 0),
+    storyboardEpisodeCount: stats?.storyboardEpisodeCount ?? Object.keys(project.storyboards ?? {}).length,
+    clipCount: stats?.clipCount ?? 0,
+    clipVideoReadyCount: stats?.clipVideoReadyCount ?? 0,
+    composedEpisodeCount: stats?.composedEpisodeCount ?? 0,
+  })
+}
+
 async function createDrama(input: DramaCreation) {
   if (creating.value) return
   creating.value = true
@@ -115,9 +131,12 @@ async function createDrama(input: DramaCreation) {
       <div class="dashboard-section-heading"><h2 id="dashboard-projects-title">最近项目</h2><RouterLink to="/projects">全部<ArrowRight :size="14" aria-hidden="true" /></RouterLink></div>
       <ul v-if="studio.projects.length" class="dashboard-local-projects">
         <li v-for="project in studio.projects" :key="project.id" class="dashboard-project-row">
-          <RouterLink :to="{ name: 'studio-script', params: { projectId: project.id } }">
+          <RouterLink :to="{ name: recentProjectProgress(project).targetRoute, params: { projectId: project.id } }">
             <Clapperboard :size="17" aria-hidden="true" />
-            <span>{{ project.creation.settings.name }}</span>
+            <span class="dashboard-project-name">{{ project.creation.settings.name }}</span>
+            <span class="dashboard-project-stage" :class="`is-${recentProjectProgress(project).tone}`">
+              {{ recentProjectProgress(project).label }}
+            </span>
             <small>{{ project.creation.settings.episodeCount }} 集</small>
             <ArrowRight :size="15" aria-hidden="true" />
           </RouterLink>
@@ -165,7 +184,12 @@ async function createDrama(input: DramaCreation) {
 .dashboard-local-projects { margin: 0; padding: 0; list-style: none; }
 .dashboard-project-row { display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--border-subtle); }
 .dashboard-project-row:hover { background: var(--surface-hover); }
-.dashboard-local-projects a { flex: 1; min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 10px; min-height: 46px; padding: 8px; overflow-wrap: anywhere; }
+.dashboard-local-projects a { flex: 1; min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto auto; align-items: center; gap: 10px; min-height: 46px; padding: 8px; overflow-wrap: anywhere; }
+.dashboard-project-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dashboard-project-stage { padding: 2px 7px; border: 1px solid rgb(255 255 255 / 12%); border-radius: 5px; background: rgb(255 255 255 / 4%); color: var(--color-muted); font-size: 11px; white-space: nowrap; }
+.dashboard-project-stage.is-ready { border-color: rgb(240 184 75 / 32%); color: var(--color-gold-soft); }
+.dashboard-project-stage.is-progress { border-color: rgb(96 165 250 / 36%); color: #93c5fd; }
+.dashboard-project-stage.is-done { border-color: rgb(74 222 128 / 36%); color: var(--color-success); }
 .dashboard-local-projects small { color: var(--color-muted); font-size: 12px; }
 .dashboard-project-delete { flex-shrink: 0; width: 32px; height: 32px; margin-right: 4px; border-color: transparent; background: transparent; color: var(--color-muted); }
 .dashboard-project-delete:is(:hover, :focus-visible) { border-color: rgb(248 113 113 / 35%); color: var(--color-error); }

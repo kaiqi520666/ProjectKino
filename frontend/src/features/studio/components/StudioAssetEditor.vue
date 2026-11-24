@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, useId, useTemplateRef, watch } from 'vue'
 import {
+  Bookmark,
   Download,
   FolderOpen,
-  FolderPlus,
   History,
   ImageIcon,
   Plus,
@@ -389,6 +389,12 @@ function removeImage() {
   imageNotice.value = ''
 }
 
+const isCollectedInLibrary = computed(
+  () =>
+    canCollectToLibrary.value &&
+    userAssets.isSaved('image', draft.value?.imageUrl, draft.value?.imageKey),
+)
+
 async function collectToLibrary() {
   if (!draft.value?.imageUrl || !canCollectToLibrary.value || collectingAsset.value) return
   collectingAsset.value = true
@@ -397,7 +403,7 @@ async function collectToLibrary() {
       name: draft.value.name.trim() || asset.value?.name || '短剧资产图',
       variantLabel: draft.value.variantLabel,
     })
-    await userAssets.createAsset({
+    const result = await userAssets.toggleMediaAsset({
       kind: 'image',
       title,
       mediaUrl: draft.value.imageUrl,
@@ -406,7 +412,7 @@ async function collectToLibrary() {
       sourceType: 'studio',
       sourceId: asset.value?.backendId ?? null,
     })
-    ui.notify(`已收藏「${title}」到素材库`, 'success')
+    ui.notify(result.saved ? `已加入「${title}」到素材库` : `已从素材库移除「${title}」`, result.saved ? 'success' : 'info')
   } catch (error) {
     ui.notify(apiErrorMessage(error), 'error')
   } finally {
@@ -705,12 +711,19 @@ defineExpose({ create, createVariant, edit, close, syncAsset })
           </UiButton>
           <UiButton
             v-if="canCollectToLibrary"
+            class="asset-collect-btn"
+            :class="{ 'is-saved': isCollectedInLibrary }"
             variant="outline"
             size="sm"
             :loading="collectingAsset"
+            :aria-pressed="isCollectedInLibrary"
+            :title="isCollectedInLibrary ? '已在素材库（点击取消收藏）' : '加入素材库'"
             @click="collectToLibrary"
           >
-            <template v-if="!collectingAsset" #leading><FolderPlus :size="14" aria-hidden="true" /></template>收藏
+            <template v-if="!collectingAsset" #leading>
+              <Bookmark :size="14" :fill="isCollectedInLibrary ? 'currentColor' : 'none'" aria-hidden="true" />
+            </template>
+            {{ isCollectedInLibrary ? '已入素材库' : '加入素材库' }}
           </UiButton>
           <UiButton variant="outline" size="sm" :disabled="loadingImage" @click="openPicker('image')">
             <template #leading><FolderOpen :size="14" aria-hidden="true" /></template>素材库
@@ -983,6 +996,7 @@ defineExpose({ create, createVariant, edit, close, syncAsset })
 .asset-image-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 .asset-image-actions--filled { justify-content: flex-end; }
 .asset-image-actions .ui-button { gap: 5px; padding-inline: 9px; }
+.asset-collect-btn.ui-button.is-saved { border-color: rgb(240 184 75 / 42%); background: var(--gold-tint); color: var(--color-gold-soft); }
 .asset-image-notice { margin: 0; color: var(--color-muted); font-size: 12px; }
 @media (max-width: 640px) {
   .asset-edit-form { grid-template-columns: 1fr; }

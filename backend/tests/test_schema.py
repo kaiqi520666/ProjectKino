@@ -45,7 +45,7 @@ def test_alembic_has_single_head():
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
     assert len(heads) == 1
-    assert heads[0] == "0007_video_default_30s"
+    assert heads[0] == "0008_project_cover"
 
 
 def test_studio_media_history_and_variant_columns_registered():

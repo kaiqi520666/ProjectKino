@@ -17,6 +17,18 @@ const TOKEN_SPLIT_RE = /(@\[(?:(?:图片|视频|音频|文本)\d+|已移除:[^\]
 const SLOT_TOKEN_RE = /^@\[((?:图片|视频|音频|文本)\d+)\]$/
 const REMOVED_TOKEN_RE = /^@\[已移除:([^\]]+)\]$/
 const LEGACY_CANVAS_REF_RE = /\{\{ref:([\w-]+)\}\}/g
+const GRID_HEADER_LINE_RE = /^@\[图片\d+\]\s*=\s*分镜宫格[^\n]*\n?/gm
+const GRID_DRIVE_BLOCK_RE = /\n*【分镜宫格驱动】\n[\s\S]*?(?=\n\n【|$)/g
+
+export function removeStoryboardGridPromptBlock(prompt: string): { prompt: string; changed: boolean } {
+  if (!prompt) return { prompt: '', changed: false }
+  const next = prompt
+    .replace(GRID_HEADER_LINE_RE, '')
+    .replace(GRID_DRIVE_BLOCK_RE, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+  return { prompt: next, changed: next !== prompt }
+}
 
 export const SLOT_PREFIX_BY_KIND: Record<PromptReferenceKind, string> = {
   image: '图片',

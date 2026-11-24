@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, useTemplateRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Check, Heading, Pencil, X } from 'lucide-vue-next'
+import { Check, Heading, Pencil, SlidersHorizontal, X } from 'lucide-vue-next'
 import EmptyState from '@/components/business/EmptyState.vue'
 import UiButton from '@/components/ui/UiButton.vue'
 import { useUiStore } from '@/stores/ui'
@@ -11,6 +11,7 @@ import { artStyles } from '../components/art-styles'
 import { contentLanguages, formatDurationLabel } from '../components/drama-creation'
 import { isScriptJobType } from '../script-job-helpers'
 import { useScriptJobStore } from '../script-job-store'
+import StudioProjectSettingsDialog from '../components/StudioProjectSettingsDialog.vue'
 import { useStoryboardJobStore } from '../storyboard-job-store'
 import { useStudioStore } from '../studio-store'
 
@@ -28,6 +29,7 @@ const project = computed(() => studio.getProject(projectId.value))
 const scriptJobRunning = computed(() => Boolean(project.value && scriptJobs.isRunning(project.value.id)))
 const assetExtractRunning = computed(() => Boolean(project.value && assetExtractJobs.isRunning(project.value.id)))
 const settings = computed(() => project.value?.creation.settings)
+const settingsOpen = ref(false)
 const draftName = ref<string>()
 const nameInput = useTemplateRef<HTMLInputElement>('nameInput')
 const renameTrigger = useTemplateRef<HTMLButtonElement>('renameTrigger')
@@ -194,36 +196,50 @@ function handleNameEscape(event: KeyboardEvent) {
             </li>
           </ol>
         </nav>
-        <dl class="studio-project-meta">
-          <div>
-            <dt>比例</dt>
-            <dd>{{ settings.ratio }}</dd>
-          </div>
-          <div>
-            <dt>语言</dt>
-            <dd>{{ language }}</dd>
-          </div>
-          <div v-if="artStyle" class="studio-project-style">
-            <dt>画风</dt>
-            <dd :title="artStyle.label">
-              <img :src="`/images/art-styles/${artStyle.value}.webp`" alt="" />
-              <span>{{ artStyle.label }}</span>
-            </dd>
-          </div>
-          <div v-if="world" class="studio-project-world" :title="world.baseline">
-            <dt>时代</dt>
-            <dd>{{ world.era }}</dd>
-          </div>
-          <div>
-            <dt>集数</dt>
-            <dd>{{ settings.episodeCount }} 集</dd>
-          </div>
-          <div v-if="settings.secondsPerEpisode">
-            <dt>单集</dt>
-            <dd>约 {{ formatDurationLabel(settings.secondsPerEpisode) }}</dd>
-          </div>
-        </dl>
+        <div class="studio-project-meta-wrap">
+          <dl class="studio-project-meta">
+            <div>
+              <dt>比例</dt>
+              <dd>{{ settings.ratio }}</dd>
+            </div>
+            <div>
+              <dt>语言</dt>
+              <dd>{{ language }}</dd>
+            </div>
+            <div v-if="artStyle" class="studio-project-style">
+              <dt>画风</dt>
+              <dd :title="artStyle.label">
+                <img :src="`/images/art-styles/${artStyle.value}.webp`" alt="" />
+                <span>{{ artStyle.label }}</span>
+              </dd>
+            </div>
+            <div v-if="world" class="studio-project-world" :title="world.baseline">
+              <dt>时代</dt>
+              <dd>{{ world.era }}</dd>
+            </div>
+            <div>
+              <dt>集数</dt>
+              <dd>{{ settings.episodeCount }} 集</dd>
+            </div>
+            <div v-if="settings.secondsPerEpisode">
+              <dt>单集</dt>
+              <dd>约 {{ formatDurationLabel(settings.secondsPerEpisode) }}</dd>
+            </div>
+          </dl>
+          <UiButton
+            class="studio-project-settings-btn"
+            variant="outline"
+            size="sm"
+            aria-label="项目默认配置"
+            title="修改画风、比例与默认模型"
+            @click="settingsOpen = true"
+          >
+            <template #leading><SlidersHorizontal :size="13" aria-hidden="true" /></template>
+            设置
+          </UiButton>
+        </div>
       </header>
+      <StudioProjectSettingsDialog v-model:open="settingsOpen" :project="project" />
       <RouterView v-if="active === 'studio-script' || project.scriptConfirmed" :key="project.id" :project="project" />
     </template>
     <EmptyState v-else-if="loadingProject" title="正在加载项目..." description="正在从服务器读取剧本、资产与分镜数据。" />
@@ -259,7 +275,9 @@ function handleNameEscape(event: KeyboardEvent) {
 .studio-project-rename input { min-width: 0; height: 34px; padding-inline: 8px; }
 .studio-project-rename-action { flex: 0 0 32px; padding-inline: 0; }
 .studio-project-nav { grid-area: steps; width: min(100%, 416px); justify-self: center; }
-.studio-project-meta { grid-area: meta; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; max-width: 100%; overflow: hidden; margin: 0; font-size: 12px; }
+.studio-project-meta-wrap { grid-area: meta; display: flex; align-items: center; gap: 8px 10px; min-width: 0; max-width: 100%; }
+.studio-project-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; flex: 1; overflow: hidden; margin: 0; font-size: 12px; }
+.studio-project-settings-btn { flex-shrink: 0; }
 .studio-project-meta > div { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .studio-project-meta dt { flex-shrink: 0; color: var(--color-muted); }
 .studio-project-meta dd { min-width: 0; margin: 0; color: var(--color-text); overflow-wrap: anywhere; }
@@ -276,11 +294,13 @@ function handleNameEscape(event: KeyboardEvent) {
 .studio-step-number { display: grid; flex: 0 0 22px; place-items: center; width: 22px; height: 22px; border: 1px solid var(--border-control); border-radius: 50%; color: var(--color-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .studio-step[aria-current="step"] .studio-step-number { border-color: var(--color-gold); background: var(--color-gold); color: var(--color-ink); }
 @container (min-width: 560px) {
-  .studio-project-head { grid-template-columns: minmax(0, 1fr) minmax(0, 380px); grid-template-areas: "name meta" "steps steps"; }
+  .studio-project-head { grid-template-columns: minmax(0, 1fr) minmax(0, 420px); grid-template-areas: "name meta" "steps steps"; }
+  .studio-project-meta-wrap { justify-content: flex-end; }
   .studio-project-meta { justify-content: flex-end; }
 }
 @container (min-width: 1040px) {
-  .studio-project-head { grid-template-columns: minmax(150px, 0.72fr) 336px minmax(0, 1.28fr); grid-template-areas: "name steps meta"; }
+  .studio-project-head { grid-template-columns: minmax(140px, 0.68fr) 336px minmax(0, 1.32fr); grid-template-areas: "name steps meta"; }
+  .studio-project-meta-wrap { justify-content: flex-end; }
   .studio-project-meta { justify-content: flex-end; flex-wrap: wrap; }
   .studio-project-meta > div:not(.studio-project-style):not(.studio-project-world) { flex-shrink: 0; }
   .studio-project-style span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

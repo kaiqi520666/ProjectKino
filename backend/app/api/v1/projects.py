@@ -44,6 +44,7 @@ from app.modules.studio.schemas import (
     EpisodeOut,
     ExtractAssetsRequest,
     GenerateAssetImageRequest,
+    GenerateClipGridRequest,
     GenerateClipVideoRequest,
     GenerateNewClipRequest,
     GenerateProjectRequest,
@@ -51,16 +52,17 @@ from app.modules.studio.schemas import (
     ProjectAssetOut,
     ProjectDetailOut,
     ProjectJobAcceptedOut,
+    ProjectMetaOut,
     ProjectSummaryOut,
     RegenerateClipRequest,
     RegenerateStoryRequest,
-    RenameProjectRequest,
     RewriteEpisodeRequest,
     SelectMediaHistoryRequest,
     StoryboardClipOut,
     StructuredEpisodeSaveRequest,
     SuggestVariantPromptOut,
     SuggestVariantPromptRequest,
+    UpdateProjectRequest,
 )
 from app.modules.studio.service import (
     create_clip,
@@ -81,6 +83,7 @@ from app.modules.studio.service import (
     serialize_clip_out,
     update_clip,
     update_project_asset,
+    update_project_meta,
 )
 from app.workers.ai_tasks import (
     execute_asset_image_job,
@@ -109,19 +112,27 @@ async def get_project(
     return ApiResponse(data=await get_project_detail(session, project_id=project_id, user_id=user.id))
 
 
-@router.patch("/{project_id}", response_model=ApiResponse[dict])
-async def rename_project(
+@router.patch("/{project_id}", response_model=ApiResponse[ProjectMetaOut])
+async def update_project(
     project_id: UUID,
-    body: RenameProjectRequest,
+    body: UpdateProjectRequest,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
-) -> ApiResponse[dict]:
+) -> ApiResponse[ProjectMetaOut]:
     project = await get_owned_project(session, project_id=project_id, user_id=user.id)
-    name = body.name.strip()
-    project.name = name
-    project.settings = {**project.settings, "name": name}
+    updated = await update_project_meta(session, project=project, body=body)
     await session.commit()
-    return ApiResponse(data={"id": str(project.id), "name": project.name})
+    await session.refresh(updated)
+    return ApiResponse(
+        data=ProjectMetaOut(
+            id=updated.id,
+            name=updated.name,
+            settings=updated.settings,
+            cover_url=updated.cover_url,
+            cover_key=updated.cover_key,
+            updated_at=updated.updated_at,
+        )
+    )
 
 
 @router.delete("/{project_id}", response_model=ApiResponse[dict])
@@ -1689,6 +1700,126 @@ async def generate_clip_video(
     clip.last_job_id = job.id
     await session.commit()
     await execute_clip_video_job.kiq(str(job.id))
+    return ApiResponse(data=ProjectJobAcceptedOut(project_id=project.id, job=JobOut.model_validate(job)))
+
+
+@router.post(
+    "/{project_id}/clips/{clip_id}/generate-storyboard-grid",
+    response_model=ApiResponse[ProjectJobAcceptedOut],
+    status_code=202,
+)
+async def generate_clip_storyboard_grid(
+    project_id: UUID,
+    clip_id: UUID,
+    body: GenerateClipGridRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[ProjectJobAcceptedOut]:
+    project = await get_owned_project(session, project_id=project_id, user_id=user.id)
+    clip = await session.scalar(
+        select(StoryboardClip).where(
+            StoryboardClip.id == clip_id, StoryboardClip.project_id == project.id
+        )
+    )
+    if clip is None:
+        raise AppError(404, "clip_not_found", "片段不存在")
+    if not (clip.cuts or (clip.prompt or "").strip()):
+        raise AppError(400, "clip_empty", "片段缺少镜头与提示词，无法生成分镜宫格图")
+
+    existing_active = await session.scalar(
+        select(Job.id).where(
+            Job.project_id == project.id,
+            Job.target_id == str(clip.id),
+            Job.job_type.in_(("asset_image", "clip_video")),
+            Job.status.in_(("queued", "running", "polling")),
+        )
+    )
+    if existing_active is not None:
+        raise AppError(
+            409,
+            "clip_grid_in_progress",
+            f"片段 {clip.clip_index} 正在生成宫格图或视频中，请等待当前任务完成",
+        )
+
+    await assert_llm_balance_positive(session, user.id)
+    ratio = (body.ratio or "").strip() or str(project.settings.get("ratio") or "16:9")
+    model = await _validate_image_model_and_infra(
+        session, model_id=body.model_id, tier=body.tier, ratio=ratio
+    )
+    max_ref_images = int(model.capabilities.get("maxReferenceImages") or 9)
+
+    episode = await session.scalar(select(Episode).where(Episode.id == clip.episode_id))
+    project_assets = list(
+        await session.scalars(select(ProjectAsset).where(ProjectAsset.project_id == project.id))
+    )
+    by_uuid = {str(a.id): a for a in project_assets}
+    by_code = {a.asset_code: a for a in project_assets}
+
+    ref_urls: list[str] = []
+    ordered_refs = sorted(
+        list(clip.references or []),
+        key=lambda item: int(item.get("index", 999)) if isinstance(item, dict) else 999,
+    )
+    for ref in ordered_refs:
+        if not isinstance(ref, dict):
+            continue
+        if ref.get("kind") == "storyboard_grid" or str(ref.get("assetId") or "").startswith("grid:"):
+            continue
+        ref_id = str(ref.get("assetId") or "").strip()
+        ref_code = str(ref.get("assetCode") or "").strip()
+        matched = by_uuid.get(ref_id) or by_code.get(ref_code) or by_code.get(ref_id)
+        url = ""
+        if matched is not None:
+            url = (matched.image_url or "").strip()
+        else:
+            media_kind = str(ref.get("mediaKind") or "image").strip().lower()
+            if media_kind == "image":
+                url = str(ref.get("mediaUrl") or "").strip()
+        if url.startswith(("http://", "https://")) and url not in ref_urls:
+            ref_urls.append(url)
+            if len(ref_urls) >= max_ref_images:
+                break
+
+    amount, rate_snapshot = await quote_image_price(
+        session,
+        model_id=model.id,
+        tier=body.tier,
+        usage_multiplier=user.usage_multiplier,
+    )
+    job = await create_job(
+        session,
+        user_id=user.id,
+        project_id=project.id,
+        job_type="asset_image",
+        target_id=str(clip.id),
+        input_payload={
+            "action": "clip_storyboard_grid",
+            "clipId": str(clip.id),
+            "episodeId": str(clip.episode_id),
+            "episodeNumber": episode.number if episode is not None else 1,
+            "clipIndex": clip.clip_index,
+            "modelId": model.id,
+            "tier": body.tier,
+            "ratio": ratio,
+            **({"referenceUrls": ref_urls} if ref_urls else {}),
+        },
+        step_total=4,
+        step_label=f"片段 {clip.clip_index} 分镜宫格任务已排队",
+        idempotency_key=f"clip_grid:{user.id}:{idempotency_key}" if idempotency_key else None,
+    )
+    await freeze_media_credits(
+        session,
+        user_id=user.id,
+        business_type="image",
+        business_id=job.id,
+        model_id=model.id,
+        amount=amount,
+        rate_snapshot=rate_snapshot,
+        reason=f"片段分镜宫格预冻结 (片段{clip.clip_index} · {model.id}/{body.tier})",
+    )
+    await session.commit()
+    await execute_asset_image_job.kiq(str(job.id))
     return ApiResponse(data=ProjectJobAcceptedOut(project_id=project.id, job=JobOut.model_validate(job)))
 
 

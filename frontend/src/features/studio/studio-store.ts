@@ -10,6 +10,7 @@ import type {
   PersistedAssetOut,
   PersistedClipOut,
   ProjectDetailOut,
+  ProjectMetaOut,
   ProjectSummaryOut,
   ScriptResult,
   StoryboardResult,
@@ -18,7 +19,7 @@ import { normalizeScenes, renderStructuredScript, scenesSeconds } from './script
 import { createExampleAssets } from './studio-assets.ts'
 import type { StudioAsset, StudioAssetDraft, StudioAssetKind } from './studio-assets.ts'
 import { isEpisodeNumber, readEpisode } from './studio-project.ts'
-import type { StudioEpisode, StudioProject } from './studio-project.ts'
+import type { StudioEpisode, StudioProject, StudioProjectProgressStats } from './studio-project.ts'
 import { createExampleStoryboard } from './studio-storyboard.ts'
 import type { EpisodeStoryboard, StoryboardAsset } from './studio-storyboard.ts'
 
@@ -87,6 +88,21 @@ export const useStudioStore = defineStore('studio', () => {
     return true
   }
 
+  function summaryToProgressStats(summary: ProjectSummaryOut): StudioProjectProgressStats {
+    const epCount = summary.episodeCount || 0
+    const planned = Math.max(summary.settings.episodeCount || 0, summary.plannedEpisodeCount ?? epCount, epCount)
+    return {
+      episodeCount: epCount,
+      plannedEpisodeCount: planned,
+      assetCount: summary.assetCount || 0,
+      assetImageReadyCount: summary.assetImageReadyCount ?? 0,
+      storyboardEpisodeCount: summary.storyboardEpisodeCount ?? 0,
+      clipCount: summary.clipCount ?? 0,
+      clipVideoReadyCount: summary.clipVideoReadyCount ?? 0,
+      composedEpisodeCount: summary.composedEpisodeCount ?? 0,
+    }
+  }
+
   function syncProjectSummaries(summaries: ProjectSummaryOut[]) {
     const existingById = new Map(projects.value.map((item) => [item.id, item]))
     const next: StudioProject[] = []
@@ -97,9 +113,14 @@ export const useStudioStore = defineStore('studio', () => {
         name: summary.name,
         episodeCount: Math.max(summary.settings.episodeCount || 1, summary.episodeCount || 1),
       })
+      const progressStats = summaryToProgressStats(summary)
       if (prev && prev.loadedDetail) {
         prev.creation.settings = settings
         prev.scriptConfirmed = summary.scriptConfirmed
+        prev.coverUrl = summary.coverUrl ?? null
+        prev.coverKey = summary.coverKey ?? null
+        prev.autoCoverUrl = summary.autoCoverUrl ?? prev.autoCoverUrl ?? null
+        prev.progressStats = progressStats
         prev.persisted = true
         next.push(prev)
       } else {
@@ -109,6 +130,10 @@ export const useStudioStore = defineStore('studio', () => {
           loadedDetail: false,
           creation: { mode: 'story', settings, story: '' },
           episodes: prev?.episodes ?? {},
+          coverUrl: summary.coverUrl ?? null,
+          coverKey: summary.coverKey ?? null,
+          autoCoverUrl: summary.autoCoverUrl ?? null,
+          progressStats,
           scriptConfirmed: summary.scriptConfirmed,
         })
       }
@@ -220,6 +245,8 @@ export const useStudioStore = defineStore('studio', () => {
             kind: ref.kind,
             ...(ref.mediaKind ? { mediaKind: ref.mediaKind } : {}),
             ...(ref.mediaUrl ? { mediaUrl: ref.mediaUrl } : {}),
+            ...(ref.gridLayout ? { gridLayout: ref.gridLayout } : {}),
+            ...(ref.cellMapping?.length ? { cellMapping: ref.cellMapping } : {}),
           }
         })
         return {
@@ -268,6 +295,26 @@ export const useStudioStore = defineStore('studio', () => {
       }
     }
 
+    const allClips = Object.values(storyboards).flatMap((board) => board?.clips ?? [])
+    const autoCoverCandidate =
+      uiAssets.find((a) => !a.parentAssetId && a.kind === 'scene' && a.imageUrl)?.imageUrl
+      ?? uiAssets.find((a) => !a.parentAssetId && a.kind === 'character' && a.imageUrl)?.imageUrl
+      ?? uiAssets.find((a) => !a.parentAssetId && a.imageUrl)?.imageUrl
+      ?? uiAssets.find((a) => a.imageUrl)?.imageUrl
+      ?? allClips.find((c) => c.previewUrl)?.previewUrl
+      ?? null
+
+    const progressStats: StudioProjectProgressStats = {
+      episodeCount: detail.episodes.length,
+      plannedEpisodeCount: settings.episodeCount,
+      assetCount: uiAssets.length,
+      assetImageReadyCount: uiAssets.filter((a) => Boolean(a.imageUrl)).length,
+      storyboardEpisodeCount: Object.keys(storyboards).length,
+      clipCount: allClips.length,
+      clipVideoReadyCount: allClips.filter((c) => Boolean(c.videoUrl)).length,
+      composedEpisodeCount: detail.episodes.filter((ep) => Boolean(ep.composedVideoUrl)).length,
+    }
+
     const hydrated: StudioProject = {
       id: detail.id,
       persisted: true,
@@ -276,6 +323,10 @@ export const useStudioStore = defineStore('studio', () => {
       episodes,
       assets: uiAssets.length ? uiAssets : undefined,
       storyboards: Object.keys(storyboards).length ? storyboards : undefined,
+      coverUrl: detail.coverUrl ?? null,
+      coverKey: detail.coverKey ?? null,
+      autoCoverUrl: autoCoverCandidate,
+      progressStats,
       scriptConfirmed: detail.scriptConfirmed,
       scriptResult,
       assetResult,
@@ -489,6 +540,32 @@ export const useStudioStore = defineStore('studio', () => {
     if (!project || !name) return false
 
     project.creation.settings = { ...project.creation.settings, name }
+    return true
+  }
+
+  function applyProjectMeta(id: string, meta: ProjectMetaOut) {
+    const project = getProject(id)
+    if (!project) return false
+    const nextSettings = toDramaSettings({
+      ...meta.settings,
+      name: meta.name,
+      episodeCount: Math.max(meta.settings.episodeCount || 1, project.creation.settings.episodeCount || 1),
+    })
+    project.creation.settings = nextSettings
+    project.coverUrl = meta.coverUrl ?? null
+    project.coverKey = meta.coverKey ?? null
+    if (project.scriptResult) {
+      project.scriptResult = {
+        ...project.scriptResult,
+        settings: { ...project.scriptResult.settings, ...meta.settings, name: meta.name },
+      }
+    }
+    if (project.assetResult) {
+      project.assetResult = {
+        ...project.assetResult,
+        settings: { ...project.assetResult.settings, ...meta.settings, name: meta.name },
+      }
+    }
     return true
   }
 
@@ -723,7 +800,7 @@ export const useStudioStore = defineStore('studio', () => {
   }
 
   return {
-    projects, createProject, createProjectFromScript, syncProjectSummaries, hydrateProjectDetail, clearProjects, removeProject, replaceScript, replaceEpisode, applyAppendedEpisode, getProject, renameProject, appendEpisode, saveEpisode, saveStructuredEpisode, confirmScript,
+    projects, createProject, createProjectFromScript, syncProjectSummaries, hydrateProjectDetail, clearProjects, removeProject, replaceScript, replaceEpisode, applyAppendedEpisode, getProject, renameProject, applyProjectMeta, appendEpisode, saveEpisode, saveStructuredEpisode, confirmScript,
     applyAssets, applyStoryboard, applyPersistedAsset, applyPersistedClip,
     loadExampleAssets, createAsset, saveAsset, removeAsset, generateExampleStoryboard, saveClipPrompt, saveClipDuration, reorderClips, appendClip, removeClip,
   }

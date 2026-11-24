@@ -37,6 +37,8 @@ class Project(TimestampMixin, Base):
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
     outline: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    cover_key: Mapped[str | None] = mapped_column(String(512))
+    cover_url: Mapped[str | None] = mapped_column(Text)
     script_confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
 

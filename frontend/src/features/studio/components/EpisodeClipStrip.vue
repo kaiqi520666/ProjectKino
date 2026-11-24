@@ -4,6 +4,7 @@ import {
   AlertCircle,
   ArrowLeft,
   ArrowRight,
+  Bookmark,
   Check,
   CheckSquare,
   Clapperboard,
@@ -16,6 +17,7 @@ import {
 } from 'lucide-vue-next'
 import UiButton from '@/components/ui/UiButton.vue'
 import UiIconButton from '@/components/ui/UiIconButton.vue'
+import { isCollectableMediaUrl } from '@/features/assets/user-assets-helpers'
 import type { StoryboardClip } from '../studio-storyboard'
 
 const props = defineProps<{
@@ -26,12 +28,16 @@ const props = defineProps<{
   selectMode: boolean
   checkedIds: ReadonlySet<string>
   checkedCount: number
+  checkedCollectableCount?: number
+  batchCollecting?: boolean
   reordering: boolean
   locked?: boolean
   regeneratingClipId?: string
   isClipGenerating: (clip: StoryboardClip) => boolean
   clipJobProgress: (clip: StoryboardClip) => string
   clipFailedReason: (clip: StoryboardClip) => string
+  isClipInLibrary?: (clip: StoryboardClip) => boolean
+  isClipLibraryBusy?: (clip: StoryboardClip) => boolean
 }>()
 
 const emit = defineEmits<{
@@ -40,6 +46,8 @@ const emit = defineEmits<{
   toggleSelectMode: []
   toggleCheck: [clip: StoryboardClip]
   openBatchFromSelection: []
+  collectSelection: []
+  toggleClipLibrary: [clip: StoryboardClip]
   preview: [clip: StoryboardClip]
   delete: [clipId: number, event: MouseEvent]
   add: []
@@ -140,7 +148,17 @@ defineExpose({ scrollToEnd, focusSelectedOrAdd })
         </template>
         <template v-if="persisted && selectMode">
           <span class="episode-meta">已选 {{ checkedCount }} 段</span>
-          <UiButton variant="primary" size="sm" :disabled="locked || !checkedCount" @click="emit('openBatchFromSelection')">
+          <UiButton
+            variant="outline"
+            size="sm"
+            :loading="batchCollecting"
+            :disabled="locked || !checkedCollectableCount || batchCollecting"
+            @click="emit('collectSelection')"
+          >
+            <template v-if="!batchCollecting" #leading><Bookmark :size="13" aria-hidden="true" /></template>
+            加入素材库 ({{ checkedCollectableCount ?? 0 }})
+          </UiButton>
+          <UiButton variant="primary" size="sm" :disabled="locked || !checkedCount || batchCollecting" @click="emit('openBatchFromSelection')">
             <template #leading><Video :size="13" aria-hidden="true" /></template>
             生成 / 重生成已选 ({{ checkedCount }})
           </UiButton>
@@ -223,6 +241,21 @@ defineExpose({ scrollToEnd, focusSelectedOrAdd })
           @click.stop="emit('preview', item)"
         >
           <Play :size="15" fill="currentColor" aria-hidden="true" />
+        </button>
+
+        <button
+          v-if="persisted && !selectMode && isCollectableMediaUrl(item.videoUrl) && !isClipBusy(item)"
+          type="button"
+          class="episode-clip-bookmark"
+          :class="{ 'is-saved': isClipInLibrary?.(item) }"
+          :disabled="isClipLibraryBusy?.(item)"
+          :aria-pressed="isClipInLibrary?.(item)"
+          :aria-label="isClipInLibrary?.(item) ? `从素材库移除片段 ${item.id}` : `将片段 ${item.id} 加入素材库`"
+          :title="isClipInLibrary?.(item) ? '已在素材库（点击取消收藏）' : '加入素材库'"
+          @click.stop="emit('toggleClipLibrary', item)"
+        >
+          <Loader2 v-if="isClipLibraryBusy?.(item)" class="is-spin" :size="12" aria-hidden="true" />
+          <Bookmark v-else :size="12" :fill="isClipInLibrary?.(item) ? 'currentColor' : 'none'" aria-hidden="true" />
         </button>
 
         <UiIconButton
@@ -424,8 +457,34 @@ defineExpose({ scrollToEnd, focusSelectedOrAdd })
   border-color: var(--color-error);
   color: var(--color-error);
 }
+.episode-clip-bookmark {
+  position: absolute;
+  right: 5px;
+  bottom: 34px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border-control);
+  border-radius: 6px;
+  background: rgb(9 10 13 / 82%);
+  color: var(--color-text);
+  cursor: pointer;
+  transition: opacity .15s, border-color .15s, background-color .15s, color .15s;
+}
+.episode-clip-bookmark:is(:hover, :focus-visible) {
+  border-color: var(--color-gold);
+  color: var(--color-gold-soft);
+}
+.episode-clip-bookmark.is-saved {
+  border-color: rgb(240 184 75 / 55%);
+  background: rgb(26 22 14 / 92%);
+  color: var(--color-gold-soft);
+}
 @media (hover: hover) and (pointer: fine) {
-  .episode-clips > li:not(:hover):not(:focus-within) :deep(.episode-clip-delete) {
+  .episode-clips > li:not(:hover):not(:focus-within) :deep(.episode-clip-delete),
+  .episode-clips > li:not(:hover):not(:focus-within) .episode-clip-bookmark:not(.is-saved) {
     opacity: 0;
     pointer-events: none;
   }

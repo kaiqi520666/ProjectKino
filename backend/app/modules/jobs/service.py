@@ -109,7 +109,7 @@ async def claim_job_lease(
         job = await session.scalar(select(Job).where(Job.id == job_id).with_for_update())
         if job is None or job.status in TERMINAL_STATUSES:
             return None
-        if job.status == "running" and job.lease_until and job.lease_until > now:
+        if job.status in ("running", "polling") and job.lease_until and job.lease_until > now:
             return None
         if job.status == "queued" and job.dispatch_after and job.dispatch_after > now:
             return None

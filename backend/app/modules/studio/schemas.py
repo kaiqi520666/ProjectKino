@@ -69,6 +69,56 @@ class RenameProjectRequest(CamelModel):
     name: str = Field(min_length=1, max_length=120)
 
 
+class UpdateProjectRequest(CamelModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    ratio: Literal["16:9", "9:16", "1:1", "4:3", "3:4"] | None = None
+    visual_style: str | None = Field(default=None, min_length=1, max_length=80)
+    visual_style_label: str | None = Field(default=None, max_length=500)
+    max_segment_duration: Literal[15, 30] | None = None
+    background_music: bool | None = None
+    image_model_id: str | None = Field(default=None, max_length=48)
+    image_tier: Literal["web", "1k", "2k", "4k"] | None = None
+    video_model_id: str | None = Field(default=None, max_length=48)
+    cover_url: str | None = Field(default=None, max_length=2048)
+    cover_key: str | None = Field(default=None, max_length=512)
+
+    @model_validator(mode="after")
+    def validate_fields(self) -> "UpdateProjectRequest":
+        if "name" in self.model_fields_set:
+            if self.name is None or not self.name.strip():
+                raise ValueError("项目名称不能为空")
+            self.name = self.name.strip()
+        if "visual_style" in self.model_fields_set:
+            if self.visual_style is None or not self.visual_style.strip():
+                raise ValueError("画风不能为空")
+            self.visual_style = self.visual_style.strip()
+        if "cover_url" in self.model_fields_set and self.cover_url is not None:
+            cleaned = self.cover_url.strip()
+            if not cleaned:
+                self.cover_url = None
+            elif not cleaned.startswith(("http://", "https://")):
+                raise ValueError("封面地址必须为有效的 http/https 链接")
+            else:
+                self.cover_url = cleaned
+        if "cover_key" in self.model_fields_set and self.cover_key is not None:
+            cleaned_key = self.cover_key.strip()
+            self.cover_key = cleaned_key or None
+        if "image_model_id" in self.model_fields_set and self.image_model_id is not None:
+            self.image_model_id = self.image_model_id.strip() or None
+        if "video_model_id" in self.model_fields_set and self.video_model_id is not None:
+            self.video_model_id = self.video_model_id.strip() or None
+        return self
+
+
+class ProjectMetaOut(CamelModel):
+    id: UUID
+    name: str
+    settings: dict[str, Any]
+    cover_url: str | None = None
+    cover_key: str | None = None
+    updated_at: datetime
+
+
 class StructuredEpisodeSaveRequest(CamelModel):
     title: str = Field(min_length=1, max_length=160)
     scenes: list[dict[str, Any]] = Field(min_length=1)
@@ -148,6 +198,12 @@ class GenerateAssetImageRequest(CamelModel):
     tier: Literal["web", "1k", "2k", "4k"] = "1k"
     ratio: str | None = Field(default=None, max_length=16)
     reference_urls: list[str] = Field(default_factory=list, max_length=16)
+
+
+class GenerateClipGridRequest(CamelModel):
+    model_id: str = Field(default="gemini-nano-banana-2.1", min_length=1, max_length=48)
+    tier: Literal["web", "1k", "2k", "4k"] = "2k"
+    ratio: str | None = Field(default=None, max_length=16)
 
 
 class BatchGenerateAssetImagesRequest(CamelModel):
@@ -292,9 +348,18 @@ class ProjectSummaryOut(CamelModel):
     name: str
     mode: str
     settings: dict[str, Any]
+    cover_url: str | None = None
+    cover_key: str | None = None
+    auto_cover_url: str | None = None
     script_confirmed: bool
     episode_count: int
+    planned_episode_count: int = 0
     asset_count: int
+    asset_image_ready_count: int = 0
+    storyboard_episode_count: int = 0
+    clip_count: int = 0
+    clip_video_ready_count: int = 0
+    composed_episode_count: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -305,6 +370,8 @@ class ProjectDetailOut(CamelModel):
     mode: str
     source_text: str
     settings: dict[str, Any]
+    cover_url: str | None = None
+    cover_key: str | None = None
     outline: dict[str, Any] | None = None
     script_confirmed: bool
     episodes: list[EpisodeOut]

@@ -1337,6 +1337,176 @@ async def test_image_worker_uses_edits_for_submit_and_generations_for_poll():
     assert len(db.assets[asset_id].image_history) == 1
 
 
+def test_cangyuan_build_payload_gemini_quality_protocol():
+    adapter = CangyuanImageAdapter()
+
+    gen_payload, gen_ep = adapter.build_payload(
+        upstream_model_id="gemini-nano-banana-2.1",
+        prompt="温暖的午后，阳光洒在窗台上",
+        tier="2k",
+        ratio="16:9",
+        quality="high",
+        series="flare",
+        protocol="gemini_quality",
+    )
+    assert gen_ep == "generations"
+    assert gen_payload == {
+        "model": "gemini-nano-banana-2.1",
+        "prompt": "温暖的午后，阳光洒在窗台上",
+        "n": 1,
+        "size": "16:9",
+        "quality": "2k",
+        "response_format": "url",
+        "async": True,
+    }
+    assert "tier" not in gen_payload
+    assert "series" not in gen_payload
+
+    edit_payload, edit_ep = adapter.build_payload(
+        upstream_model_id="gemini-nano-banana-2.1",
+        prompt="参考主角保持一致",
+        tier="4k",
+        ratio="9:16",
+        reference_urls=["https://img.example/ref1.png", "https://img.example/ref2.png"],
+        protocol="gemini_quality",
+    )
+    assert edit_ep == "edits"
+    assert edit_payload["quality"] == "4k"
+    assert edit_payload["images"] == [
+        "https://img.example/ref1.png",
+        "https://img.example/ref2.png",
+    ]
+    assert "tier" not in edit_payload
+
+
+async def test_gemini_image_worker_polls_edits_endpoint_when_configured():
+    db = InMemoryMediaDB()
+    storage = FakeOssStorage()
+    redis = FakePubSubRedis()
+    project_id = uuid4()
+    asset_id = uuid4()
+    job_id = uuid4()
+    res_id = uuid4()
+
+    db.users[1] = User(
+        id=1,
+        email="gemini@test.local",
+        password_hash="scrypt:a:b",
+        nickname="gemini",
+        role="user",
+        status="active",
+        balance=Decimal("20.0000"),
+        frozen=Decimal("8.0000"),
+        usage_multiplier=Decimal("1.0000"),
+    )
+    db.providers[10] = AiProvider(
+        id=10,
+        key="cangyuan",
+        display_name="沧元图片",
+        base_url="https://img.example/v1",
+        api_key="secret-key",
+        adapter="cangyuanImageV1",
+        auth_type="bearer",
+        enabled=True,
+        configuration={"timeoutMs": 15000},
+    )
+    db.models["gemini-nano-banana-2.1"] = AiModel(
+        id="gemini-nano-banana-2.1",
+        provider_id=10,
+        media_type="image",
+        display_name="Nano Banana 2.1",
+        upstream_model_id="gemini-nano-banana-2.1",
+        enabled=True,
+        is_default=False,
+        sort=40,
+        capabilities={"tiers": ["1k", "2k", "4k"], "maxReferenceImages": 14},
+        defaults={"tier": "1k"},
+        parameter_bindings={},
+        configuration={"protocol": "gemini_quality", "pollBySubmitEndpoint": True},
+    )
+    db.assets[asset_id] = ProjectAsset(
+        id=asset_id,
+        project_id=project_id,
+        asset_code="C02",
+        kind="character",
+        name="林晚",
+        description="",
+        prompt="电影写实肖像",
+        voice="",
+        episode_numbers=[1],
+        image_status="generating",
+    )
+    db.jobs[job_id] = Job(
+        id=job_id,
+        user_id=1,
+        project_id=project_id,
+        job_type="asset_image",
+        target_id=str(asset_id),
+        status="queued",
+        step_index=0,
+        step_total=4,
+        step_label="排队",
+        progress=0,
+        input_payload={
+            "assetId": str(asset_id),
+            "modelId": "gemini-nano-banana-2.1",
+            "tier": "2k",
+            "ratio": "16:9",
+            "prompt": "电影写实肖像",
+            "referenceUrls": ["https://img.example/ref1.png"],
+        },
+    )
+    db.reservations[res_id] = CreditReservation(
+        id=res_id,
+        user_id=1,
+        business_type="image",
+        business_id=job_id,
+        model_id="gemini-nano-banana-2.1",
+        amount=Decimal("8.0000"),
+        consumed=None,
+        status="frozen",
+        rate_snapshot={"tier": "2k"},
+    )
+
+    recorded_submit: list[tuple[str, dict]] = []
+    recorded_query: list[tuple[str, bool]] = []
+
+    class RecordingGeminiAdapter(CangyuanImageAdapter):
+        async def submit(self, **kwargs) -> ImageProviderResult:
+            recorded_submit.append((kwargs["endpoint"], kwargs["payload"]))
+            return ImageProviderResult(task_id="task_gemini_001", status="pending")
+
+        async def query(self, **kwargs) -> ImageProviderResult:
+            recorded_query.append((kwargs["endpoint"], bool(kwargs.get("preserve_endpoint"))))
+            return ImageProviderResult(
+                task_id="task_gemini_001",
+                status="completed",
+                url="https://upstream.example/gemini-out.png",
+            )
+
+    async def fake_download(_url: str) -> bytes:
+        return _PNG_BYTES
+
+    await run_asset_image_job_core(
+        sessions=db.session_factory,
+        redis=redis,
+        settings=Settings(environment="test"),
+        job_id=job_id,
+        adapter=RecordingGeminiAdapter(),
+        storage_loader=lambda _s: _async_return(storage),
+        downloader=fake_download,
+        poll_interval_seconds=0.0,
+    )
+
+    assert len(recorded_submit) == 1
+    assert recorded_submit[0][0] == "edits"
+    assert recorded_submit[0][1]["quality"] == "2k"
+    assert "tier" not in recorded_submit[0][1]
+    assert recorded_query == [("edits", True)]
+    assert db.jobs[job_id].status == "succeeded"
+    assert db.reservations[res_id].status == "settled"
+
+
 async def test_asset_variant_lifecycle_validation_and_parent_promotion():
     from app.core.errors import AppError
     from app.modules.studio.models import Project

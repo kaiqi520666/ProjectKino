@@ -109,7 +109,11 @@ async def sweep_stale_jobs_once(
                     "后台执行超时或进程中断，未获取到供应商任务号，已转人工核对（冻结积分暂保留）"
                 )
                 job.finished_at = current
-                if job.job_type == "asset_image" and job.target_id:
+                if (
+                    job.job_type == "asset_image"
+                    and job.target_id
+                    and (job.input_payload or {}).get("action") != "clip_storyboard_grid"
+                ):
                     asset = await session.scalar(
                         select(ProjectAsset).where(ProjectAsset.id == UUID(job.target_id))
                     )

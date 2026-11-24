@@ -52,6 +52,80 @@ _SHOT_PROTOCOL_POLLUTION = re.compile(
     r"(?:@\[?图片\d+\]?|<Picture\s*\d+>|【镜头\s*\d*】|\[Shot\s*\d+\])",
     re.IGNORECASE,
 )
+_CROSS_CLIP_REF_POLLUTION = re.compile(
+    r"(?:承接上[一段镜场幕]|紧接上[一段镜场幕]|延续上[一段镜场幕]|衔接上[一段镜场幕]|接续上[一段镜场幕]|"
+    r"承接前[一段镜场幕]|紧接前[一段镜场幕]|延续前[一段镜场幕]|"
+    r"上一段|前一段|上一镜|前一镜|上一场|前一场|刚才|此前|先前|原本所在)"
+)
+_TIMELINE_TRANSITION_POLLUTION = re.compile(
+    r"(?:随后|紧接着|接着|然后|片刻后|一会儿后|不久后|转眼|上课后|下课后|散场后|之后(?:又|再)?)"
+)
+_STATIC_LAYOUT_ACTION_POLLUTION = re.compile(
+    r"(?:起身|转身(?:离开|走向|走出|走进|离去)|回到|走回|跑回|走出|走进|跑出|跑进|冲出|冲进|"
+    r"推门进来|推门进入|推门走出|从.{0,8}离开|离开(?:教室|房间|现场|画面)|领.{0,10}(?:进来|进入|走出)|"
+    r"缓慢移动|快步走|迈步走)"
+)
+_LEGACY_CROSS_CLIP_PREFIX = re.compile(r"^(?:承接|紧接|延续|衔接)上[一段镜场幕][：:，,\s]*")
+
+
+def _render_spatial_composition(scene_layout: str, character_positions: list[str]) -> str:
+    layout = scene_layout.strip().rstrip("。；; ")
+    positions = [item.strip().rstrip("。；; ") for item in character_positions if item.strip()]
+    if not positions:
+        return f"{layout}。" if layout else ""
+    joined_positions = "；".join(positions)
+    return f"{layout}。{joined_positions}。" if layout else f"{joined_positions}。"
+
+
+def _extract_scene_layout_anchor(raw_blocking: str) -> str:
+    cleaned = _LEGACY_CROSS_CLIP_PREFIX.sub("", (raw_blocking or "").strip()).strip()
+    if not cleaned:
+        return ""
+    first_sentence = cleaned.split("。", 1)[0].strip().rstrip("；; ")
+    return first_sentence
+
+
+def _validate_static_spatial_fields(
+    scene_layout: str,
+    character_positions: list[str],
+    *,
+    require_positions: bool,
+    prefix: str = "",
+) -> str | None:
+    non_empty_positions = [item.strip() for item in character_positions if item.strip()]
+    if require_positions and not non_empty_positions:
+        return (
+            f"{prefix}包含出镜角色，characterPositions 至少需要填写 1 条纯静态站位关系"
+            "（格式：角色名：位置与静态姿态，面朝方向）。"
+        )
+    fields: list[tuple[str, str]] = [("sceneLayout", scene_layout)]
+    fields.extend((f"characterPositions[{idx}]", pos) for idx, pos in enumerate(non_empty_positions, 1))
+    for field_name, value in fields:
+        bad_cross = _CROSS_CLIP_REF_POLLUTION.search(value)
+        if bad_cross:
+            return (
+                f"{prefix}{field_name} 中出现了跨段指代「{bad_cross.group(0)}」。"
+                "视频模型看不到上一段画面，请改写为 100% 独立自洽的当前静态空间描述。"
+            )
+        bad_timeline = _TIMELINE_TRANSITION_POLLUTION.search(value)
+        if bad_timeline:
+            return (
+                f"{prefix}{field_name} 中出现了时间推进词「{bad_timeline.group(0)}」。"
+                "空间构图字段只写固定空间与主导静态站位，时间推移请写进各镜头的 shot。"
+            )
+        bad_action = _STATIC_LAYOUT_ACTION_POLLUTION.search(value)
+        if bad_action:
+            return (
+                f"{prefix}{field_name} 中出现了动态走位/动作「{bad_action.group(0)}」。"
+                "这里只写静态位置、姿态与朝向，移动与进出场动作一律写进各镜头的 shot。"
+            )
+        bad_time = _SHOT_TIME_POLLUTION.search(value)
+        if bad_time:
+            return f"{prefix}{field_name} 中出现了时间/秒数「{bad_time.group(0)}」，请删掉。"
+        bad_proto = _SHOT_PROTOCOL_POLLUTION.search(value)
+        if bad_proto:
+            return f"{prefix}{field_name} 中出现了协议标记「{bad_proto.group(0)}」，请删掉。"
+    return None
 
 
 @dataclass(frozen=True)
@@ -100,10 +174,15 @@ class CutDesign(Record):
 class SegmentDesign(Record):
     id: int
     references: Annotated[list[str], Field(min_length=1, max_length=6)]
-    blocking: Text
+    sceneLayout: Text
+    characterPositions: Annotated[list[Text], Field(max_length=8)] = Field(default_factory=list)
     soundscape: str = ""
     music: str = ""
     cuts: list[CutDesign]
+
+    @property
+    def blocking(self) -> str:
+        return _render_spatial_composition(self.sceneLayout, self.characterPositions)
 
 
 class StoryboardDesign(Record):
@@ -180,6 +259,34 @@ def _display_asset_name(
     return f"{base_name}（{label}）" if label else base_name
 
 
+def _cut_time_ranges(
+    durations: list[float], total_seconds: int | None = None
+) -> list[tuple[int, int]]:
+    if not durations:
+        return []
+    raw_total = sum(max(0.1, float(d)) for d in durations)
+    target_total = max(
+        len(durations),
+        int(round(total_seconds if total_seconds is not None else raw_total)),
+    )
+    scale = target_total / raw_total if raw_total > 0 else 1.0
+    ranges: list[tuple[int, int]] = []
+    elapsed = 0.0
+    prev_end = 0
+    count = len(durations)
+    for idx, dur in enumerate(durations):
+        elapsed += max(0.1, float(dur)) * scale
+        if idx == count - 1:
+            end = max(prev_end + 1, target_total)
+        else:
+            remaining = count - 1 - idx
+            end = round(elapsed)
+            end = max(prev_end + 1, min(target_total - remaining, end))
+        ranges.append((prev_end, end))
+        prev_end = end
+    return ranges
+
+
 def _reference_order(ids: list[str], catalog: dict[str, Asset] | None = None) -> list[str]:
     order = {"character": 0, "scene": 1, "prop": 2}
     return sorted(
@@ -233,11 +340,19 @@ def compose_seedance(
 
     blocks.extend(["", "【人物关系与构图逻辑】", design.blocking])
 
-    for cut, shot in zip(segment.cuts, sorted(design.cuts, key=lambda item: item.index), strict=False):
+    time_ranges = _cut_time_ranges(
+        [cut.seconds for cut in segment.cuts],
+        total_seconds=int(round(segment.seconds)),
+    )
+    for (cut, shot), (start_s, end_s) in zip(
+        zip(segment.cuts, sorted(design.cuts, key=lambda item: item.index), strict=False),
+        time_ranges,
+        strict=False,
+    ):
         blocks.extend(
             [
                 "",
-                f"【镜头{cut.index}】",
+                f"【镜头{cut.index}｜{start_s}-{end_s}s】",
                 f"焦距：{shot.lens}",
                 f"机位：{shot.cameraPosition}",
                 f"构图：{shot.composition}",
@@ -306,6 +421,18 @@ def verify_designs(ctx: RunContext[DesignContext], design: StoryboardDesign) -> 
             for asset_id in segment.references
         ):
             _retry(f"第 {segment.id} 段的 references 必须包含场景。", meta)
+        has_character = any(
+            ctx.deps.kind_by_id.get(asset_id, _asset_kind(asset_id)) == "character"
+            for asset_id in segment.references
+        )
+        spatial_err = _validate_static_spatial_fields(
+            segment.sceneLayout,
+            segment.characterPositions,
+            require_positions=has_character,
+            prefix=f"第 {segment.id} 段的 ",
+        )
+        if spatial_err:
+            _retry(spatial_err, meta)
         for cut in segment.cuts:
             for name in ctx.deps.forbidden_names:
                 if name and name in cut.shot:
@@ -590,7 +717,16 @@ async def write_designs(
             "segments": batch_segments_payload,
         }
         if previous_blocking is not None:
-            payload["previousBlocking"] = previous_blocking
+            prev_layout = str(
+                previous_blocking.get("sceneLayout")
+                or _extract_scene_layout_anchor(str(previous_blocking.get("blocking") or ""))
+            ).strip()
+            if prev_layout:
+                payload["previousSceneLayout"] = {
+                    "sceneId": previous_blocking.get("sceneId", ""),
+                    "scene": previous_blocking.get("scene", ""),
+                    "sceneLayout": prev_layout,
+                }
         if feedback.strip():
             payload["directorFeedback"] = feedback.strip()
         result = await agent.run(
@@ -613,7 +749,7 @@ async def write_designs(
             "segmentId": last_segment.index,
             "sceneId": last_segment.scene.sceneId,
             "scene": scene_names.get(last_segment.scene.sceneId, last_segment.scene.sceneId),
-            "blocking": designs[last_segment.index].blocking,
+            "sceneLayout": designs[last_segment.index].sceneLayout,
         }
         if on_batch_complete is not None:
             await on_batch_complete(
@@ -765,10 +901,15 @@ class FreeformCutDesign(Record):
 
 class FreeformClipDesign(Record):
     references: list[str] = Field(default_factory=list, max_length=6)
-    blocking: Text
+    sceneLayout: Text
+    characterPositions: Annotated[list[Text], Field(max_length=8)] = Field(default_factory=list)
     soundscape: str = ""
     music: str = ""
     cuts: Annotated[list[FreeformCutDesign], Field(min_length=1, max_length=12)]
+
+    @property
+    def blocking(self) -> str:
+        return _render_spatial_composition(self.sceneLayout, self.characterPositions)
 
 
 @dataclass(frozen=True)
@@ -776,6 +917,7 @@ class FreeformClipContext:
     allowed_refs: frozenset[str]
     require_refs: bool
     root_by_id: dict[str, str]
+    kind_by_id: dict[str, Literal["character", "scene", "prop"]]
     forbidden_names: tuple[str, ...]
     min_cuts: int
     max_cuts: int
@@ -789,11 +931,21 @@ _FREEFORM_CLIP_INSTRUCTIONS = (
     "同一角色/场景/道具严禁同时选中主设定与变体，尽量包含场景与出镜人物。\n"
     "- 若输入提供了 lockedReferenceSlots（锁定当前参考素材），则 references 留空数组 []，"
     "画面与人物调度必须严格围绕已锁定的参考素材展开。\n"
+    "- sceneLayout 只写本段场景的纯静态固定空间格局与主光方向"
+    "（门窗、家具、地标的左右前后关系及主光源方向）。\n"
+    "- characterPositions 按「每名主要出镜角色一条」写本段主导构图中的纯静态站位关系"
+    "（格式：角色名：所处位置与静态姿态（站/坐/趴/蹲），面朝方向；无人物出镜时留空数组 []）。\n"
+    "- 视频模型在独立片段间无状态，完全看不到前后片段的画面："
+    "sceneLayout 与 characterPositions 必须 100% 独立自洽，"
+    "严禁出现「承接上段 / 紧接前段 / 上一段 / 刚才」等跨段元指代，"
+    "也严禁写时间推进词（随后/接着/之后）与人物移动、进出场等动作过程"
+    "（所有走位、进出场与动作变化一律写在各镜头的 shot 里）。\n"
     "- cuts 数量必须在 cutCountRange 内，各镜 seconds 之和应接近 durationSeconds（每镜约 2–5 秒）。\n"
     "- shot（画面）中严禁出现角色姓名、秒数/时间范围、镜头编号或 @[图片N] 协议标记，"
     "用外观/身份描述动作细节。\n"
     "- 若本镜有对白，在 dialogue 填「台词（角色，情绪）：对白内容」；无对白则 dialogue 留空字符串。\n"
-    "- 若存在 prevClip / nextClip，blocking 与画面需自然承接前后镜头的人物站位与情绪节奏。\n"
+    "- 若存在 prevClip / nextClip，仅用于参考同场景的固定空间朝向"
+    "（如门窗与主光方向不镜像翻转）及保持剧情走向连贯，绝不在输出文本中提及前后片段。\n"
     "- 若输入有 directorFeedback，必须优先落实其中的构图、运镜、光影、节奏或服装/变体要求。"
 )
 
@@ -812,6 +964,16 @@ def _verify_freeform_clip(
         roots = [ctx.deps.root_by_id.get(aid, aid) for aid in design.references]
         if len(set(roots)) != len(roots):
             raise ModelRetry("同一角色/场景/道具在单段内只能选 1 个版本（主图或其中一个变体），不能同时选。")
+    has_character = ctx.deps.require_refs and any(
+        ctx.deps.kind_by_id.get(aid, _asset_kind(aid)) == "character" for aid in design.references
+    )
+    spatial_err = _validate_static_spatial_fields(
+        design.sceneLayout,
+        design.characterPositions,
+        require_positions=has_character,
+    )
+    if spatial_err:
+        raise ModelRetry(spatial_err)
     if not (ctx.deps.min_cuts <= len(design.cuts) <= ctx.deps.max_cuts):
         raise ModelRetry(
             f"镜头数量（cuts）需在 {ctx.deps.min_cuts}–{ctx.deps.max_cuts} 之间以匹配目标时长，"
@@ -842,6 +1004,7 @@ def _compose_freeform_seedance(
     assets: AssetResult,
     slot_headers: list[str],
     ordered_asset_ids: list[str],
+    duration_seconds: int | None = None,
 ) -> str:
     catalog = {asset.id: asset for asset in assets.assets}
     names = {
@@ -867,14 +1030,19 @@ def _compose_freeform_seedance(
 
     blocks.extend(["", "【人物关系与构图逻辑】", design.blocking])
 
-    for idx, shot in enumerate(sorted(design.cuts, key=lambda item: item.index), 1):
+    ordered_cuts = sorted(design.cuts, key=lambda item: item.index)
+    time_ranges = _cut_time_ranges(
+        [shot.seconds for shot in ordered_cuts],
+        total_seconds=duration_seconds,
+    )
+    for idx, (shot, (start_s, end_s)) in enumerate(zip(ordered_cuts, time_ranges, strict=False), 1):
         dialogue_line = shot.dialogue.strip() or "台词：{}"
         if dialogue_line != "台词：{}" and not dialogue_line.startswith("台词"):
             dialogue_line = f"台词：{dialogue_line}"
         blocks.extend(
             [
                 "",
-                f"【镜头{idx}】",
+                f"【镜头{idx}｜{start_s}-{end_s}s】",
                 f"焦距：{shot.lens}",
                 f"机位：{shot.cameraPosition}",
                 f"构图：{shot.composition}",
@@ -1009,12 +1177,26 @@ async def _run_freeform_clip_agent(
         payload["lockedReferenceSlots"] = locked_slot_payload
     else:
         payload["availableAssets"] = available_options
+    kind_by_id: dict[str, Literal["character", "scene", "prop"]] = {
+        aid: _asset_kind(aid, catalog) for aid in catalog
+    }
+
+    def _neighbor_payload(clip_ctx: dict) -> dict:
+        out = {k: v for k, v in clip_ctx.items() if k != "blocking"}
+        layout = str(
+            clip_ctx.get("sceneLayout")
+            or _extract_scene_layout_anchor(str(clip_ctx.get("blocking") or ""))
+        ).strip()
+        if layout:
+            out["sceneLayout"] = layout
+        return out
+
     if current_prompt.strip():
         payload["currentPrompt"] = current_prompt.strip()
     if prev_clip:
-        payload["prevClip"] = prev_clip
+        payload["prevClip"] = _neighbor_payload(prev_clip)
     if next_clip:
-        payload["nextClip"] = next_clip
+        payload["nextClip"] = _neighbor_payload(next_clip)
     if feedback.strip():
         payload["directorFeedback"] = feedback.strip()
 
@@ -1033,6 +1215,7 @@ async def _run_freeform_clip_agent(
             allowed_refs=allowed_refs,
             require_refs=not use_locked and bool(allowed_refs),
             root_by_id=root_by_id,
+            kind_by_id=kind_by_id,
             forbidden_names=tuple(c.name for c in script.outline.characters),
             min_cuts=min_cuts,
             max_cuts=max_cuts,
@@ -1068,6 +1251,7 @@ async def _run_freeform_clip_agent(
         assets=assets,
         slot_headers=slot_headers,
         ordered_asset_ids=ordered_ids,
+        duration_seconds=duration_seconds,
     )
     cuts_out = [
         StoryboardCut(
@@ -1123,14 +1307,21 @@ async def regenerate_clip_storyboard(
             **{card.id: card.name for card in script.outline.scenes},
             **{prop.id: prop.name for prop in script.outline.props},
         }
+        prev_layout_anchor = (
+            _extract_scene_layout_anchor(
+                str(prev_clip.get("sceneLayout") or prev_clip.get("blocking") or "")
+            )
+            if prev_clip
+            else ""
+        )
         initial_blocking = (
             {
                 "segmentId": max(1, matched_segment.index - 1),
                 "sceneId": matched_segment.scene.sceneId,
                 "scene": names.get(matched_segment.scene.sceneId, matched_segment.scene.sceneId),
-                "blocking": prev_clip.get("blocking", ""),
+                "sceneLayout": prev_layout_anchor,
             }
-            if prev_clip and prev_clip.get("blocking")
+            if prev_layout_anchor
             else None
         )
         designs = await write_designs(

@@ -60,9 +60,12 @@ function handleBackdropClick(event: MouseEvent) {
       >
         <header class="media-preview-header">
           <DialogTitle class="media-preview-title" :title="title">{{ title }}</DialogTitle>
-          <DialogClose class="ui-icon-button media-preview-close" aria-label="关闭预览" title="关闭预览">
-            <X :size="21" aria-hidden="true" />
-          </DialogClose>
+          <div class="media-preview-header-actions">
+            <slot name="header-actions" />
+            <DialogClose class="ui-icon-button media-preview-close" aria-label="关闭预览" title="关闭预览">
+              <X :size="21" aria-hidden="true" />
+            </DialogClose>
+          </div>
         </header>
         <div class="media-preview-content"><slot /></div>
         <footer v-if="$slots.toolbar" class="media-preview-footer"><slot name="toolbar" /></footer>
@@ -85,6 +88,7 @@ function handleBackdropClick(event: MouseEvent) {
   outline: none;
 }
 .media-preview-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 8px; }
+.media-preview-header-actions { display: inline-flex; flex-shrink: 0; align-items: center; gap: 8px; }
 .media-preview-title {
   overflow: hidden;
   margin: 0;

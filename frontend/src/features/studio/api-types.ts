@@ -224,10 +224,42 @@ export interface ProjectSummaryOut {
   name: string
   mode: 'story' | 'upload'
   settings: BackendSettings
+  coverUrl?: string | null
+  coverKey?: string | null
+  autoCoverUrl?: string | null
   scriptConfirmed: boolean
   episodeCount: number
+  plannedEpisodeCount?: number
   assetCount: number
+  assetImageReadyCount?: number
+  storyboardEpisodeCount?: number
+  clipCount?: number
+  clipVideoReadyCount?: number
+  composedEpisodeCount?: number
   createdAt: string
+  updatedAt: string
+}
+
+export interface ProjectMetaUpdatePayload {
+  name?: string
+  ratio?: ImageAspectRatio
+  visualStyle?: string
+  visualStyleLabel?: string | null
+  maxSegmentDuration?: 15 | 30
+  backgroundMusic?: boolean
+  imageModelId?: string | null
+  imageTier?: 'web' | '1k' | '2k' | '4k' | null
+  videoModelId?: string | null
+  coverUrl?: string | null
+  coverKey?: string | null
+}
+
+export interface ProjectMetaOut {
+  id: string
+  name: string
+  settings: BackendSettings
+  coverUrl?: string | null
+  coverKey?: string | null
   updatedAt: string
 }
 
@@ -283,8 +315,13 @@ export interface PersistedAssetOut {
   lastJobError?: string | null
 }
 
-export type ClipReferenceKind = StudioAssetKind | 'image' | 'video' | 'audio'
+export type ClipReferenceKind = StudioAssetKind | 'image' | 'video' | 'audio' | 'storyboard_grid'
 export type ClipReferenceMediaKind = 'image' | 'video' | 'audio'
+
+export interface StoryboardGridCellMappingItem {
+  cutIndex: number
+  cells: number[]
+}
 
 export interface PersistedClipReference {
   index: number
@@ -294,6 +331,8 @@ export interface PersistedClipReference {
   kind: ClipReferenceKind
   mediaKind?: ClipReferenceMediaKind
   mediaUrl?: string
+  gridLayout?: string
+  cellMapping?: StoryboardGridCellMappingItem[]
 }
 
 export interface PersistedClipOut {
@@ -323,6 +362,8 @@ export interface ProjectDetailOut {
   mode: 'story' | 'upload'
   sourceText: string
   settings: BackendSettings
+  coverUrl?: string | null
+  coverKey?: string | null
   outline?: BackendOutline | null
   scriptConfirmed: boolean
   episodes: PersistedEpisodeOut[]

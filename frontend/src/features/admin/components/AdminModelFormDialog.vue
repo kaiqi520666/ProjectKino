@@ -18,8 +18,12 @@ const ALL_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'] as const
 const ALL_IMAGE_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4', '3:2', '2:3', '5:4', '4:5', '21:9', '9:21', 'auto'] as const
 const ALL_TIERS = ['web', '1k', '2k', '4k'] as const
 const VIDEO_CATEGORY_PRESETS = ['Seedance 2.0', 'Seedance 2.5', 'Seedance 2.5 Flash', 'Wan 3.0'] as const
-const IMAGE_CATEGORY_PRESETS = ['GPT Image 2', 'GPT Image 2.5', 'GPT Image 2.6'] as const
+const IMAGE_CATEGORY_PRESETS = ['GPT Image 2', 'GPT Image 2.5', 'GPT Image 2.6', 'Gemini 图像'] as const
 const TEXT_CATEGORY_PRESETS = ['OpenRouter'] as const
+const IMAGE_PROTOCOL_OPTIONS = [
+  { value: 'gpt_image', label: 'GPT Image（tier + quality）' },
+  { value: 'gemini_quality', label: 'Gemini 图像（quality = 1k/2k/4k）' },
+] as const
 const IMAGE_SERIES_OPTIONS = [
   { value: '', label: '标准（无变体）' },
   { value: 'flare', label: 'Flare 极速' },
@@ -110,6 +114,7 @@ const form = reactive({
   textInputPrice: '0',
   textCachedPrice: '0',
   textOutputPrice: '0',
+  imageProtocol: 'gpt_image' as 'gpt_image' | 'gemini_quality',
   imageSeries: '' as '' | 'flare' | 'sunburst',
   imageQuality: 'high',
   imageRatios: [...ALL_IMAGE_RATIOS] as string[],
@@ -149,6 +154,7 @@ function initForm() {
     form.textInputPrice = createText ? '2' : '0'
     form.textCachedPrice = createText ? '0.2' : '0'
     form.textOutputPrice = createText ? '3' : '0'
+    form.imageProtocol = 'gpt_image'
     form.imageSeries = createImage ? 'flare' : ''
     form.imageQuality = 'high'
     form.imageRatios = [...ALL_IMAGE_RATIOS]
@@ -196,6 +202,7 @@ function initForm() {
   form.textCachedPrice = m.textPrice?.cachedInputPricePerMillion ?? '0'
   form.textOutputPrice = m.textPrice?.outputPricePerMillion ?? '0'
 
+  form.imageProtocol = cfg.protocol === 'gemini_quality' ? 'gemini_quality' : 'gpt_image'
   const rawSeries = cfg.series ?? caps.variant
   form.imageSeries = rawSeries === 'flare' || rawSeries === 'sunburst' ? rawSeries : ''
   form.imageQuality = typeof cfg.quality === 'string' && cfg.quality ? cfg.quality : 'high'
@@ -305,25 +312,39 @@ async function submit() {
   } else if (form.mediaType === 'image') {
     const orderedTiers = ALL_TIERS.filter((t) => form.imagePrices.some((p) => p.tier === t))
     const orderedImgRatios = ALL_IMAGE_RATIOS.filter((r) => form.imageRatios.includes(r))
+    const isGemini = form.imageProtocol === 'gemini_quality'
+    const maxImgRefs = Math.max(0, Number.parseInt(form.maxReferenceImages, 10) || (isGemini ? 14 : 9))
     capabilities = {
       ...capabilities,
       description: form.description.trim(),
-      variant: form.imageSeries,
-      tiers: orderedTiers.length ? orderedTiers : ['web', '1k', '2k', '4k'],
+      variant: isGemini ? '' : form.imageSeries,
+      tiers: orderedTiers.length ? orderedTiers : (isGemini ? ['1k', '2k', '4k'] : ['web', '1k', '2k', '4k']),
       ratios: orderedImgRatios.length ? orderedImgRatios : [...ALL_IMAGE_RATIOS],
       aspectRatios: { character: '16:9', scene: '16:9', prop: '1:1' },
-      maxReferenceImages: 9,
-      supportsMask: true,
+      maxReferenceImages: maxImgRefs,
+      supportsMask: !isGemini,
     }
     defaults = { ...defaults, tier: orderedTiers.includes('1k') ? '1k' : (orderedTiers[0] ?? '1k') }
-    configuration = {
-      ...configuration,
-      quality: form.imageQuality || 'high',
-    }
-    if (form.imageSeries) {
-      configuration.series = form.imageSeries
-    } else {
+    if (isGemini) {
+      configuration = {
+        ...configuration,
+        protocol: 'gemini_quality',
+        pollBySubmitEndpoint: true,
+      }
       delete configuration.series
+      delete configuration.quality
+    } else {
+      configuration = {
+        ...configuration,
+        quality: form.imageQuality || 'high',
+      }
+      delete configuration.protocol
+      delete configuration.pollBySubmitEndpoint
+      if (form.imageSeries) {
+        configuration.series = form.imageSeries
+      } else {
+        delete configuration.series
+      }
     }
   }
 
@@ -561,6 +582,28 @@ async function submit() {
 
       <template v-else-if="form.mediaType === 'image'">
         <div class="admin-settings-grid">
+          <div class="ui-field">
+            <label class="ui-label">参数协议</label>
+            <div class="admin-chip-group">
+              <button
+                v-for="opt in IMAGE_PROTOCOL_OPTIONS"
+                :key="opt.value"
+                type="button"
+                class="admin-chip"
+                :class="{ 'is-active': form.imageProtocol === opt.value }"
+                @click="form.imageProtocol = opt.value"
+              >
+                {{ opt.label }}
+              </button>
+            </div>
+          </div>
+          <div class="ui-field">
+            <label class="ui-label">最多参考图数</label>
+            <input v-model="form.maxReferenceImages" class="ui-input admin-mono" type="number" min="0" max="20" />
+          </div>
+        </div>
+
+        <div v-if="form.imageProtocol === 'gpt_image'" class="admin-settings-grid">
           <div class="ui-field">
             <label class="ui-label">变体通道（series）</label>
             <div class="admin-chip-group">

@@ -32,12 +32,18 @@ from app.modules.credits.service import (
 )
 from app.modules.jobs.models import Job
 from app.modules.jobs.service import (
+    TERMINAL_STATUSES,
     claim_job_lease,
     heartbeat_job_lease,
     publish_job_event,
     update_job_progress,
 )
 from app.modules.llm_engine.asset_gen import analyze_assets
+from app.modules.llm_engine.keyframe_grid_gen import (
+    GRID_LAYOUT_LABELS,
+    plan_keyframe_grid,
+    upsert_storyboard_grid_prompt,
+)
 from app.modules.llm_engine.provider import DEFAULT_TEXT_MODEL_ID, resolve_text_model
 from app.modules.llm_engine.schema import AssetResult, ProjectSettings
 from app.modules.llm_engine.script_gen import (
@@ -1582,6 +1588,7 @@ async def run_asset_image_job_core(
     poll_interval_seconds: float = 5.0,
     max_wait_seconds: float = 600.0,
     concurrency_semaphore: asyncio.Semaphore | None = None,
+    grid_planner_model_override: tuple[Any, str] | None = None,
 ) -> None:
     """
     沧元资产生图核心状态机：
@@ -1602,6 +1609,7 @@ async def run_asset_image_job_core(
             downloader=downloader,
             poll_interval_seconds=poll_interval_seconds,
             max_wait_seconds=max_wait_seconds,
+            grid_planner_model_override=grid_planner_model_override,
         )
 
 
@@ -1616,6 +1624,7 @@ async def _execute_asset_image_under_slot(
     downloader: Callable[[str], Awaitable[bytes]] = download_public_media,
     poll_interval_seconds: float = 5.0,
     max_wait_seconds: float = 600.0,
+    grid_planner_model_override: tuple[Any, str] | None = None,
 ) -> None:
     claimed = await claim_job_lease(sessions, job_id)
     if claimed is None:
@@ -1627,8 +1636,18 @@ async def _execute_asset_image_under_slot(
     client_adapter = adapter or CangyuanImageAdapter()
     payload_in = dict(job.input_payload or {})
     is_canvas = job.job_type == "canvas_image"
-    asset_id = None if is_canvas else UUID(str(job.target_id or payload_in["assetId"]))
+    is_clip_grid = (not is_canvas) and payload_in.get("action") == "clip_storyboard_grid"
+    clip_id = UUID(str(job.target_id or payload_in["clipId"])) if is_clip_grid else None
+    asset_id = (
+        None
+        if (is_canvas or is_clip_grid)
+        else UUID(str(job.target_id or payload_in["assetId"]))
+    )
     canvas_node_id = str(job.target_id or payload_in.get("nodeId") or "") if is_canvas else ""
+    clip_index = int(payload_in.get("clipIndex") or 1)
+    episode_number = int(payload_in.get("episodeNumber") or 1)
+    grid_layout = str(payload_in.get("gridLayout") or "")
+    cell_mapping: list[dict[str, Any]] = list(payload_in.get("cellMapping") or [])
 
     async def set_progress(step_index: int, label: str, progress: int) -> None:
         await update_job_progress(
@@ -1643,6 +1662,122 @@ async def _execute_asset_image_under_slot(
         )
 
     try:
+        existing_task_id = job.provider_task_id
+        if is_clip_grid and not existing_task_id and not str(payload_in.get("prompt") or "").strip():
+            await set_progress(1, f"正在规划片段 {clip_index} 的分镜宫格布局...", 8)
+            async with sessions() as read_db:
+                db_clip = await read_db.scalar(
+                    select(StoryboardClip).where(StoryboardClip.id == clip_id)
+                )
+                if db_clip is None:
+                    raise MediaProviderError("clip_not_found", "关联片段不存在", rejected=True)
+                project = await read_db.scalar(select(Project).where(Project.id == db_clip.project_id))
+                if project is None:
+                    raise MediaProviderError("project_not_found", "关联项目不存在", rejected=True)
+                project_assets = list(
+                    await read_db.scalars(
+                        select(ProjectAsset).where(ProjectAsset.project_id == project.id)
+                    )
+                )
+                if grid_planner_model_override is not None:
+                    text_model, text_model_id = grid_planner_model_override
+                else:
+                    text_model, text_model_id = await resolve_text_model(read_db)
+
+                proj_settings = dict(project.settings or {})
+                visual_style = str(
+                    proj_settings.get("visualStyleLabel")
+                    or proj_settings.get("visualStyle")
+                    or "电影写实"
+                )
+                outline = project.outline if isinstance(project.outline, dict) else {}
+                world = outline.get("world") if isinstance(outline.get("world"), dict) else {}
+                world_summary = "；".join(
+                    part
+                    for part in (
+                        str(world.get("era") or "").strip(),
+                        str(world.get("baseline") or "").strip(),
+                    )
+                    if part
+                )
+                ratio_for_plan = str(payload_in.get("ratio") or proj_settings.get("ratio") or "16:9")
+                by_uuid = {str(a.id): a for a in project_assets}
+                by_code = {a.asset_code: a for a in project_assets}
+                ref_assets_payload: list[dict[str, Any]] = []
+                for pos, raw_ref in enumerate(list(db_clip.references or []), 1):
+                    if not isinstance(raw_ref, dict):
+                        continue
+                    if raw_ref.get("kind") == "storyboard_grid":
+                        continue
+                    rid = str(raw_ref.get("assetId") or "").strip()
+                    rcode = str(raw_ref.get("assetCode") or "").strip()
+                    matched = by_uuid.get(rid) or by_code.get(rcode) or by_code.get(rid)
+                    if matched is not None:
+                        ref_assets_payload.append(
+                            {
+                                "slot": pos,
+                                "kind": matched.kind,
+                                "name": matched.name,
+                                "appearance": (matched.description or matched.prompt or "")[:160],
+                            }
+                        )
+                forbidden_names = tuple(
+                    a.name.strip()
+                    for a in project_assets
+                    if a.kind == "character" and a.name and a.name.strip()
+                )
+                clip_cuts = list(db_clip.cuts or [])
+                clip_blocking = str(db_clip.blocking or "")
+                clip_prompt_text = str(db_clip.prompt or "")
+                clip_index = db_clip.clip_index
+
+            plan_usage = RunUsage()
+            async with acquire_llm_slot(redis, settings, text_model_id):
+                planned = await plan_keyframe_grid(
+                    text_model,
+                    cuts=clip_cuts,
+                    blocking=clip_blocking,
+                    clip_prompt=clip_prompt_text,
+                    ratio=ratio_for_plan,
+                    visual_style=visual_style,
+                    world_summary=world_summary,
+                    reference_assets=ref_assets_payload,
+                    forbidden_names=forbidden_names,
+                    usage=plan_usage,
+                )
+            grid_layout = planned.grid_layout
+            cell_mapping = planned.cell_mapping
+            payload_in = {
+                **payload_in,
+                "prompt": planned.image_prompt,
+                "gridLayout": grid_layout,
+                "cellMapping": cell_mapping,
+            }
+            async with sessions() as write_db:
+                db_job_plan = await write_db.scalar(select(Job).where(Job.id == job_id))
+                if db_job_plan is not None:
+                    db_job_plan.input_payload = payload_in
+                if plan_usage.input_tokens > 0 or plan_usage.output_tokens > 0:
+                    try:
+                        ledger = await charge_llm_usage(
+                            write_db,
+                            user_id=job.user_id,
+                            model_id=text_model_id,
+                            input_tokens=plan_usage.input_tokens,
+                            cache_read_tokens=plan_usage.cache_read_tokens,
+                            output_tokens=plan_usage.output_tokens,
+                            job_id=job_id,
+                            idempotency_key=f"llm_grid_plan:{job_id}",
+                            reason=f"片段 {clip_index} 分镜宫格规划",
+                        )
+                        if db_job_plan is not None and ledger is not None:
+                            db_job_plan.usage_summary = _merge_usage_summary(
+                                db_job_plan.usage_summary, ledger.token_usage
+                            )
+                    except Exception:
+                        logger.exception("clip_grid_llm_charge_failed", job_id=str(job_id))
+                await write_db.commit()
+
         async with sessions() as session:
             if is_canvas:
                 if job.canvas_id is None or not canvas_node_id:
@@ -1651,6 +1786,13 @@ async def _execute_asset_image_under_slot(
                     )
                 model_id = str(payload_in.get("modelId") or "gpt-image-2")
                 tier = str(payload_in.get("tier") or "1k")
+                ratio = str(payload_in.get("ratio") or "16:9")
+                prompt = str(payload_in.get("prompt") or "").strip()
+            elif is_clip_grid:
+                if clip_id is None:
+                    raise MediaProviderError("clip_not_found", "关联片段不存在", rejected=True)
+                model_id = str(payload_in.get("modelId") or "gemini-nano-banana-2.1")
+                tier = str(payload_in.get("tier") or "2k")
                 ratio = str(payload_in.get("ratio") or "16:9")
                 prompt = str(payload_in.get("prompt") or "").strip()
             else:
@@ -1697,6 +1839,8 @@ async def _execute_asset_image_under_slot(
             provider_auth_header = provider.auth_header
             timeout_ms = int(provider.configuration.get("timeoutMs", 30000))
             timeout_seconds = max(5.0, min(timeout_ms / 1000.0, 120.0))
+            image_protocol = str(model.configuration.get("protocol") or "gpt_image")
+            poll_by_submit_endpoint = bool(model.configuration.get("pollBySubmitEndpoint"))
             req_payload, submit_endpoint = client_adapter.build_payload(
                 upstream_model_id=model.upstream_model_id,
                 prompt=prompt,
@@ -1705,8 +1849,9 @@ async def _execute_asset_image_under_slot(
                 quality=str(model.configuration.get("quality") or "high"),
                 series=model.configuration.get("series"),
                 reference_urls=reference_urls,
+                protocol=image_protocol,
             )
-            poll_endpoint = "generations"
+            poll_endpoint = submit_endpoint if poll_by_submit_endpoint else "generations"
             existing_task_id = job.provider_task_id
 
         if not existing_task_id:
@@ -1752,6 +1897,7 @@ async def _execute_asset_image_under_slot(
                 endpoint=poll_endpoint,
                 task_id=existing_task_id,
                 timeout_seconds=timeout_seconds,
+                preserve_endpoint=poll_by_submit_endpoint,
             )
 
         elapsed = 0.0
@@ -1785,6 +1931,7 @@ async def _execute_asset_image_under_slot(
                     endpoint=poll_endpoint,
                     task_id=existing_task_id,
                     timeout_seconds=timeout_seconds,
+                    preserve_endpoint=poll_by_submit_endpoint,
                 )
                 transient_errors = 0
             except MediaProviderError as poll_exc:
@@ -1824,6 +1971,14 @@ async def _execute_asset_image_under_slot(
             ) from None
 
         async with sessions() as session:
+            db_job = await session.scalar(
+                select(Job)
+                .where(Job.id == job_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if db_job is None or db_job.status in TERMINAL_STATUSES:
+                return
             reservation = await session.scalar(
                 select(CreditReservation).where(
                     CreditReservation.business_type == "image",
@@ -1831,15 +1986,21 @@ async def _execute_asset_image_under_slot(
                 )
             )
             if reservation is not None:
+                settle_reason = (
+                    f"画布生图完成结算 ({model_id}/{tier})"
+                    if is_canvas
+                    else (
+                        f"片段分镜宫格完成结算 (片段{clip_index} · {model_id}/{tier})"
+                        if is_clip_grid
+                        else f"资产生图完成结算 ({model_id}/{tier})"
+                    )
+                )
                 await settle_media_credits(
                     session,
                     reservation_id=reservation.id,
-                    reason=(
-                        f"画布生图完成结算 ({model_id}/{tier})"
-                        if is_canvas
-                        else f"资产生图完成结算 ({model_id}/{tier})"
-                    ),
+                    reason=settle_reason,
                 )
+            grid_image_slot = 0
             if is_canvas and job.canvas_id is not None:
                 await patch_canvas_node_media(
                     session,
@@ -1853,6 +2014,61 @@ async def _execute_asset_image_under_slot(
                     },
                     job_id=job_id,
                 )
+            elif is_clip_grid and clip_id is not None:
+                db_clip = await session.scalar(
+                    select(StoryboardClip).where(StoryboardClip.id == clip_id)
+                )
+                if db_clip is not None:
+                    layout_key = grid_layout or "3x3"
+                    layout_label = GRID_LAYOUT_LABELS.get(layout_key, layout_key.replace("x", "×"))
+                    grid_ref_entry: dict[str, Any] = {
+                        "index": 1,
+                        "assetId": f"grid:{db_clip.id}",
+                        "name": f"分镜宫格（{layout_label}）",
+                        "kind": "storyboard_grid",
+                        "mediaKind": "image",
+                        "mediaUrl": public_url,
+                        "gridLayout": layout_key,
+                        "cellMapping": cell_mapping,
+                    }
+                    existing_refs = [
+                        dict(item) for item in (db_clip.references or []) if isinstance(item, dict)
+                    ]
+                    replaced = False
+                    for idx, item in enumerate(existing_refs):
+                        if item.get("kind") == "storyboard_grid" or str(
+                            item.get("assetId") or ""
+                        ).startswith("grid:"):
+                            existing_refs[idx] = grid_ref_entry
+                            replaced = True
+                            break
+                    if not replaced:
+                        existing_refs.append(grid_ref_entry)
+                    reindexed_refs: list[dict[str, Any]] = []
+                    img_slot = 0
+                    for pos, item in enumerate(existing_refs, 1):
+                        item["index"] = pos
+                        media_kind = str(item.get("mediaKind") or "").strip().lower()
+                        raw_kind = str(item.get("kind") or "").strip().lower()
+                        is_image_ref = media_kind not in ("video", "audio") and raw_kind not in (
+                            "video",
+                            "audio",
+                        )
+                        if is_image_ref:
+                            img_slot += 1
+                        if item.get("kind") == "storyboard_grid" or str(
+                            item.get("assetId") or ""
+                        ).startswith("grid:"):
+                            grid_image_slot = img_slot
+                        reindexed_refs.append(item)
+                    db_clip.references = reindexed_refs
+                    if grid_image_slot > 0:
+                        db_clip.prompt = upsert_storyboard_grid_prompt(
+                            db_clip.prompt or "",
+                            slot_index=grid_image_slot,
+                            grid_layout=layout_key,
+                            cell_mapping=cell_mapping,
+                        )
             elif asset_id is not None:
                 db_asset = await session.scalar(select(ProjectAsset).where(ProjectAsset.id == asset_id))
                 if db_asset is not None:
@@ -1872,40 +2088,58 @@ async def _execute_asset_image_under_slot(
                         tier=tier,
                         ratio=ratio,
                     )
-            db_job = await session.scalar(select(Job).where(Job.id == job_id))
-            if db_job is not None:
-                db_job.status = "succeeded"
-                db_job.progress = 100
-                db_job.step_index = 4
-                db_job.step_total = 4
-                db_job.step_label = "画布图片生成完成" if is_canvas else "资产形象生成完成"
-                db_job.result_payload = (
-                    {
-                        "canvasId": str(job.canvas_id) if job.canvas_id else None,
-                        "nodeId": canvas_node_id,
-                        "imageUrl": public_url,
-                        "imageKey": key,
-                        "modelId": model_id,
-                        "tier": tier,
-                        "ratio": ratio,
-                    }
-                    if is_canvas
-                    else {
-                        "projectId": str(job.project_id) if job.project_id else None,
-                        "assetId": str(asset_id),
-                        "imageUrl": public_url,
-                        "imageKey": key,
-                        "modelId": model_id,
-                        "tier": tier,
-                        "ratio": ratio,
-                    }
+            db_job.status = "succeeded"
+            db_job.progress = 100
+            db_job.step_index = 4
+            db_job.step_total = 4
+            db_job.step_label = (
+                "画布图片生成完成"
+                if is_canvas
+                else (
+                    f"片段 {clip_index} 分镜宫格图生成完成"
+                    if is_clip_grid
+                    else "资产形象生成完成"
                 )
-                db_job.finished_at = datetime.now(UTC)
-                db_job.lease_token = None
+            )
+            if is_canvas:
+                db_job.result_payload = {
+                    "canvasId": str(job.canvas_id) if job.canvas_id else None,
+                    "nodeId": canvas_node_id,
+                    "imageUrl": public_url,
+                    "imageKey": key,
+                    "modelId": model_id,
+                    "tier": tier,
+                    "ratio": ratio,
+                }
+            elif is_clip_grid:
+                db_job.result_payload = {
+                    "projectId": str(job.project_id) if job.project_id else None,
+                    "episodeNumber": episode_number,
+                    "clipId": str(clip_id),
+                    "imageUrl": public_url,
+                    "imageKey": key,
+                    "modelId": model_id,
+                    "tier": tier,
+                    "ratio": ratio,
+                    "gridLayout": grid_layout or "3x3",
+                    "cellMapping": cell_mapping,
+                    "slotIndex": grid_image_slot,
+                }
+            else:
+                db_job.result_payload = {
+                    "projectId": str(job.project_id) if job.project_id else None,
+                    "assetId": str(asset_id),
+                    "imageUrl": public_url,
+                    "imageKey": key,
+                    "modelId": model_id,
+                    "tier": tier,
+                    "ratio": ratio,
+                }
+            db_job.finished_at = datetime.now(UTC)
+            db_job.lease_token = None
             await session.commit()
-            if db_job is not None:
-                await session.refresh(db_job)
-                await publish_job_event(redis, settings, db_job)
+            await session.refresh(db_job)
+            await publish_job_event(redis, settings, db_job)
 
     except Exception as exc:
         is_uncertain = isinstance(exc, MediaProviderError) and exc.uncertain
@@ -1923,6 +2157,14 @@ async def _execute_asset_image_under_slot(
             error=message,
         )
         async with sessions() as session:
+            db_job = await session.scalar(
+                select(Job)
+                .where(Job.id == job_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if db_job is None or db_job.status in TERMINAL_STATUSES:
+                return
             reservation = await session.scalar(
                 select(CreditReservation).where(
                     CreditReservation.business_type == "image",
@@ -1930,14 +2172,19 @@ async def _execute_asset_image_under_slot(
                 )
             )
             if reservation is not None and not is_uncertain and reservation.status == "frozen":
+                release_reason = (
+                    f"画布生图失败退还冻结积分 ({code})"
+                    if is_canvas
+                    else (
+                        f"片段分镜宫格失败退还冻结积分 ({code})"
+                        if is_clip_grid
+                        else f"资产生图失败退还冻结积分 ({code})"
+                    )
+                )
                 await release_media_credits(
                     session,
                     reservation_id=reservation.id,
-                    reason=(
-                        f"画布生图失败退还冻结积分 ({code})"
-                        if is_canvas
-                        else f"资产生图失败退还冻结积分 ({code})"
-                    ),
+                    reason=release_reason,
                 )
             if is_canvas and job.canvas_id is not None and canvas_node_id:
                 await patch_canvas_node_error(
@@ -1952,17 +2199,14 @@ async def _execute_asset_image_under_slot(
                 if db_asset is not None:
                     db_asset.image_status = "ready" if db_asset.image_url else "failed"
                     db_asset.last_job_id = job_id
-            db_job = await session.scalar(select(Job).where(Job.id == job_id))
-            if db_job is not None:
-                db_job.status = "review" if is_uncertain else "failed"
-                db_job.error_code = code
-                db_job.error_message = message
-                db_job.finished_at = datetime.now(UTC)
-                db_job.lease_token = None
+            db_job.status = "review" if is_uncertain else "failed"
+            db_job.error_code = code
+            db_job.error_message = message
+            db_job.finished_at = datetime.now(UTC)
+            db_job.lease_token = None
             await session.commit()
-            if db_job is not None:
-                await session.refresh(db_job)
-                await publish_job_event(redis, settings, db_job)
+            await session.refresh(db_job)
+            await publish_job_event(redis, settings, db_job)
     finally:
         heartbeat.cancel()
         try:
@@ -2260,6 +2504,14 @@ async def _execute_clip_video_under_slot(
             ) from None
 
         async with sessions() as session:
+            db_job = await session.scalar(
+                select(Job)
+                .where(Job.id == job_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if db_job is None or db_job.status in TERMINAL_STATUSES:
+                return
             reservation = await session.scalar(
                 select(CreditReservation).where(
                     CreditReservation.business_type == "video",
@@ -2308,41 +2560,38 @@ async def _execute_clip_video_under_slot(
                         ratio=ratio,
                         duration=actual_duration,
                     )
-            db_job = await session.scalar(select(Job).where(Job.id == job_id))
-            if db_job is not None:
-                db_job.status = "succeeded"
-                db_job.progress = 100
-                db_job.step_index = 4
-                db_job.step_total = 4
-                db_job.step_label = "画布视频生成完成" if is_canvas else "片段视频生成完成"
-                db_job.result_payload = (
-                    {
-                        "canvasId": str(job.canvas_id) if job.canvas_id else None,
-                        "nodeId": canvas_node_id,
-                        "videoUrl": public_url,
-                        "videoKey": key,
-                        "duration": actual_duration,
-                        "modelId": model_id,
-                        "resolution": resolution,
-                        "ratio": ratio,
-                    }
-                    if is_canvas
-                    else {
-                        "projectId": str(job.project_id) if job.project_id else None,
-                        "clipId": str(clip_id),
-                        "videoUrl": public_url,
-                        "videoKey": key,
-                        "duration": actual_duration,
-                        "modelId": model_id,
-                        "resolution": resolution,
-                    }
-                )
-                db_job.finished_at = datetime.now(UTC)
-                db_job.lease_token = None
+            db_job.status = "succeeded"
+            db_job.progress = 100
+            db_job.step_index = 4
+            db_job.step_total = 4
+            db_job.step_label = "画布视频生成完成" if is_canvas else "片段视频生成完成"
+            db_job.result_payload = (
+                {
+                    "canvasId": str(job.canvas_id) if job.canvas_id else None,
+                    "nodeId": canvas_node_id,
+                    "videoUrl": public_url,
+                    "videoKey": key,
+                    "duration": actual_duration,
+                    "modelId": model_id,
+                    "resolution": resolution,
+                    "ratio": ratio,
+                }
+                if is_canvas
+                else {
+                    "projectId": str(job.project_id) if job.project_id else None,
+                    "clipId": str(clip_id),
+                    "videoUrl": public_url,
+                    "videoKey": key,
+                    "duration": actual_duration,
+                    "modelId": model_id,
+                    "resolution": resolution,
+                }
+            )
+            db_job.finished_at = datetime.now(UTC)
+            db_job.lease_token = None
             await session.commit()
-            if db_job is not None:
-                await session.refresh(db_job)
-                await publish_job_event(redis, settings, db_job)
+            await session.refresh(db_job)
+            await publish_job_event(redis, settings, db_job)
 
     except Exception as exc:
         is_uncertain = isinstance(exc, MediaProviderError) and exc.uncertain
@@ -2360,6 +2609,14 @@ async def _execute_clip_video_under_slot(
             error=message,
         )
         async with sessions() as session:
+            db_job = await session.scalar(
+                select(Job)
+                .where(Job.id == job_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if db_job is None or db_job.status in TERMINAL_STATUSES:
+                return
             reservation = await session.scalar(
                 select(CreditReservation).where(
                     CreditReservation.business_type == "video",
@@ -2389,17 +2646,14 @@ async def _execute_clip_video_under_slot(
                 if db_clip is not None:
                     db_clip.video_status = "ready" if db_clip.video_url else "failed"
                     db_clip.last_job_id = job_id
-            db_job = await session.scalar(select(Job).where(Job.id == job_id))
-            if db_job is not None:
-                db_job.status = "review" if is_uncertain else "failed"
-                db_job.error_code = code
-                db_job.error_message = message
-                db_job.finished_at = datetime.now(UTC)
-                db_job.lease_token = None
+            db_job.status = "review" if is_uncertain else "failed"
+            db_job.error_code = code
+            db_job.error_message = message
+            db_job.finished_at = datetime.now(UTC)
+            db_job.lease_token = None
             await session.commit()
-            if db_job is not None:
-                await session.refresh(db_job)
-                await publish_job_event(redis, settings, db_job)
+            await session.refresh(db_job)
+            await publish_job_event(redis, settings, db_job)
     finally:
         heartbeat.cancel()
         try:

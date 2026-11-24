@@ -23,9 +23,11 @@ export interface StoryboardReference {
   index: number
   assetId: string
   name: string
-  kind: 'character' | 'scene' | 'prop' | 'image' | 'video' | 'audio'
+  kind: 'character' | 'scene' | 'prop' | 'image' | 'video' | 'audio' | 'storyboard_grid'
   mediaKind?: 'image' | 'video' | 'audio'
   mediaUrl?: string
+  gridLayout?: string
+  cellMapping?: Array<{ cutIndex: number; cells: number[] }>
 }
 
 export interface StoryboardClip {

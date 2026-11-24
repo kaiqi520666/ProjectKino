@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, useTemplateRef, watch } from 'vue'
 import {
   AlertCircle,
+  Bookmark,
   Boxes,
   Check,
   CheckCircle2,
@@ -27,6 +28,8 @@ import UiAlert from '@/components/ui/UiAlert.vue'
 import UiButton from '@/components/ui/UiButton.vue'
 import UiDialog from '@/components/ui/UiDialog.vue'
 import UiTabs from '@/components/ui/UiTabs.vue'
+import { formatBatchCollectSummary, isCollectableMediaUrl } from '@/features/assets/user-assets-helpers'
+import { useUserAssetsStore } from '@/features/assets/user-assets-store'
 import { useAuthStore } from '@/stores/auth'
 import { useUiStore } from '@/stores/ui'
 import {
@@ -48,13 +51,11 @@ import StudioAssetEditor from '../components/StudioAssetEditor.vue'
 import StudioBatchImageDialog from '../components/StudioBatchImageDialog.vue'
 import { useBatchJobTracker } from '../composables/useBatchJobTracker'
 import { useModelCatalog } from '../composables/useModelCatalog'
-import { resolveDefaultImageModel, resolveImageTierForModel } from '../model-defaults'
 import { formatElapsedSeconds } from '../script-job-helpers'
 import {
   assetDisplayName,
   assetKindOptions,
   assetStateLabel,
-  findParentAsset,
   groupStudioAssets,
 } from '../studio-assets'
 import type { StudioAsset, StudioAssetDraft, StudioAssetGroup, StudioAssetKind } from '../studio-assets'
@@ -71,6 +72,7 @@ const props = defineProps<{ project: StudioProject }>()
 const auth = useAuthStore()
 const studio = useStudioStore()
 const assetExtractJobs = useAssetExtractStore()
+const userAssets = useUserAssetsStore()
 const ui = useUiStore()
 const { imageModels, ensureLoaded: ensureModelCatalog } = useModelCatalog()
 const category = ref<StudioAssetKind>('character')
@@ -83,6 +85,8 @@ const batchSubmitting = ref(false)
 const submittingAssetId = ref<string | null>(null)
 const selectMode = ref(false)
 const checkedAssetIds = ref<string[]>([])
+const togglingLibraryId = ref<string | null>(null)
+const batchCollecting = ref(false)
 const assetToDelete = ref<StudioAsset>()
 const submittingExtract = ref(false)
 const historyAssetId = ref<string | null>(null)
@@ -173,10 +177,15 @@ const historyOpen = computed({
 
 onMounted(() => {
   void ensureModelCatalog()
+  if (props.project.persisted) {
+    void userAssets.ensureLoaded().catch(() => {})
+  }
 })
 
 const activeImageJobs = computed(() =>
-  (props.project.activeJobs ?? []).filter((job) => job.jobType === 'asset_image'),
+  (props.project.activeJobs ?? []).filter(
+    (job) => job.jobType === 'asset_image' && job.jobMeta?.action !== 'clip_storyboard_grid',
+  ),
 )
 
 const activeImageAssetIds = computed(() => {
@@ -291,7 +300,9 @@ const {
     void auth.refreshBalance()
   },
   isStillRunning: (detail) =>
-    (detail.activeJobs ?? []).some((j) => j.jobType === 'asset_image')
+    (detail.activeJobs ?? []).some(
+      (j) => j.jobType === 'asset_image' && j.jobMeta?.action !== 'clip_storyboard_grid',
+    )
     || detail.assets.some((a) => a.imageStatus === 'generating'),
   onBatchComplete: ({ okCount, failCount }) => {
     if (pendingVariantWave.value) {
@@ -461,6 +472,70 @@ function toggleCardCheck(asset: StudioAsset) {
 function openBatchFromSelection() {
   if (!checkedAssetIds.value.length) return
   openBatchDialog([...checkedAssetIds.value])
+}
+
+const checkedCollectableAssets = computed(() =>
+  (props.project.assets ?? []).filter(
+    (asset) =>
+      !!asset.backendId &&
+      checkedSet.value.has(asset.backendId) &&
+      isCollectableMediaUrl(asset.imageUrl),
+  ),
+)
+
+function isAssetInLibrary(asset: StudioAsset): boolean {
+  return isCollectableMediaUrl(asset.imageUrl) && userAssets.isSaved('image', asset.imageUrl, asset.imageKey)
+}
+
+async function toggleAssetLibrary(asset: StudioAsset) {
+  if (!props.project.persisted || !isCollectableMediaUrl(asset.imageUrl)) return
+  const lockId = asset.backendId || asset.id
+  if (togglingLibraryId.value === lockId) return
+  togglingLibraryId.value = lockId
+  const title = assetDisplayName(asset)
+  try {
+    const result = await userAssets.toggleMediaAsset({
+      kind: 'image',
+      title,
+      mediaUrl: asset.imageUrl,
+      mediaKey: asset.imageKey ?? null,
+      mediaName: `${title}.png`,
+      sourceType: 'studio',
+      sourceId: asset.backendId ?? null,
+    })
+    ui.notify(result.saved ? `已加入「${title}」到素材库` : `已从素材库移除「${title}」`, result.saved ? 'success' : 'info')
+  } catch (error) {
+    ui.notify(apiErrorMessage(error), 'error')
+  } finally {
+    if (togglingLibraryId.value === lockId) togglingLibraryId.value = null
+  }
+}
+
+async function collectSelectedAssets() {
+  if (!props.project.persisted || batchCollecting.value || !checkedCollectableAssets.value.length) return
+  batchCollecting.value = true
+  try {
+    const result = await userAssets.collectBatchMediaAssets(
+      checkedCollectableAssets.value.map((asset) => {
+        const title = assetDisplayName(asset)
+        return {
+          kind: 'image' as const,
+          title,
+          mediaUrl: asset.imageUrl,
+          mediaKey: asset.imageKey ?? null,
+          mediaName: `${title}.png`,
+          sourceType: 'studio' as const,
+          sourceId: asset.backendId ?? null,
+        }
+      }),
+    )
+    const feedback = formatBatchCollectSummary(result)
+    ui.notify(feedback.message, feedback.tone)
+  } catch (error) {
+    ui.notify(apiErrorMessage(error), 'error')
+  } finally {
+    batchCollecting.value = false
+  }
 }
 
 async function submitBatchImageGeneration(payload: {
@@ -636,35 +711,6 @@ async function generateAssetImage(
   }
 }
 
-function quickGenerateAssetImage(asset: StudioAsset, event: MouseEvent) {
-  if (extractBusy.value || isAssetGenerating(asset)) return
-  if (!asset.prompt.trim()) {
-    editAsset(asset, event)
-    ui.notify('请先填写该资产的文生图提示词', 'info')
-    return
-  }
-  const parent = findParentAsset(props.project.assets ?? [], asset)
-  const parentRefUrl = parent?.imageUrl && /^https?:\/\//i.test(parent.imageUrl) ? parent.imageUrl : undefined
-  const projectModelId = props.project.creation.settings.imageModelId
-  const projectTier = props.project.creation.settings.imageTier
-  const sunburstModel = !projectModelId && parentRefUrl
-    ? imageModels.value.find((m) => m.id === 'gpt-image-2.6-sunburst')?.id
-    : undefined
-  const preferredModelId = asset.imageModelId || projectModelId || sunburstModel
-  const chosenModel = resolveDefaultImageModel(imageModels.value, preferredModelId)
-  if (!chosenModel) {
-    ui.notify('图片模型目录尚未加载完成，请稍后重试', 'error')
-    void ensureModelCatalog()
-    return
-  }
-  const tier = resolveImageTierForModel(chosenModel, asset.imageTier || projectTier)
-  void generateAssetImage(asset, {
-    modelId: chosenModel.id,
-    tier,
-    ...(parentRefUrl ? { referenceUrls: [parentRefUrl] } : {}),
-  })
-}
-
 function addAsset(event: MouseEvent) {
   if (extractBusy.value) return
   const kind = assetKindOptions.find(({ value }) => value === category.value)?.value ?? 'character'
@@ -814,10 +860,20 @@ async function deleteAsset() {
         已勾选 <strong>{{ checkedAssetIds.length }}</strong> 项资产（可在不同分类间连续勾选）
       </span>
       <div class="studio-select-bar-actions">
-        <UiButton variant="ghost" size="sm" :disabled="!checkedAssetIds.length" @click="checkedAssetIds = []">
+        <UiButton variant="ghost" size="sm" :disabled="!checkedAssetIds.length || batchCollecting" @click="checkedAssetIds = []">
           清空勾选
         </UiButton>
-        <UiButton variant="primary" size="sm" :disabled="!checkedAssetIds.length" @click="openBatchFromSelection">
+        <UiButton
+          variant="outline"
+          size="sm"
+          :loading="batchCollecting"
+          :disabled="!checkedCollectableAssets.length || batchCollecting"
+          @click="collectSelectedAssets"
+        >
+          <template v-if="!batchCollecting" #leading><Bookmark :size="14" aria-hidden="true" /></template>
+          加入素材库 ({{ checkedCollectableAssets.length }})
+        </UiButton>
+        <UiButton variant="primary" size="sm" :disabled="!checkedAssetIds.length || batchCollecting" @click="openBatchFromSelection">
           <template #leading><Sparkles :size="14" aria-hidden="true" /></template>
           生成 / 重绘已选 ({{ checkedAssetIds.length }})
         </UiButton>
@@ -1075,20 +1131,25 @@ async function deleteAsset() {
                       <template #leading><History :size="14" aria-hidden="true" /></template>
                       历史 · {{ card.active.imageHistory?.length }}
                     </UiButton>
-                    <UiButton
-                      v-if="project.persisted && card.active.backendId"
-                      variant="outline"
-                      size="sm"
-                      :loading="submittingAssetId === card.active.backendId"
-                      :disabled="extractBusy || submittingAssetId === card.active.backendId || isAssetGenerating(card.active)"
-                      :aria-label="`AI生成${assetDisplayName(card.active)}图片`"
-                      @click="quickGenerateAssetImage(card.active, $event)"
-                    >
-                      <template v-if="submittingAssetId !== card.active.backendId" #leading><Sparkles :size="14" aria-hidden="true" /></template>
-                      {{ card.active.imageUrl ? '重绘' : 'AI 生图' }}
-                    </UiButton>
                     <UiButton variant="outline" size="sm" :disabled="extractBusy" :aria-label="`编辑${assetDisplayName(card.active)}`" @click="editAsset(card.active, $event)">
                       <template #leading><Pencil :size="14" aria-hidden="true" /></template>编辑
+                    </UiButton>
+                    <UiButton
+                      v-if="project.persisted && isCollectableMediaUrl(card.active.imageUrl)"
+                      class="studio-asset-bookmark"
+                      :class="{ 'is-saved': isAssetInLibrary(card.active) }"
+                      variant="secondary"
+                      size="sm"
+                      :loading="togglingLibraryId === (card.active.backendId || card.active.id)"
+                      :disabled="extractBusy || isAssetGenerating(card.active)"
+                      :aria-pressed="isAssetInLibrary(card.active)"
+                      :aria-label="isAssetInLibrary(card.active) ? `从素材库移除${assetDisplayName(card.active)}` : `将${assetDisplayName(card.active)}加入素材库`"
+                      :title="isAssetInLibrary(card.active) ? '已在素材库（点击取消收藏）' : '加入素材库'"
+                      @click="toggleAssetLibrary(card.active)"
+                    >
+                      <template v-if="togglingLibraryId !== (card.active.backendId || card.active.id)" #leading>
+                        <Bookmark :size="14" :fill="isAssetInLibrary(card.active) ? 'currentColor' : 'none'" aria-hidden="true" />
+                      </template>
                     </UiButton>
                     <UiButton
                       class="studio-asset-delete"
@@ -1456,6 +1517,9 @@ button.studio-asset-thumb { cursor: zoom-in; }
 .studio-asset-details p { display: -webkit-box; overflow: hidden; margin: 0; color: var(--color-muted); font-size: var(--font-size-caption); overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 .studio-asset-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; padding-top: 10px; border-top: 1px solid var(--border-subtle); }
 .studio-asset-buttons { display: flex; gap: 6px; margin-left: auto; }
+.studio-asset-bookmark.ui-button { width: 32px; padding: 0; color: var(--color-muted); }
+.studio-asset-bookmark.ui-button:is(:hover, :focus-visible) { border-color: rgb(240 184 75 / 40%); color: var(--color-gold-soft); }
+.studio-asset-bookmark.ui-button.is-saved { border-color: rgb(240 184 75 / 42%); background: var(--gold-tint); color: var(--color-gold-soft); }
 .studio-asset-delete.ui-button { width: 32px; padding: 0; color: var(--color-muted); }
 .studio-asset-delete.ui-button:is(:hover, :focus-visible) { color: var(--color-error); }
 .studio-asset-delete-message { margin: 0; overflow-wrap: anywhere; }

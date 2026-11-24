@@ -11,12 +11,25 @@ import {
   stripFileExtension,
   type UploadableMediaKind,
 } from './asset-library-types'
+import {
+  findMatchingUserAssets,
+  planBatchLibraryCollect,
+  type CollectableMediaKind,
+  type MediaCollectCandidate,
+} from './user-assets-helpers'
 
 let inflightFetch: Promise<UserAssetOut[]> | null = null
 
 export interface UploadAssetsResult {
   uploaded: UserAssetOut[]
   failed: Array<{ name: string; reason: string }>
+}
+
+export interface BatchCollectAssetsResult {
+  added: number
+  skippedExisting: number
+  skippedEmpty: number
+  failed: number
 }
 
 export const useUserAssetsStore = defineStore('userAssets', {
@@ -60,6 +73,84 @@ export const useUserAssetsStore = defineStore('userAssets', {
       this.upsertLocal(created)
       this.loaded = true
       return created
+    },
+
+    findByMedia(
+      kind: CollectableMediaKind,
+      mediaUrl?: string | null,
+      mediaKey?: string | null,
+    ): UserAssetOut | undefined {
+      return findMatchingUserAssets(this.items, { kind, mediaUrl, mediaKey })[0]
+    },
+
+    isSaved(
+      kind: CollectableMediaKind,
+      mediaUrl?: string | null,
+      mediaKey?: string | null,
+    ): boolean {
+      return Boolean(this.findByMedia(kind, mediaUrl, mediaKey))
+    },
+
+    async toggleMediaAsset(
+      input: MediaCollectCandidate & { mediaUrl: string },
+    ): Promise<{ saved: boolean; asset?: UserAssetOut }> {
+      if (!this.loaded) {
+        await this.ensureLoaded()
+      }
+      const matches = findMatchingUserAssets(this.items, {
+        kind: input.kind,
+        mediaUrl: input.mediaUrl,
+        mediaKey: input.mediaKey ?? null,
+      })
+      if (matches.length > 0) {
+        for (const existing of matches) {
+          await this.removeAsset(existing.id)
+        }
+        return { saved: false, asset: matches[0] }
+      }
+      const created = await this.createAsset({
+        kind: input.kind,
+        title: input.title,
+        mediaUrl: input.mediaUrl,
+        mediaKey: input.mediaKey ?? null,
+        mediaName: input.mediaName ?? null,
+        sourceType: input.sourceType ?? 'studio',
+        sourceId: input.sourceId ?? null,
+      })
+      return { saved: true, asset: created }
+    },
+
+    async collectBatchMediaAssets(
+      candidates: readonly MediaCollectCandidate[],
+    ): Promise<BatchCollectAssetsResult> {
+      if (!this.loaded) {
+        await this.ensureLoaded()
+      }
+      const plan = planBatchLibraryCollect(candidates, this.items)
+      let added = 0
+      let failed = 0
+      for (const item of plan.toAdd) {
+        try {
+          await this.createAsset({
+            kind: item.kind,
+            title: item.title,
+            mediaUrl: item.mediaUrl,
+            mediaKey: item.mediaKey ?? null,
+            mediaName: item.mediaName ?? null,
+            sourceType: item.sourceType ?? 'studio',
+            sourceId: item.sourceId ?? null,
+          })
+          added += 1
+        } catch {
+          failed += 1
+        }
+      }
+      return {
+        added,
+        skippedExisting: plan.skippedExisting,
+        skippedEmpty: plan.skippedEmpty,
+        failed,
+      }
     },
 
     async uploadFiles(

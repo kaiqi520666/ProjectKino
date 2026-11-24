@@ -302,3 +302,44 @@ async def test_heartbeat_job_lease_survives_transient_db_error():
 
     assert attempts >= 2
 
+
+async def test_claim_job_lease_rejects_active_polling_job():
+    from contextlib import asynccontextmanager
+
+    from app.modules.jobs.service import claim_job_lease
+
+    future = datetime.now(UTC) + timedelta(minutes=5)
+    polling_job = Job(
+        id=uuid4(),
+        user_id=1,
+        job_type="asset_image",
+        status="polling",
+        lease_token="worker-a",
+        lease_until=future,
+    )
+
+    class FakeSession:
+        def __init__(self, job: Job):
+            self._job = job
+            self.committed = False
+
+        async def scalar(self, stmt):
+            return self._job
+
+        async def commit(self):
+            self.committed = True
+
+        async def refresh(self, obj):
+            return None
+
+    fake_session = FakeSession(polling_job)
+
+    @asynccontextmanager
+    async def sessions():
+        yield fake_session
+
+    claimed = await claim_job_lease(sessions, polling_job.id)
+    assert claimed is None
+    assert polling_job.lease_token == "worker-a"
+    assert not fake_session.committed
+

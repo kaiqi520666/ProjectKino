@@ -147,11 +147,29 @@ class CangyuanImageAdapter:
         quality: str = "high",
         series: str | None = None,
         reference_urls: list[str] | None = None,
+        protocol: str = "gpt_image",
     ) -> tuple[dict[str, Any], str]:
         cleaned_refs = [
             url.strip() for url in (reference_urls or []) if isinstance(url, str) and url.strip()
         ]
-        payload: dict[str, Any] = {
+        if protocol == "gemini_quality":
+            normalized_quality = tier.strip().lower()
+            payload: dict[str, Any] = {
+                "model": upstream_model_id,
+                "prompt": prompt,
+                "n": 1,
+                "size": ratio,
+                "response_format": "url",
+                "async": True,
+            }
+            if normalized_quality in ("1k", "2k", "4k"):
+                payload["quality"] = normalized_quality
+            if cleaned_refs:
+                payload["images"] = cleaned_refs
+                return payload, "edits"
+            return payload, "generations"
+
+        payload = {
             "model": upstream_model_id,
             "tier": tier,
             "prompt": prompt,
@@ -278,10 +296,13 @@ class CangyuanImageAdapter:
         endpoint: str = "generations",
         task_id: str,
         timeout_seconds: float = 30.0,
+        preserve_endpoint: bool = False,
     ) -> ImageProviderResult:
-        # 沧元官方文档约定：无论提交走 /v1/images/generations 还是 /v1/images/edits，
-        # 异步轮询端点统一为 GET /v1/images/generations/{id}。
-        poll_endpoint = "generations" if endpoint == "edits" else endpoint
+        # GPT Image 约定统一轮询 GET /v1/images/generations/{id}；
+        # Gemini 图像（如 gemini-nano-banana-2.1）编辑任务按提交端点轮询 GET /v1/images/edits/{id}。
+        poll_endpoint = (
+            endpoint if preserve_endpoint else ("generations" if endpoint == "edits" else endpoint)
+        )
         return await self._request(
             base_url=base_url,
             api_key=api_key,

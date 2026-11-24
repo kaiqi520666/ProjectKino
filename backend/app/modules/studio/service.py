@@ -3,10 +3,11 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, desc, func, select
+from sqlalchemy import case, delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
+from app.modules.catalog.models import AiModel
 from app.modules.jobs.models import Job
 from app.modules.jobs.schemas import JobOut
 from app.modules.llm_engine.schema import (
@@ -35,6 +36,7 @@ from app.modules.studio.schemas import (
     ProjectDetailOut,
     ProjectSummaryOut,
     StoryboardClipOut,
+    UpdateProjectRequest,
 )
 
 _SCRIPT_CODE_RE = re.compile(r"^[CSP]\d+$")
@@ -212,38 +214,268 @@ async def list_user_projects(session: AsyncSession, *, user_id: int) -> list[Pro
     if not projects:
         return []
     project_ids = [p.id for p in projects]
-    ep_counts = dict(
-        (
+
+    ep_stats = {
+        row[0]: (int(row[1]), int(row[2] or 0))
+        for row in (
             await session.execute(
-                select(Episode.project_id, func.count())
+                select(
+                    Episode.project_id,
+                    func.count(Episode.id),
+                    func.sum(
+                        case(
+                            (
+                                Episode.composed_video_url.is_not(None)
+                                & (Episode.composed_video_url != ""),
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ),
+                )
                 .where(Episode.project_id.in_(project_ids))
                 .group_by(Episode.project_id)
             )
         ).all()
-    )
-    asset_counts = dict(
-        (
+    }
+
+    asset_stats = {
+        row[0]: (int(row[1]), int(row[2] or 0))
+        for row in (
             await session.execute(
-                select(ProjectAsset.project_id, func.count())
+                select(
+                    ProjectAsset.project_id,
+                    func.count(ProjectAsset.id),
+                    func.sum(
+                        case(
+                            (
+                                ProjectAsset.image_url.is_not(None)
+                                & (ProjectAsset.image_url != ""),
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ),
+                )
                 .where(ProjectAsset.project_id.in_(project_ids))
                 .group_by(ProjectAsset.project_id)
             )
         ).all()
-    )
-    return [
-        ProjectSummaryOut(
-            id=p.id,
-            name=p.name,
-            mode=p.mode,
-            settings=p.settings,
-            script_confirmed=p.script_confirmed,
-            episode_count=int(ep_counts.get(p.id, 0)),
-            asset_count=int(asset_counts.get(p.id, 0)),
-            created_at=p.created_at,
-            updated_at=p.updated_at,
+    }
+
+    clip_stats = {
+        row[0]: (int(row[1]), int(row[2]), int(row[3] or 0))
+        for row in (
+            await session.execute(
+                select(
+                    StoryboardClip.project_id,
+                    func.count(func.distinct(StoryboardClip.episode_id)),
+                    func.count(StoryboardClip.id),
+                    func.sum(
+                        case(
+                            (
+                                StoryboardClip.video_url.is_not(None)
+                                & (StoryboardClip.video_url != ""),
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ),
+                )
+                .where(StoryboardClip.project_id.in_(project_ids))
+                .group_by(StoryboardClip.project_id)
+            )
+        ).all()
+    }
+
+    auto_covers: dict[UUID, str] = {}
+    asset_cover_rows = (
+        await session.execute(
+            select(ProjectAsset.project_id, ProjectAsset.image_url)
+            .where(
+                ProjectAsset.project_id.in_(project_ids),
+                ProjectAsset.image_url.is_not(None),
+                ProjectAsset.image_url != "",
+            )
+            .order_by(
+                ProjectAsset.project_id,
+                case((ProjectAsset.parent_asset_id.is_(None), 0), else_=1),
+                case(
+                    (ProjectAsset.kind == "scene", 0),
+                    (ProjectAsset.kind == "character", 1),
+                    else_=2,
+                ),
+                ProjectAsset.created_at,
+                ProjectAsset.id,
+            )
         )
-        for p in projects
-    ]
+    ).all()
+    for pid, image_url in asset_cover_rows:
+        if pid not in auto_covers and image_url:
+            auto_covers[pid] = image_url
+
+    missing_cover_ids = [pid for pid in project_ids if pid not in auto_covers]
+    if missing_cover_ids:
+        clip_cover_rows = (
+            await session.execute(
+                select(StoryboardClip.project_id, StoryboardClip.preview_url)
+                .where(
+                    StoryboardClip.project_id.in_(missing_cover_ids),
+                    StoryboardClip.preview_url.is_not(None),
+                    StoryboardClip.preview_url != "",
+                )
+                .order_by(
+                    StoryboardClip.project_id,
+                    StoryboardClip.created_at,
+                    StoryboardClip.clip_index,
+                    StoryboardClip.id,
+                )
+            )
+        ).all()
+        for pid, preview_url in clip_cover_rows:
+            if pid not in auto_covers and preview_url:
+                auto_covers[pid] = preview_url
+
+    summaries: list[ProjectSummaryOut] = []
+    for p in projects:
+        ep_count, composed_count = ep_stats.get(p.id, (0, 0))
+        asset_count, asset_ready_count = asset_stats.get(p.id, (0, 0))
+        sb_ep_count, clip_count, clip_video_ready = clip_stats.get(p.id, (0, 0, 0))
+        raw_planned = p.settings.get("episodeCount") if isinstance(p.settings, dict) else 0
+        try:
+            planned_ep = max(int(raw_planned or 0), ep_count)
+        except (TypeError, ValueError):
+            planned_ep = ep_count
+
+        summaries.append(
+            ProjectSummaryOut(
+                id=p.id,
+                name=p.name,
+                mode=p.mode,
+                settings=p.settings,
+                cover_url=p.cover_url,
+                cover_key=p.cover_key,
+                auto_cover_url=auto_covers.get(p.id),
+                script_confirmed=p.script_confirmed,
+                episode_count=ep_count,
+                planned_episode_count=planned_ep,
+                asset_count=asset_count,
+                asset_image_ready_count=asset_ready_count,
+                storyboard_episode_count=sb_ep_count,
+                clip_count=clip_count,
+                clip_video_ready_count=clip_video_ready,
+                composed_episode_count=composed_count,
+                created_at=p.created_at,
+                updated_at=p.updated_at,
+            )
+        )
+    return summaries
+
+
+async def update_project_meta(
+    session: AsyncSession,
+    *,
+    project: Project,
+    body: UpdateProjectRequest,
+) -> Project:
+    fields = body.model_fields_set
+    next_settings: dict[str, Any] = dict(project.settings or {})
+
+    if "name" in fields and body.name is not None:
+        project.name = body.name
+        next_settings["name"] = body.name
+
+    if "ratio" in fields and body.ratio is not None:
+        next_settings["ratio"] = body.ratio
+
+    if "visual_style" in fields and body.visual_style is not None:
+        next_settings["visualStyle"] = body.visual_style
+
+    if "visual_style_label" in fields:
+        if body.visual_style_label:
+            next_settings["visualStyleLabel"] = body.visual_style_label
+        else:
+            next_settings.pop("visualStyleLabel", None)
+
+    if "max_segment_duration" in fields and body.max_segment_duration is not None:
+        next_settings["maxSegmentDuration"] = body.max_segment_duration
+
+    if "background_music" in fields and body.background_music is not None:
+        next_settings["backgroundMusic"] = body.background_music
+
+    if "image_model_id" in fields:
+        if body.image_model_id:
+            image_model = await session.scalar(
+                select(AiModel).where(
+                    AiModel.id == body.image_model_id,
+                    AiModel.media_type == "image",
+                    AiModel.enabled.is_(True),
+                )
+            )
+            if image_model is None:
+                raise AppError(400, "image_model_invalid", "所选默认图片模型不存在或未启用")
+            next_settings["imageModelId"] = image_model.id
+        else:
+            next_settings.pop("imageModelId", None)
+
+    if "image_tier" in fields:
+        if body.image_tier:
+            next_settings["imageTier"] = body.image_tier
+        else:
+            next_settings.pop("imageTier", None)
+
+    effective_cap = int(next_settings.get("maxSegmentDuration") or 15)
+    video_model_row: AiModel | None = None
+    if "video_model_id" in fields:
+        if body.video_model_id:
+            video_model_row = await session.scalar(
+                select(AiModel).where(
+                    AiModel.id == body.video_model_id,
+                    AiModel.media_type == "video",
+                    AiModel.enabled.is_(True),
+                )
+            )
+            if video_model_row is None:
+                raise AppError(400, "video_model_invalid", "所选默认视频模型不存在或未启用")
+            next_settings["videoModelId"] = video_model_row.id
+        else:
+            next_settings.pop("videoModelId", None)
+    elif "max_segment_duration" in fields and next_settings.get("videoModelId"):
+        existing_vid_id = str(next_settings["videoModelId"])
+        video_model_row = await session.scalar(
+            select(AiModel).where(AiModel.id == existing_vid_id, AiModel.media_type == "video")
+        )
+
+    if effective_cap >= 30 and video_model_row is not None:
+        raw_max = (video_model_row.capabilities or {}).get("maxDuration")
+        try:
+            max_dur = int(raw_max) if raw_max is not None else 15
+        except (TypeError, ValueError):
+            max_dur = 15
+        if max_dur < 30:
+            if "video_model_id" in fields:
+                raise AppError(
+                    400,
+                    "video_model_duration_incompatible",
+                    (
+                        f"模型「{video_model_row.display_name}」最长支持 {max_dur} 秒，"
+                        "无法作为 30 秒单段上限的默认视频模型"
+                    ),
+                )
+            # 仅切换单段上限至 30 秒且未显式指定视频模型时，清空不兼容旧默认，交由系统 30s 默认模型接管。
+            next_settings.pop("videoModelId", None)
+
+    if "cover_url" in fields:
+        project.cover_url = body.cover_url
+        if body.cover_url is None and "cover_key" not in fields:
+            project.cover_key = None
+
+    if "cover_key" in fields:
+        project.cover_key = body.cover_key
+
+    project.settings = next_settings
+    await session.flush()
+    return project
 
 
 async def get_project_detail(session: AsyncSession, *, project_id: UUID, user_id: int) -> ProjectDetailOut:
@@ -298,6 +530,8 @@ async def get_project_detail(session: AsyncSession, *, project_id: UUID, user_id
         mode=project.mode,
         source_text=project.source_text,
         settings=project.settings,
+        cover_url=project.cover_url,
+        cover_key=project.cover_key,
         outline=project.outline,
         script_confirmed=project.script_confirmed,
         episodes=[EpisodeOut.model_validate(ep) for ep in episodes],
