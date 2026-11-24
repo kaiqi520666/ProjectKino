@@ -83,7 +83,7 @@ test('protected workspace, canvas, and admin routes carry auth and role meta', (
     )
   }
 
-  for (const path of ['/admin', '/admin/users', '/admin/redeem-codes', '/admin/models', '/admin/jobs', '/admin/projects', '/admin/settings']) {
+  for (const path of ['/admin', '/admin/users', '/admin/redeem-codes', '/admin/announcements', '/admin/models', '/admin/jobs', '/admin/projects', '/admin/settings']) {
     const resolved = router.resolve(path)
     assert.equal(
       resolved.matched.some((record) => record.meta.requiresAuth === true),

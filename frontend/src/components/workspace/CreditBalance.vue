@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { Coins, Plus } from 'lucide-vue-next'
+import UiButton from '@/components/ui/UiButton.vue'
 
 const props = withDefaults(defineProps<{
   balance?: number | null
@@ -21,16 +22,16 @@ const formattedBalance = computed(() => {
       <Coins :size="16" :stroke-width="1.7" aria-hidden="true" />
       <span>{{ formattedBalance }}</span>
     </span>
-    <button type="button" class="credit-recharge" @click="$emit('recharge')">
-      <Plus :size="14" aria-hidden="true" /><span>充值</span>
-    </button>
+    <UiButton variant="primary" size="sm" class="credit-recharge" @click="$emit('recharge')">
+      <template #leading><Plus :size="14" aria-hidden="true" /></template>
+      充值
+    </UiButton>
   </div>
 </template>
 
 <style scoped>
 .credit-balance { display: inline-flex; align-items: center; gap: 10px; flex-shrink: 0; }
 .credit-balance-value { display: inline-flex; align-items: center; gap: 7px; color: var(--color-gold-soft); font-size: 14px; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.credit-recharge { display: inline-flex; align-items: center; justify-content: center; gap: 3px; min-height: 30px; padding: 0 10px; border: 1px solid #e8bc65; border-radius: 6px; background: linear-gradient(115deg, #ffdfa0, #edb64f); color: #30200a; font-size: 12px; font-weight: 600; box-shadow: 0 2px 12px rgb(240 184 75 / 10%); }
-.credit-recharge:hover { background: #ffdfa0; }
-@media (max-width: 480px) { .credit-balance { gap: 6px; } .credit-balance-value { gap: 4px; } .credit-recharge { padding-inline: 7px; } .credit-recharge > svg { display: none; } }
+.credit-recharge { font-weight: 600; }
+@media (max-width: 480px) { .credit-balance { gap: 6px; } .credit-balance-value { gap: 4px; } .credit-recharge { padding-inline: 8px; } .credit-recharge :deep(svg) { display: none; } }
 </style>

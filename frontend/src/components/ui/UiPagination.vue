@@ -132,21 +132,23 @@ function selectPageSize(size: number) {
 .ui-pagination-sizes {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  padding: 2px;
-  border-radius: 7px;
-  border: 1px solid var(--border-subtle);
-  background: rgb(255 255 255 / 2%);
+  height: var(--control-height-sm);
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius-control-sm);
+  border: 1px solid var(--border-control);
+  background: rgb(255 255 255 / 2.5%);
 }
 
 .ui-pagination-size-btn {
-  height: 24px;
-  padding: 0 8px;
+  height: 100%;
+  padding: 0 9px;
   border: none;
   border-radius: 5px;
   background: transparent;
   color: var(--color-muted);
-  font-size: 11.5px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
   cursor: pointer;
   transition: background-color 0.14s ease, color 0.14s ease;
 }
@@ -171,12 +173,12 @@ function selectPageSize(size: number) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 30px;
-  height: 30px;
+  min-width: var(--control-height-sm);
+  height: var(--control-height-sm);
   padding: 0 8px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 7px;
-  background: var(--color-surface);
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-control-sm);
+  background: rgb(255 255 255 / 2.5%);
   color: var(--color-muted);
   font-size: 12.5px;
   font-variant-numeric: tabular-nums;

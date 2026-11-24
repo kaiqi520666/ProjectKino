@@ -12,10 +12,9 @@ import ProjectCard from '@/features/projects/components/ProjectCard.vue'
 import {
   resolveProjectCoverUrl,
   resolveProjectProgress,
-  styleCoverUrl,
 } from '@/features/projects/project-progress'
 import ScriptCreationPanel from '@/features/studio/components/ScriptCreationPanel.vue'
-import { artStyles } from '@/features/studio/components/art-styles'
+import { useArtStylesStore } from '@/features/art-styles/art-styles-store'
 import type { DramaCreation } from '@/features/studio/components/drama-creation'
 import {
   apiErrorMessage,
@@ -31,6 +30,7 @@ import { useUiStore } from '@/stores/ui'
 import type { PromoSlide } from '../components/promo-types'
 
 const router = useRouter()
+const artStylesStore = useArtStylesStore()
 const studio = useStudioStore()
 const scriptJobs = useScriptJobStore()
 const ui = useUiStore()
@@ -41,8 +41,6 @@ const projectToDelete = ref<StudioProject>()
 
 const projectPage = ref(1)
 const projectPageSize = ref(8)
-
-const styleLabelMap = new Map<string, string>(artStyles.map((s) => [s.value, s.label]))
 
 const pagedProjects = computed(() => {
   const start = (projectPage.value - 1) * projectPageSize.value
@@ -94,13 +92,14 @@ async function deleteProject() {
 }
 
 function projectStyleLabel(style?: string): string {
-  return (style && styleLabelMap.get(style)) || style || '真人'
+  return artStylesStore.getLabel(style)
 }
 
 function recentProjectCoverUrl(project: StudioProject): string {
   return resolveProjectCoverUrl({
     coverUrl: project.coverUrl,
     autoCoverUrl: project.autoCoverUrl,
+    styleCoverUrl: artStylesStore.getCoverUrl(project.creation.settings.visualStyle),
     visualStyle: project.creation.settings.visualStyle,
   }).url
 }
@@ -125,8 +124,7 @@ async function createDrama(input: DramaCreation) {
   creating.value = true
   try {
     const text = input.mode === 'story' ? input.story : await input.file.text()
-    const style = artStyles.find(({ value }) => value === input.settings.visualStyle)
-    const stylePrompt = style?.prompt
+    const stylePrompt = artStylesStore.getPrompt(input.settings.visualStyle)
     const accepted = await startGenerateProject({
       settings: stylePrompt ? { ...input.settings, visualStyleLabel: stylePrompt } : input.settings,
       mode: input.mode,
@@ -173,7 +171,7 @@ async function createDrama(input: DramaCreation) {
             :id="project.id"
             :name="project.creation.settings.name"
             :cover-url="recentProjectCoverUrl(project)"
-            :fallback-cover-url="styleCoverUrl(project.creation.settings.visualStyle)"
+            :fallback-cover-url="artStylesStore.getCoverUrl(project.creation.settings.visualStyle)"
             :style-label="projectStyleLabel(project.creation.settings.visualStyle)"
             :ratio="project.creation.settings.ratio || '16:9'"
             :episode-count="project.progressStats?.plannedEpisodeCount ?? project.creation.settings.episodeCount"

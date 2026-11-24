@@ -103,7 +103,7 @@ function downloadText(text: string) {
 
 <style scoped>
 .canvas-media-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; width: max-content; max-width: calc(100vw - 24px); gap: 3px; padding: 5px; border: 1px solid var(--border-control); border-radius: 8px; background: var(--color-surface); box-shadow: 0 6px 16px rgb(0 0 0 / 32%); cursor: default; }
-.canvas-media-toolbar button, .canvas-media-toolbar a { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-width: 36px; min-height: 36px; padding: 4px 9px; border-radius: 6px; color: var(--color-text); font-size: var(--font-size-body); text-decoration: none; white-space: nowrap; cursor: pointer; }
+.canvas-media-toolbar button, .canvas-media-toolbar a { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-width: var(--control-height-sm); height: var(--control-height-sm); min-height: var(--control-height-sm); padding: 0 9px; border-radius: var(--radius-control-xs); color: var(--color-text); font-size: 13px; text-decoration: none; white-space: nowrap; cursor: pointer; }
 .canvas-media-toolbar :is(button, a) svg { width: 17px; height: 17px; flex: none; color: var(--color-muted); }
 .canvas-media-toolbar :is(button, a):hover { background: var(--gold-tint); color: var(--color-gold-soft); }
 .canvas-media-toolbar :is(button, a):hover svg { color: inherit; }

@@ -145,10 +145,10 @@ function selectModel(m: ModelCatalogItemOut) {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  height: 36px;
+  height: var(--control-height-sm);
   max-width: 240px;
-  padding: 0 11px 0 12px;
-  border-radius: 9px;
+  padding: 0 10px 0 11px;
+  border-radius: var(--radius-control-sm);
   border: 1px solid var(--border-control);
   background: var(--color-surface);
   color: var(--color-text);

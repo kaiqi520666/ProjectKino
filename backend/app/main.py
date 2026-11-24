@@ -8,6 +8,10 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.api.v1.admin import router as admin_router
+from app.api.v1.announcements import admin_router as admin_announcements_router
+from app.api.v1.announcements import router as announcements_router
+from app.api.v1.art_styles import admin_router as admin_art_styles_router
+from app.api.v1.art_styles import router as art_styles_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.canvases import assets_router
 from app.api.v1.canvases import router as canvases_router
@@ -96,5 +100,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(assets_router, prefix="/api/v1")
     app.include_router(jobs_router, prefix="/api/v1")
     app.include_router(uploads_router, prefix="/api/v1")
+    app.include_router(announcements_router, prefix="/api/v1")
+    app.include_router(admin_announcements_router, prefix="/api/v1")
+    app.include_router(art_styles_router, prefix="/api/v1")
+    app.include_router(admin_art_styles_router, prefix="/api/v1")
     app.include_router(admin_router, prefix="/api/v1")
     return app

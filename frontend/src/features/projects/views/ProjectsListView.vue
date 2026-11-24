@@ -9,7 +9,6 @@ import {
   Save,
   Search,
   Upload,
-  X,
 } from 'lucide-vue-next'
 import EmptyState from '@/components/business/EmptyState.vue'
 import UiButton from '@/components/ui/UiButton.vue'
@@ -27,17 +26,17 @@ import {
   uploadFileToOss,
 } from '@/features/studio/api'
 import type { ProjectSummaryOut } from '@/features/studio/api-types'
-import { artStyles } from '@/features/studio/components/art-styles'
+import { useArtStylesStore } from '@/features/art-styles/art-styles-store'
 import { useStudioStore } from '@/features/studio/studio-store'
 import { useUiStore } from '@/stores/ui'
 import ProjectCard from '../components/ProjectCard.vue'
 import {
   resolveProjectCoverUrl,
   resolveProjectProgress,
-  styleCoverUrl,
 } from '../project-progress'
 
 const router = useRouter()
+const artStylesStore = useArtStylesStore()
 const studio = useStudioStore()
 const ui = useUiStore()
 
@@ -61,8 +60,6 @@ const deleteOpen = ref(false)
 const deleting = ref(false)
 const projectToDelete = ref<ProjectSummaryOut>()
 
-const styleLabelMap = new Map<string, string>(artStyles.map((s) => [s.value, s.label]))
-
 const filteredProjects = computed(() => {
   const q = keyword.value.trim().toLowerCase()
   if (!q) return projects.value
@@ -84,18 +81,20 @@ const editPreviewCoverUrl = computed(() => {
   return resolveProjectCoverUrl({
     coverUrl: draftCoverUrl.value,
     autoCoverUrl: target.autoCoverUrl,
+    styleCoverUrl: artStylesStore.getCoverUrl(target.settings.visualStyle),
     visualStyle: target.settings.visualStyle,
   }).url
 })
 
 function styleLabel(style?: string): string {
-  return (style && styleLabelMap.get(style)) || style || '真人'
+  return artStylesStore.getLabel(style)
 }
 
 function projectCoverUrl(project: ProjectSummaryOut): string {
   return resolveProjectCoverUrl({
     coverUrl: project.coverUrl,
     autoCoverUrl: project.autoCoverUrl,
+    styleCoverUrl: artStylesStore.getCoverUrl(project.settings.visualStyle),
     visualStyle: project.settings.visualStyle,
   }).url
 }
@@ -235,19 +234,17 @@ async function submitDelete() {
     <WorkspacePageHeader title="全部项目" title-id="projects-page-title" :badge="projects.length">
       <template #icon><Clapperboard :size="19" :stroke-width="1.7" /></template>
       <template #actions>
-        <label class="projects-search">
-          <Search :size="14" aria-hidden="true" />
-          <input v-model="keyword" type="text" placeholder="搜索项目" aria-label="搜索项目" />
-          <button
-            v-if="keyword"
-            type="button"
-            class="projects-search-clear"
-            aria-label="清空搜索"
-            @click="keyword = ''"
+        <div class="projects-search-wrap">
+          <UiInput
+            v-model="keyword"
+            size="sm"
+            clearable
+            placeholder="搜索项目"
+            aria-label="搜索项目"
           >
-            <X :size="12" />
-          </button>
-        </label>
+            <template #leading><Search :size="13" aria-hidden="true" /></template>
+          </UiInput>
+        </div>
         <UiButton variant="primary" size="sm" @click="router.push('/workspace')">
           <template #leading><Plus :size="15" aria-hidden="true" /></template>
           新建短剧
@@ -279,7 +276,7 @@ async function submitDelete() {
           :id="project.id"
           :name="project.name"
           :cover-url="projectCoverUrl(project)"
-          :fallback-cover-url="styleCoverUrl(project.settings.visualStyle)"
+          :fallback-cover-url="artStylesStore.getCoverUrl(project.settings.visualStyle)"
           :style-label="styleLabel(project.settings.visualStyle)"
           :ratio="project.settings.ratio || '16:9'"
           :episode-count="project.plannedEpisodeCount ?? project.settings.episodeCount ?? project.episodeCount"
@@ -395,23 +392,7 @@ async function submitDelete() {
 
 <style scoped>
 .projects-page { width: 100%; padding: 20px 24px 40px; }
-.projects-search {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  width: 200px;
-  height: 32px;
-  padding: 0 10px;
-  border-radius: 7px;
-  border: 1px solid var(--border-control);
-  background: rgb(255 255 255 / 3%);
-  color: var(--color-muted);
-}
-.projects-search:focus-within { border-color: rgb(240 184 75 / 50%); color: var(--color-text); }
-.projects-search input { width: 100%; min-width: 0; border: 0; background: transparent; color: var(--color-text); font-size: 12px; outline: none; }
-.projects-search input::placeholder { color: var(--color-muted); }
-.projects-search-clear { display: grid; place-items: center; width: 18px; height: 18px; border: 0; background: transparent; color: var(--color-muted); cursor: pointer; }
-.projects-search-clear:hover { color: var(--color-text); }
+.projects-search-wrap { width: 204px; }
 .projects-status { padding: 48px 0; text-align: center; color: var(--color-muted); font-size: var(--font-size-body); }
 .projects-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; margin: 20px 0 0; padding: 0; list-style: none; }
 .project-form { display: grid; gap: 14px; }

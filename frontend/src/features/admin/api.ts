@@ -445,6 +445,7 @@ export interface AdminRedeemCodeList {
   stats: AdminRedeemStats
   batches: string[]
   purchaseUrl: string
+  creditTiers?: number[]
 }
 
 export interface AdminRedeemBatchCreateResult {
@@ -465,6 +466,7 @@ export interface AdminRedeemCodeUseItem {
 
 export function listAdminRedeemCodes(params: {
   status?: AdminRedeemCodeStatus
+  credits?: number
   batch_name?: string
   keyword?: string
   limit?: number
@@ -476,7 +478,6 @@ export function listAdminRedeemCodes(params: {
 export function createAdminRedeemBatch(body: {
   credits: string
   count: number
-  prefix?: string
   batchName?: string
   maxUses?: number
   expiresAt?: string | null

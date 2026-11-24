@@ -7,7 +7,7 @@ import UiButton from '@/components/ui/UiButton.vue'
 import { useUiStore } from '@/stores/ui'
 import { apiErrorMessage, getProjectDetail, renameProjectApi } from '../api'
 import { useAssetExtractStore } from '../asset-extract-store'
-import { artStyles } from '../components/art-styles'
+import { useArtStylesStore } from '@/features/art-styles/art-styles-store'
 import { contentLanguages, formatDurationLabel } from '../components/drama-creation'
 import { isScriptJobType } from '../script-job-helpers'
 import { useScriptJobStore } from '../script-job-store'
@@ -17,6 +17,7 @@ import { useStudioStore } from '../studio-store'
 
 const route = useRoute()
 const router = useRouter()
+const artStylesStore = useArtStylesStore()
 const studio = useStudioStore()
 const scriptJobs = useScriptJobStore()
 const assetExtractJobs = useAssetExtractStore()
@@ -33,7 +34,7 @@ const settingsOpen = ref(false)
 const draftName = ref<string>()
 const nameInput = useTemplateRef<HTMLInputElement>('nameInput')
 const renameTrigger = useTemplateRef<HTMLButtonElement>('renameTrigger')
-const artStyle = computed(() => artStyles.find(({ value }) => value === settings.value?.visualStyle))
+const artStyle = computed(() => artStylesStore.getByCode(settings.value?.visualStyle))
 const language = computed(() => contentLanguages.find(({ value }) => value === settings.value?.language)?.label)
 const world = computed(() => project.value?.scriptResult?.outline?.world)
 const steps = [
@@ -209,7 +210,7 @@ function handleNameEscape(event: KeyboardEvent) {
             <div v-if="artStyle" class="studio-project-style">
               <dt>画风</dt>
               <dd :title="artStyle.label">
-                <img :src="`/images/art-styles/${artStyle.value}.webp`" alt="" />
+                <img v-if="artStyle.imageUrl" :src="artStyle.imageUrl" alt="" />
                 <span>{{ artStyle.label }}</span>
               </dd>
             </div>

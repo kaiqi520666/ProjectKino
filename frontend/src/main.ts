@@ -6,6 +6,7 @@ import { setUnauthorizedHandler } from './lib/http'
 import { useAuthStore } from './stores/auth'
 import { useUiStore } from './stores/ui'
 import { clearModelCatalogCache } from './features/studio/composables/useModelCatalog'
+import { useAnnouncementStore } from './features/announcements/announcement-store'
 import { useCanvasStore } from './features/canvas/canvas-store'
 import { useStudioStore } from './features/studio/studio-store'
 import './styles/index.css'
@@ -22,6 +23,7 @@ setUnauthorizedHandler(() => {
   const current = router.currentRoute.value
   const onProtectedRoute = current.matched.some((record) => record.meta.requiresAuth)
   auth.clearSession()
+  useAnnouncementStore(pinia).clearSession()
   studio.clearProjects()
   canvas.clearAll()
   clearModelCatalogCache()

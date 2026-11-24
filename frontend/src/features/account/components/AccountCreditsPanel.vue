@@ -9,18 +9,20 @@ import {
   Coins,
   Download,
   ExternalLink,
+  Eye,
   FileText,
   Film,
   Image as ImageIcon,
   LayoutDashboard,
+  LayoutGrid,
   Lock,
   RefreshCw,
   RotateCcw,
   Search,
   Ticket,
   Wallet,
-  X,
 } from 'lucide-vue-next'
+import UiBadge, { type UiBadgeTone } from '@/components/ui/UiBadge.vue'
 import UiButton from '@/components/ui/UiButton.vue'
 import UiDataTable, { type DataTableColumn } from '@/components/ui/UiDataTable.vue'
 import UiDateRangePicker from '@/components/ui/UiDateRangePicker.vue'
@@ -30,6 +32,8 @@ import {
   toUtcIsoBounds,
   type DateRangeValue,
 } from '@/components/ui/date-range'
+import UiInput from '@/components/ui/UiInput.vue'
+import UiSegmented, { type UiSegmentedOption } from '@/components/ui/UiSegmented.vue'
 import UiSelect from '@/components/ui/UiSelect.vue'
 import { JOB_STATUS_LABELS, JOB_TYPE_LABELS } from '@/features/admin/format'
 import {
@@ -60,6 +64,7 @@ import {
   formatCreditReason,
   formatLedgerChangeDisplay,
   formatRateSpec,
+  formatRateSpecTags,
   LEDGER_OP_LABELS_ACCOUNT,
 } from '../credits-helpers'
 import CreditDetailDialog, { type CreditDetailPayload } from './CreditDetailDialog.vue'
@@ -100,13 +105,44 @@ const redeemOpen = ref(false)
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 
-const categoryTabs: ReadonlyArray<{ value: '' | CreditBillCategory; label: string }> = [
-  { value: '', label: '全部' },
-  { value: 'video', label: '视频' },
-  { value: 'image', label: '图片' },
-  { value: 'text', label: '文本' },
-  { value: 'income', label: '入账' },
+const viewModeOptions = computed<UiSegmentedOption[]>(() => [
+  { value: 'bills', label: '消费账单', count: viewMode.value === 'bills' ? billsTotal.value : undefined },
+  { value: 'ledgers', label: '资金流水', count: viewMode.value === 'ledgers' ? ledgersTotal.value : undefined },
+])
+
+const viewModeModel = computed({
+  get: () => viewMode.value,
+  set: (val: string) => selectViewMode(val as ViewMode),
+})
+
+const categoryOptions: readonly UiSegmentedOption[] = [
+  { value: '', label: '全部', icon: LayoutGrid },
+  { value: 'video', label: '视频', icon: Film },
+  { value: 'image', label: '图片', icon: ImageIcon },
+  { value: 'text', label: '文本', icon: FileText },
+  { value: 'income', label: '入账', icon: ArrowDownLeft },
 ]
+
+const billCategoryModel = computed({
+  get: () => billCategory.value,
+  set: (val: string) => selectCategory(val as '' | CreditBillCategory),
+})
+
+function billStatusTone(status: CreditBillStatus): UiBadgeTone {
+  if (status === 'charged') return 'danger'
+  if (status === 'frozen') return 'gold'
+  if (status === 'refunded') return 'info'
+  return 'success'
+}
+
+function ledgerOpTone(op: string): UiBadgeTone {
+  if (op === 'llm_consume') return 'danger'
+  if (op === 'freeze') return 'gold'
+  if (op === 'settle') return 'info'
+  if (op === 'grant' || op === 'release' || op === 'redeem') return 'success'
+  if (op === 'adjust') return 'purple'
+  return 'neutral'
+}
 
 const billStatusOptions = [
   { value: 'all', label: '全部状态' },
@@ -145,20 +181,21 @@ const ledgerOpSelect = computed({
 
 const billColumns: DataTableColumn[] = [
   { key: 'createdAt', label: '时间', width: '154px' },
-  { key: 'title', label: '消费项目与来源' },
-  { key: 'model', label: '模型与规格' },
-  { key: 'status', label: '状态', width: '84px' },
-  { key: 'amount', label: '实付积分', align: 'right', width: '116px' },
-  { key: 'action', label: '', align: 'right', width: '66px' },
+  { key: 'title', label: '消费项目', width: '188px' },
+  { key: 'source', label: '来源', width: '136px' },
+  { key: 'model', label: '模型 / 规格' },
+  { key: 'amount', label: '积分', align: 'right', width: '164px' },
+  { key: 'action', label: '操作', align: 'right', width: '76px' },
 ]
 
 const ledgerColumns: DataTableColumn[] = [
   { key: 'createdAt', label: '时间', width: '154px' },
   { key: 'operation', label: '操作类型', width: '96px' },
-  { key: 'change', label: '资金变动', align: 'right', width: '132px' },
-  { key: 'balanceRange', label: '变动后余冻', width: '156px' },
-  { key: 'reason', label: '来源与说明' },
-  { key: 'action', label: '', align: 'right', width: '66px' },
+  { key: 'source', label: '来源', width: '136px' },
+  { key: 'reason', label: '说明 / 规格' },
+  { key: 'balanceRange', label: '余额变动', align: 'right', width: '168px' },
+  { key: 'change', label: '资金变动', align: 'right', width: '116px' },
+  { key: 'action', label: '操作', align: 'right', width: '76px' },
 ]
 
 const activeBalance = computed(() => summary.value?.balance ?? auth.user?.balance ?? '0')
@@ -435,16 +472,16 @@ onMounted(() => {
               <template #leading><Ticket :size="13" aria-hidden="true" /></template>
               兑换积分
             </UiButton>
-            <a
+            <UiButton
               v-if="redeemPurchaseUrl"
+              variant="outline"
+              size="sm"
               :href="redeemPurchaseUrl"
               target="_blank"
-              rel="noopener noreferrer"
-              class="credits-buy-btn"
             >
-              <span>购买兑换码</span>
-              <ExternalLink :size="12" aria-hidden="true" />
-            </a>
+              购买兑换码
+              <template #trailing><ExternalLink :size="12" aria-hidden="true" /></template>
+            </UiButton>
           </div>
         </div>
         <p v-if="isNegativeBalance" class="credits-neg-warn">
@@ -456,17 +493,19 @@ onMounted(() => {
             <span>任务冻结中</span>
             <strong :class="{ 'is-active': Number(activeFrozen) > 0 }">{{ formatCredits(activeFrozen) }}</strong>
           </div>
-          <button
+          <UiButton
             v-if="hasFrozenCredits"
-            type="button"
-            class="credits-frozen-toggle"
+            variant="outline"
+            size="sm"
             :aria-expanded="frozenExpanded"
             @click="frozenExpanded = !frozenExpanded"
           >
-            <span>{{ frozenExpanded ? '收起冻结明细' : `查看冻结明细 (${summary?.activeFrozenItems.length ?? 0})` }}</span>
-            <ChevronUp v-if="frozenExpanded" :size="13" aria-hidden="true" />
-            <ChevronDown v-else :size="13" aria-hidden="true" />
-          </button>
+            {{ frozenExpanded ? '收起冻结明细' : `查看冻结明细 (${summary?.activeFrozenItems.length ?? 0})` }}
+            <template #trailing>
+              <ChevronUp v-if="frozenExpanded" :size="13" aria-hidden="true" />
+              <ChevronDown v-else :size="13" aria-hidden="true" />
+            </template>
+          </UiButton>
         </div>
       </section>
 
@@ -541,23 +580,27 @@ onMounted(() => {
           <div class="credits-frozen-info">
             <div class="credits-frozen-title-row">
               <strong>{{ (item.jobType && JOB_TYPE_LABELS[item.jobType]) || (item.businessType === 'video' ? '视频生成' : '图片生成') }}</strong>
-              <span v-if="item.jobStatus" class="credits-mini-tag" :class="{ 'is-review': item.jobStatus === 'review' }">
+              <UiBadge v-if="item.jobStatus" :tone="item.jobStatus === 'review' ? 'gold' : 'neutral'">
                 {{ JOB_STATUS_LABELS[item.jobStatus] || item.jobStatus }}
-              </span>
-              <RouterLink
+              </UiBadge>
+              <UiBadge
                 v-if="item.projectId"
-                class="credits-source-chip"
+                variant="chip"
+                truncate
                 :to="{ name: 'studio-storyboard', params: { projectId: item.projectId } }"
               >
-                <Clapperboard :size="11" aria-hidden="true" />{{ item.projectName || '短剧项目' }}
-              </RouterLink>
-              <RouterLink
+                <template #leading><Clapperboard :size="11" aria-hidden="true" /></template>
+                {{ item.projectName || '短剧项目' }}
+              </UiBadge>
+              <UiBadge
                 v-else-if="item.canvasId"
-                class="credits-source-chip"
+                variant="chip"
+                truncate
                 :to="{ name: 'canvas-editor', params: { canvasId: item.canvasId } }"
               >
-                <LayoutDashboard :size="11" aria-hidden="true" />{{ item.canvasName || '画布' }}
-              </RouterLink>
+                <template #leading><LayoutDashboard :size="11" aria-hidden="true" /></template>
+                {{ item.canvasName || '画布' }}
+              </UiBadge>
             </div>
             <div class="credits-frozen-sub">
               <span>{{ item.modelName || item.modelId }}</span>
@@ -572,78 +615,38 @@ onMounted(() => {
 
     <!-- 第 2 层：双视角切换 + 筛选栏 -->
     <div class="credits-toolbar">
-      <div class="credits-view-switch" role="tablist" aria-label="账务视角切换">
-        <button
-          type="button"
-          role="tab"
-          class="credits-view-tab"
-          :class="{ 'is-active': viewMode === 'bills' }"
-          :aria-selected="viewMode === 'bills'"
-          @click="selectViewMode('bills')"
-        >
-          消费账单
-          <span v-if="viewMode === 'bills'" class="credits-view-count">{{ billsTotal }}</span>
-        </button>
-        <button
-          type="button"
-          role="tab"
-          class="credits-view-tab"
-          :class="{ 'is-active': viewMode === 'ledgers' }"
-          :aria-selected="viewMode === 'ledgers'"
-          @click="selectViewMode('ledgers')"
-        >
-          资金流水
-          <span v-if="viewMode === 'ledgers'" class="credits-view-count">{{ ledgersTotal }}</span>
-        </button>
-      </div>
+      <UiSegmented v-model="viewModeModel" :options="viewModeOptions" aria-label="账务视角切换" />
 
       <div class="credits-filter-row">
         <UiDateRangePicker
           v-model="dateRange"
+          size="sm"
           placeholder="全部时间"
           @change="handleDateRangeChange"
         />
 
         <template v-if="viewMode === 'bills'">
-          <div class="credits-cat-pills" role="group" aria-label="按消费类别筛选">
-            <button
-              v-for="tab in categoryTabs"
-              :key="tab.value || 'all'"
-              type="button"
-              class="credits-cat-pill"
-              :class="{ 'is-active': billCategory === tab.value }"
-              @click="selectCategory(tab.value)"
-            >
-              {{ tab.label }}
-            </button>
-          </div>
+          <UiSegmented v-model="billCategoryModel" :options="categoryOptions" aria-label="按消费类别筛选" />
           <div class="credits-select-wrap">
-            <UiSelect v-model="billStatusSelect" :options="billStatusOptions" placeholder="状态" />
+            <UiSelect v-model="billStatusSelect" size="sm" :options="billStatusOptions" placeholder="状态" />
           </div>
         </template>
 
         <div v-else class="credits-select-wrap">
-          <UiSelect v-model="ledgerOpSelect" :options="ledgerOperationOptions" placeholder="操作类型" />
+          <UiSelect v-model="ledgerOpSelect" size="sm" :options="ledgerOperationOptions" placeholder="操作类型" />
         </div>
 
-        <label class="credits-search">
-          <Search :size="13" aria-hidden="true" />
-          <input
+        <div class="credits-search-wrap">
+          <UiInput
             v-model="keyword"
-            type="text"
+            size="sm"
+            clearable
             placeholder="搜项目、模型或说明"
             aria-label="搜索账单或流水"
-          />
-          <button
-            v-if="keyword"
-            type="button"
-            class="credits-search-clear"
-            aria-label="清空搜索"
-            @click="keyword = ''"
           >
-            <X :size="12" aria-hidden="true" />
-          </button>
-        </label>
+            <template #leading><Search :size="13" aria-hidden="true" /></template>
+          </UiInput>
+        </div>
 
         <UiButton v-if="hasActiveFilters" variant="ghost" size="sm" @click="resetFilters">
           <template #leading><RotateCcw :size="12" aria-hidden="true" /></template>
@@ -662,14 +665,13 @@ onMounted(() => {
       row-key="id"
       :loading="billsLoading"
       empty-text="当前条件下暂无消费账单"
-      compact
       paginated
       :total="billsTotal"
       :page-size-options="[15, 30, 50]"
       @change="loadBills()"
     >
       <template #cell-createdAt="{ row }">
-        <span class="credits-mono credits-muted">{{ formatDateTime(row.createdAt) }}</span>
+        <span class="credits-mono credits-muted credits-nowrap">{{ formatDateTime(row.createdAt) }}</span>
       </template>
 
       <template #cell-title="{ row }">
@@ -677,75 +679,86 @@ onMounted(() => {
           <span class="credits-cat-icon" :class="`is-${row.category}`" aria-hidden="true">
             <component :is="categoryIcon(row.category)" :size="13" />
           </span>
-          <div class="credits-bill-title-text">
-            <div class="credits-bill-title-line">
-              <button type="button" class="credits-row-link" @click="openBillDetail(row)">
-                {{ row.title }}
-              </button>
-              <RouterLink
-                v-if="row.projectId"
-                class="credits-source-chip"
-                :to="{ name: 'studio-storyboard', params: { projectId: row.projectId } }"
-              >
-                <Clapperboard :size="11" aria-hidden="true" />{{ row.projectName || '短剧项目' }}
-              </RouterLink>
-              <RouterLink
-                v-else-if="row.canvasId"
-                class="credits-source-chip"
-                :to="{ name: 'canvas-editor', params: { canvasId: row.canvasId } }"
-              >
-                <LayoutDashboard :size="11" aria-hidden="true" />{{ row.canvasName || '画布' }}
-              </RouterLink>
-            </div>
-            <div
-              v-if="formatCreditReason(row.reason) && formatCreditReason(row.reason) !== row.title"
-              class="credits-row-sub"
-            >
-              {{ formatCreditReason(row.reason) }}
-            </div>
-          </div>
+          <button
+            type="button"
+            class="credits-row-link credits-ellipsis"
+            :title="formatCreditReason(row.reason) || row.title"
+            @click="openBillDetail(row)"
+          >
+            {{ row.title }}
+          </button>
         </div>
+      </template>
+
+      <template #cell-source="{ row }">
+        <UiBadge
+          v-if="row.projectId"
+          variant="chip"
+          truncate
+          :to="{ name: 'studio-storyboard', params: { projectId: row.projectId } }"
+          :title="row.projectName || '短剧项目'"
+        >
+          <template #leading><Clapperboard :size="11" aria-hidden="true" /></template>
+          {{ row.projectName || '短剧项目' }}
+        </UiBadge>
+        <UiBadge
+          v-else-if="row.canvasId"
+          variant="chip"
+          truncate
+          :to="{ name: 'canvas-editor', params: { canvasId: row.canvasId } }"
+          :title="row.canvasName || '画布'"
+        >
+          <template #leading><LayoutDashboard :size="11" aria-hidden="true" /></template>
+          {{ row.canvasName || '画布' }}
+        </UiBadge>
+        <span v-else class="credits-muted">-</span>
       </template>
 
       <template #cell-model="{ row }">
-        <div class="credits-model-cell">
-          <span v-if="row.modelName || row.modelId" class="credits-model-name">
+        <div class="credits-inline-cell">
+          <span
+            v-if="row.modelName || row.modelId"
+            class="credits-model-name"
+            :title="row.modelName || row.modelId || ''"
+          >
             {{ row.modelName || row.modelId }}
           </span>
-          <span v-else class="credits-muted">{{ BILL_CATEGORY_LABELS[row.category] }}</span>
-          <div v-if="formatRateSpec(row.rateSnapshot, row.tokenUsage)" class="credits-row-sub credits-mono">
-            {{ formatRateSpec(row.rateSnapshot, row.tokenUsage) }}
-          </div>
+          <span v-else class="credits-muted credits-nowrap">{{ BILL_CATEGORY_LABELS[row.category] }}</span>
+          <UiBadge
+            v-for="tag in formatRateSpecTags(row.rateSnapshot, row.tokenUsage)"
+            :key="tag"
+            variant="chip"
+          >
+            {{ tag }}
+          </UiBadge>
         </div>
-      </template>
-
-      <template #cell-status="{ row }">
-        <span class="credits-status-pill" :class="`is-${row.status}`">
-          {{ BILL_STATUS_LABELS[row.status] }}
-        </span>
       </template>
 
       <template #cell-amount="{ row }">
         <div class="credits-amount-cell credits-mono">
           <template v-if="row.status === 'refunded'">
             <span class="credits-amount-strike">-{{ formatCredits(row.originalAmount) }}</span>
-            <strong class="is-refunded">0</strong>
+            <strong class="is-refunded">0 积分</strong>
           </template>
           <template v-else-if="row.status === 'frozen'">
-            <strong class="is-frozen">冻结 {{ formatCredits(row.originalAmount) }}</strong>
+            <strong class="is-frozen">{{ formatCredits(row.originalAmount) }} 积分</strong>
           </template>
           <template v-else>
             <strong :class="Number(row.amount) > 0 ? 'is-pos' : Number(row.amount) < 0 ? 'is-neg' : ''">
-              {{ formatSignedCredits(row.amount) }}
+              {{ formatSignedCredits(row.amount) }} 积分
             </strong>
           </template>
+          <UiBadge :tone="billStatusTone(row.status)">
+            {{ BILL_STATUS_LABELS[row.status] }}
+          </UiBadge>
         </div>
       </template>
 
       <template #cell-action="{ row }">
-        <button type="button" class="credits-detail-btn" @click="openBillDetail(row)">
+        <UiButton variant="ghost" size="xs" @click="openBillDetail(row)">
+          <template #leading><Eye :size="12" aria-hidden="true" /></template>
           详情
-        </button>
+        </UiButton>
       </template>
     </UiDataTable>
 
@@ -758,74 +771,88 @@ onMounted(() => {
       row-key="id"
       :loading="ledgersLoading"
       empty-text="当前条件下暂无资金流水"
-      compact
       paginated
       :total="ledgersTotal"
       :page-size-options="[15, 30, 50]"
       @change="loadLedgers()"
     >
       <template #cell-createdAt="{ row }">
-        <span class="credits-mono credits-muted">{{ formatDateTime(row.createdAt) }}</span>
+        <span class="credits-mono credits-muted credits-nowrap">{{ formatDateTime(row.createdAt) }}</span>
       </template>
 
       <template #cell-operation="{ row }">
-        <span class="credits-op-tag" :class="`is-${row.operation}`">
+        <UiBadge :tone="ledgerOpTone(row.operation)">
           {{ LEDGER_OP_LABELS_ACCOUNT[row.operation] || row.operation }}
-        </span>
+        </UiBadge>
       </template>
 
-      <template #cell-change="{ row }">
-        <div class="credits-amount-cell credits-mono">
-          <strong :class="`is-${formatLedgerChangeDisplay(row).tone}`">
-            {{ formatLedgerChangeDisplay(row).primary }}
-          </strong>
-          <span v-if="formatLedgerChangeDisplay(row).secondary" class="credits-row-sub">
-            {{ formatLedgerChangeDisplay(row).secondary }}
+      <template #cell-source="{ row }">
+        <UiBadge
+          v-if="row.projectId"
+          variant="chip"
+          truncate
+          :to="{ name: 'studio-storyboard', params: { projectId: row.projectId } }"
+          :title="row.projectName || '短剧项目'"
+        >
+          <template #leading><Clapperboard :size="11" aria-hidden="true" /></template>
+          {{ row.projectName || '短剧项目' }}
+        </UiBadge>
+        <UiBadge
+          v-else-if="row.canvasId"
+          variant="chip"
+          truncate
+          :to="{ name: 'canvas-editor', params: { canvasId: row.canvasId } }"
+          :title="row.canvasName || '画布'"
+        >
+          <template #leading><LayoutDashboard :size="11" aria-hidden="true" /></template>
+          {{ row.canvasName || '画布' }}
+        </UiBadge>
+        <span v-else class="credits-muted">-</span>
+      </template>
+
+      <template #cell-reason="{ row }">
+        <div class="credits-inline-cell">
+          <span class="credits-reason-text" :title="formatCreditReason(row.reason) || ''">
+            {{ formatCreditReason(row.reason) || '-' }}
           </span>
+          <UiBadge v-if="row.modelName" variant="chip">{{ row.modelName }}</UiBadge>
+          <UiBadge
+            v-for="tag in formatRateSpecTags(row.rateSnapshot, row.tokenUsage)"
+            :key="tag"
+            variant="chip"
+          >
+            {{ tag }}
+          </UiBadge>
         </div>
       </template>
 
       <template #cell-balanceRange="{ row }">
-        <div class="credits-mono">
-          <div>可用 {{ formatCredits(row.balanceAfter) }}</div>
-          <div v-if="Number(row.frozenAfter) > 0 || Number(row.frozenChange) !== 0" class="credits-row-sub">
+        <span class="credits-mono credits-muted credits-nowrap">
+          <template v-if="Number(row.balanceChange) === 0 && Number(row.frozenChange) !== 0">
             冻结 {{ formatCredits(row.frozenBefore) }} → {{ formatCredits(row.frozenAfter) }}
-          </div>
-          <div v-else class="credits-row-sub">
-            前 {{ formatCredits(row.balanceBefore) }}
-          </div>
-        </div>
+          </template>
+          <template v-else>
+            {{ formatCredits(row.balanceBefore) }} → {{ formatCredits(row.balanceAfter) }}
+          </template>
+        </span>
       </template>
 
-      <template #cell-reason="{ row }">
-        <div class="credits-bill-title-line">
-          <span>{{ formatCreditReason(row.reason) || '-' }}</span>
-          <RouterLink
-            v-if="row.projectId"
-            class="credits-source-chip"
-            :to="{ name: 'studio-storyboard', params: { projectId: row.projectId } }"
-          >
-            <Clapperboard :size="11" aria-hidden="true" />{{ row.projectName || '短剧项目' }}
-          </RouterLink>
-          <RouterLink
-            v-else-if="row.canvasId"
-            class="credits-source-chip"
-            :to="{ name: 'canvas-editor', params: { canvasId: row.canvasId } }"
-          >
-            <LayoutDashboard :size="11" aria-hidden="true" />{{ row.canvasName || '画布' }}
-          </RouterLink>
-        </div>
-        <div v-if="row.modelName || formatRateSpec(row.rateSnapshot, row.tokenUsage)" class="credits-row-sub credits-mono">
-          <template v-if="row.modelName">{{ row.modelName }}</template>
-          <template v-if="row.modelName && formatRateSpec(row.rateSnapshot, row.tokenUsage)"> · </template>
-          {{ formatRateSpec(row.rateSnapshot, row.tokenUsage) }}
+      <template #cell-change="{ row }">
+        <div
+          class="credits-amount-cell credits-mono"
+          :title="formatLedgerChangeDisplay(row).secondary || ''"
+        >
+          <strong :class="`is-${formatLedgerChangeDisplay(row).tone}`">
+            {{ formatLedgerChangeDisplay(row).primary }}
+          </strong>
         </div>
       </template>
 
       <template #cell-action="{ row }">
-        <button type="button" class="credits-detail-btn" @click="openLedgerDetail(row)">
+        <UiButton variant="ghost" size="xs" @click="openLedgerDetail(row)">
+          <template #leading><Eye :size="12" aria-hidden="true" /></template>
           详情
-        </button>
+        </UiButton>
       </template>
     </UiDataTable>
 
@@ -921,11 +948,18 @@ onMounted(() => {
 
 .credits-multiplier-pill,
 .credits-period-tag {
-  padding: 2px 8px;
-  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--control-height-sm);
+  padding: 0 12px;
+  border-radius: var(--radius-control-sm);
   border: 1px solid var(--border-control);
   background: rgb(255 255 255 / 4%);
-  font-size: 11px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
   color: var(--color-muted);
   font-variant-numeric: tabular-nums;
 }
@@ -956,27 +990,6 @@ onMounted(() => {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-}
-
-.credits-buy-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 30px;
-  padding: 0 11px;
-  border-radius: 7px;
-  border: 1px solid rgb(240 184 75 / 32%);
-  background: rgb(240 184 75 / 8%);
-  color: var(--color-gold-soft);
-  font-size: 12.5px;
-  font-weight: 500;
-  text-decoration: none;
-  transition: border-color 0.15s ease, background-color 0.15s ease;
-}
-
-.credits-buy-btn:hover {
-  border-color: rgb(240 184 75 / 56%);
-  background: rgb(240 184 75 / 15%);
 }
 
 .credits-balance-hero strong {
@@ -1029,23 +1042,6 @@ onMounted(() => {
 
 .credits-frozen-summary strong.is-active {
   color: var(--color-gold-soft);
-}
-
-.credits-frozen-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  border: 1px solid rgb(240 184 75 / 34%);
-  border-radius: 6px;
-  background: var(--gold-tint);
-  color: var(--color-gold-soft);
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.credits-frozen-toggle:hover {
-  border-color: var(--color-gold);
 }
 
 .credits-spend-kpis {
@@ -1238,48 +1234,6 @@ onMounted(() => {
   border-top: 1px solid var(--border-subtle);
 }
 
-.credits-view-switch {
-  display: inline-flex;
-  padding: 3px;
-  border: 1px solid var(--border-control);
-  border-radius: 8px;
-  background: var(--color-canvas);
-}
-
-.credits-view-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 28px;
-  padding: 0 12px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--color-muted);
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background-color 140ms ease, color 140ms ease;
-}
-
-.credits-view-tab:hover {
-  color: var(--color-text);
-}
-
-.credits-view-tab.is-active {
-  background: var(--gold-tint);
-  color: var(--color-gold-soft);
-  font-weight: 600;
-}
-
-.credits-view-count {
-  padding: 0 6px;
-  border-radius: 999px;
-  background: rgb(240 184 75 / 18%);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-
 .credits-filter-row {
   display: flex;
   flex-wrap: wrap;
@@ -1287,86 +1241,12 @@ onMounted(() => {
   gap: 8px;
 }
 
-.credits-cat-pills {
-  display: inline-flex;
-  padding: 2px;
-  border: 1px solid var(--border-control);
-  border-radius: 7px;
-  background: var(--color-canvas);
-}
-
-.credits-cat-pill {
-  height: 26px;
-  padding: 0 9px;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--color-muted);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.credits-cat-pill:hover {
-  color: var(--color-text);
-}
-
-.credits-cat-pill.is-active {
-  background: rgb(255 255 255 / 10%);
-  color: var(--color-text);
-  font-weight: 500;
-}
-
 .credits-select-wrap {
-  width: 112px;
+  min-width: 116px;
 }
 
-.credits-select-wrap :deep(.ui-select) {
-  min-height: 32px;
-  height: 32px;
-  font-size: 12px;
-}
-
-.credits-search {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  width: 184px;
-  height: 32px;
-  padding: 0 9px;
-  border: 1px solid var(--border-control);
-  border-radius: 7px;
-  background: var(--color-canvas);
-  color: var(--color-muted);
-}
-
-.credits-search:focus-within {
-  border-color: rgb(240 184 75 / 50%);
-  color: var(--color-text);
-}
-
-.credits-search input {
-  width: 100%;
-  min-width: 0;
-  border: 0;
-  background: transparent;
-  color: var(--color-text);
-  font-size: 12px;
-  outline: none;
-}
-
-.credits-search input::placeholder {
-  color: var(--color-muted);
-}
-
-.credits-search-clear {
-  display: grid;
-  place-items: center;
-  width: 16px;
-  height: 16px;
-  border: 0;
-  background: transparent;
-  color: var(--color-muted);
-  cursor: pointer;
+.credits-search-wrap {
+  width: 196px;
 }
 
 .credits-mono {
@@ -1379,8 +1259,8 @@ onMounted(() => {
 
 .credits-bill-title-cell {
   display: flex;
-  align-items: flex-start;
-  gap: 9px;
+  align-items: center;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -1388,43 +1268,75 @@ onMounted(() => {
   flex: none;
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
-  margin-top: 1px;
+  width: 24px;
+  height: 24px;
   border-radius: 6px;
-  background: rgb(255 255 255 / 6%);
+  border: 1px solid var(--border-subtle);
+  background: rgb(255 255 255 / 4%);
   color: var(--color-muted);
 }
 
 .credits-cat-icon.is-video {
-  background: rgb(240 184 75 / 14%);
-  color: var(--color-gold-soft);
+  border-color: rgb(240 184 75 / 32%);
+  background: rgb(240 184 75 / 12%);
+  color: var(--color-gold);
 }
 
 .credits-cat-icon.is-image {
-  background: rgb(96 165 250 / 14%);
-  color: #93c5fd;
+  border-color: rgb(184 161 232 / 28%);
+  background: rgb(184 161 232 / 11%);
+  color: #b8a1e8;
 }
 
 .credits-cat-icon.is-text {
-  background: rgb(167 139 250 / 14%);
-  color: #c4b5fd;
+  border-color: rgb(143 185 233 / 28%);
+  background: rgb(143 185 233 / 11%);
+  color: #8fb9e9;
 }
 
 .credits-cat-icon.is-income {
-  background: rgb(74 222 128 / 14%);
+  border-color: rgb(128 201 161 / 32%);
+  background: rgb(128 201 161 / 12%);
   color: var(--color-success);
 }
 
-.credits-bill-title-text {
-  min-width: 0;
-}
-
-.credits-bill-title-line {
-  display: flex;
-  flex-wrap: wrap;
+.credits-inline-cell {
+  display: inline-flex;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
+}
+
+.credits-model-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+
+.credits-reason-text {
+  font-size: 13px;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 240px;
+}
+
+.credits-nowrap {
+  white-space: nowrap;
+}
+
+.credits-ellipsis {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .credits-row-link {
@@ -1442,98 +1354,12 @@ onMounted(() => {
   color: var(--color-gold-soft);
 }
 
-.credits-source-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  max-width: 160px;
-  padding: 1px 6px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 4px;
-  background: rgb(255 255 255 / 3%);
-  color: var(--color-muted);
-  font-size: 11px;
-  text-decoration: none;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.credits-source-chip:hover {
-  border-color: rgb(240 184 75 / 40%);
-  color: var(--color-gold-soft);
-}
-
-.credits-row-sub {
-  margin-top: 2px;
-  font-size: 11px;
-  color: var(--color-muted);
-}
-
-.credits-model-cell {
-  min-width: 0;
-}
-
-.credits-model-name {
-  font-size: 12px;
-  color: var(--color-text);
-}
-
-.credits-status-pill,
-.credits-op-tag,
-.credits-mini-tag {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 7px;
-  border-radius: 999px;
-  border: 1px solid var(--border-control);
-  background: rgb(255 255 255 / 4%);
-  font-size: 11px;
-  color: var(--color-muted);
-  white-space: nowrap;
-}
-
-.credits-status-pill.is-charged,
-.credits-op-tag.is-llm_consume {
-  border-color: rgb(248 113 113 / 28%);
-  background: rgb(248 113 113 / 10%);
-  color: #fca5a5;
-}
-
-.credits-status-pill.is-frozen,
-.credits-op-tag.is-freeze,
-.credits-mini-tag.is-review {
-  border-color: rgb(240 184 75 / 36%);
-  background: var(--gold-tint);
-  color: var(--color-gold-soft);
-}
-
-.credits-status-pill.is-refunded,
-.credits-op-tag.is-settle {
-  border-color: rgb(96 165 250 / 32%);
-  background: rgb(96 165 250 / 10%);
-  color: #93c5fd;
-}
-
-.credits-status-pill.is-credited,
-.credits-op-tag.is-grant,
-.credits-op-tag.is-release {
-  border-color: rgb(74 222 128 / 32%);
-  background: rgb(74 222 128 / 10%);
-  color: var(--color-success);
-}
-
-.credits-op-tag.is-adjust {
-  border-color: rgb(167 139 250 / 34%);
-  background: rgb(167 139 250 / 10%);
-  color: #c4b5fd;
-}
-
 .credits-amount-cell {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 1px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  white-space: nowrap;
 }
 
 .credits-amount-cell strong.is-pos {
@@ -1559,22 +1385,6 @@ onMounted(() => {
   text-decoration: line-through;
 }
 
-.credits-detail-btn {
-  padding: 3px 8px;
-  border: 1px solid transparent;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--color-muted);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.credits-detail-btn:hover {
-  border-color: var(--border-control);
-  background: var(--surface-hover);
-  color: var(--color-gold-soft);
-}
-
 .ui-spin {
   animation: credits-spin 1s linear infinite;
 }
@@ -1597,7 +1407,7 @@ onMounted(() => {
   .credits-spend-kpis {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .credits-search {
+  .credits-search-wrap {
     width: 100%;
   }
 }

@@ -38,7 +38,7 @@
 .home-gallery .image-card-title { font-size: 17px; }
 .home-gallery .image-card-description { line-height: 1.75; }
 .home-gallery .image-card-actions { margin-top: 7px; }
-.home-gallery .image-card-actions .ui-button { min-height: 32px; padding: 0 11px; }
+.home-gallery .image-card-actions .ui-button { min-height: var(--control-height-sm); padding: 0 11px; }
 .home-gallery-note { display: flex; align-items: center; gap: 7px; margin: 26px 0 0; color: #868994; font-size: 12px; }
 .home-features { background: #101115; border-block: 1px solid var(--border-subtle); }
 .home-feature-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 48px; margin-top: 46px; }

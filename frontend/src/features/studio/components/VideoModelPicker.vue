@@ -485,9 +485,9 @@ function selectModel(m: ModelCatalogItemOut) {
 
 .vmp-search-input {
   width: 100%;
-  height: 36px;
+  height: var(--control-height-sm);
   padding: 0 12px 0 33px;
-  border-radius: 9px;
+  border-radius: var(--radius-control-sm);
   border: 1px solid var(--border-control);
   background: rgb(255 255 255 / 3%);
   color: var(--color-text);

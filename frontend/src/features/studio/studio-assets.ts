@@ -181,8 +181,8 @@ export const exampleAssetLibrary = {
     { name: '观景窗边的宇航员', imageUrl: '/images/home/scene-scifi.jpg' },
   ],
   scene: [
-    { name: '老城巷口', imageUrl: '/images/art-styles/republican-era.webp' },
-    { name: '夜间走廊', imageUrl: '/images/art-styles/suspense-horror.webp' },
+    { name: '老城巷口', imageUrl: '/images/home/cover-wuxia.jpg' },
+    { name: '夜间走廊', imageUrl: '/images/home/scene-fantasy.jpg' },
   ],
   prop: [
     { name: '桌上的纸质剧本', imageUrl: '/images/workspace/banner-story.jpg' },

@@ -69,7 +69,7 @@ export function createExampleStoryboard(episode: StudioEpisode, settings: DramaS
       { id: 'object', kind: 'prop', name: episode.example ? '手机' : '示例道具' },
     ],
     clips: [
-      { id: 1, durationSeconds: Math.round(cap * 0.6), prompt: opening, assetIds: ['lead', 'location', 'object'], previewUrl: `/images/art-styles/${settings.visualStyle}.webp` },
+      { id: 1, durationSeconds: Math.round(cap * 0.6), prompt: opening, assetIds: ['lead', 'location', 'object'], previewUrl: '/images/workspace/entry-studio.jpg' },
       { id: 2, durationSeconds: cap, prompt: action, assetIds: ['lead', 'location', 'object'] },
       { id: 3, durationSeconds: Math.round(cap * 0.8), prompt: ending, assetIds: ['lead', 'object'] },
     ],

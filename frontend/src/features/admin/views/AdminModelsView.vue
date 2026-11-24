@@ -375,8 +375,11 @@ onMounted(loadAll)
         </div>
         <UiDataTable :columns="providerColumns" :rows="providers" row-key="key" :loading="loading" compact>
           <template #cell-provider="{ row }">
-            <div class="admin-cell-primary">{{ row.displayName }}</div>
-            <div class="admin-cell-sub admin-mono">{{ row.key }}</div>
+            <div class="admin-inline-meta" :title="`${row.displayName} (${row.key})`">
+              <span class="admin-cell-primary">{{ row.displayName }}</span>
+              <span class="admin-inline-sep" aria-hidden="true">·</span>
+              <span class="admin-inline-sub admin-mono">{{ row.key }}</span>
+            </div>
           </template>
           <template #cell-adapter="{ row }">
             <span class="admin-mono">{{ row.adapter }}</span>
@@ -395,8 +398,8 @@ onMounted(loadAll)
             </span>
           </template>
           <template #cell-actions="{ row }">
-            <button type="button" class="ui-button ui-button--secondary ui-button--sm" @click="openProviderEdit(row)">
-              <Pencil :size="13" />
+            <button type="button" class="ui-button ui-button--secondary ui-button--xs" @click="openProviderEdit(row)">
+              <Pencil :size="12" />
               <span>编辑</span>
             </button>
           </template>
@@ -425,13 +428,13 @@ onMounted(loadAll)
 
           <div class="admin-actions">
             <div style="width: 150px;">
-              <UiSelect v-model="categoryFilter" :options="categoryFilterOptions" placeholder="系列分类" />
+              <UiSelect v-model="categoryFilter" size="sm" :options="categoryFilterOptions" placeholder="系列分类" />
             </div>
             <div v-if="mediaFilter === 'video' || mediaFilter === 'all'" style="width: 118px;">
-              <UiSelect v-model="billingFilter" :options="billingFilterOptions" placeholder="计费方式" />
+              <UiSelect v-model="billingFilter" size="sm" :options="billingFilterOptions" placeholder="计费方式" />
             </div>
             <div v-if="mediaFilter === 'video' || mediaFilter === 'all'" style="width: 122px;">
-              <UiSelect v-model="upstreamFilter" :options="upstreamFilterOptions" placeholder="上游状态" />
+              <UiSelect v-model="upstreamFilter" size="sm" :options="upstreamFilterOptions" placeholder="上游状态" />
             </div>
           </div>
         </div>
@@ -446,13 +449,12 @@ onMounted(loadAll)
           @reorder="handleModelReorder"
         >
           <template #cell-model="{ row }">
-            <div class="admin-cell-primary" style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
-              <span>{{ row.displayName }}</span>
+            <div class="admin-inline-meta" :title="`${row.displayName} (${row.id} · 排序 ${row.sort})`">
+              <span class="admin-cell-primary">{{ row.displayName }}</span>
               <span v-if="row.category" class="admin-badge admin-badge--info">{{ row.category }}</span>
               <span v-if="row.isDefault" class="admin-badge admin-badge--gold">{{ row.mediaType === 'video' ? '15s 默认' : '默认' }}</span>
               <span v-if="row.mediaType === 'video' && row.isDefaultLong" class="admin-badge admin-badge--gold">30s 默认</span>
             </div>
-            <div class="admin-cell-sub admin-mono">{{ row.id }} · 排序 {{ row.sort }}</div>
           </template>
           <template #cell-upstreamModelId="{ row }">
             <span class="admin-mono">{{ row.upstreamModelId }}</span>
@@ -506,17 +508,17 @@ onMounted(loadAll)
           </template>
           <template #cell-actions="{ row }">
             <div class="admin-actions">
-              <button type="button" class="ui-button ui-button--outline ui-button--sm" @click="openModelEdit(row)">
-                <Pencil :size="13" />
+              <button type="button" class="ui-button ui-button--outline ui-button--xs" @click="openModelEdit(row)">
+                <Pencil :size="12" />
                 <span>配置</span>
               </button>
               <button
                 type="button"
-                class="ui-button ui-button--ghost ui-button--sm"
+                class="ui-button ui-button--ghost ui-button--xs"
                 :disabled="row.isDefault || row.isDefaultLong"
                 @click="openDeleteModel(row)"
               >
-                <Trash2 :size="13" />
+                <Trash2 :size="12" />
               </button>
             </div>
           </template>

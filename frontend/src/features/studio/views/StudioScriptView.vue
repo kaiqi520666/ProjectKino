@@ -915,7 +915,7 @@ onBeforeRouteUpdate(canLeave)
 .script-episodes-list :deep(.studio-episode-list ul) { display: grid; gap: 6px; }
 .script-episodes-list :deep(.studio-episode-list ul li + li) { border-top: 0; }
 .script-episodes-footer { display: grid; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-subtle); }
-.script-add-episode, .script-regen-all { width: 100%; min-height: 36px; }
+.script-add-episode, .script-regen-all { width: 100%; height: var(--control-height-sm); min-height: var(--control-height-sm); }
 .script-regen-all { color: #c5c7d0; }
 .script-regen-all:hover:not(:disabled) { border-color: rgb(240 184 75 / 35%); color: var(--color-gold-soft); }
 .script-episodes-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin: 0 4px 14px; }
@@ -943,8 +943,8 @@ onBeforeRouteUpdate(canLeave)
 .script-document-heading h2 { display: flex; align-items: baseline; gap: 8px; min-width: 0; margin: 0; font-size: var(--font-size-body); font-weight: 500; line-height: 1.4; overflow-wrap: anywhere; }
 .script-document-index { flex-shrink: 0; color: var(--color-gold-soft); font-size: 13px; white-space: nowrap; }
 .script-title-field { flex: 1; min-width: 0; max-width: 320px; }
-.script-title-field :deep(.ui-input) { height: 34px; padding-inline: 8px; }
-.script-document-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 32px; margin-left: auto; }
+.script-title-field :deep(.ui-input) { height: var(--control-height-sm); padding-inline: 8px; }
+.script-document-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: var(--control-height-sm); margin-left: auto; }
 .script-word-count { color: var(--color-muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .script-duration { padding: 2px 8px; border-radius: 999px; background: var(--gold-tint); color: var(--color-gold-soft); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .script-muted { color: var(--color-muted); }

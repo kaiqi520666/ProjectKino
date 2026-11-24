@@ -368,13 +368,13 @@ const nextTooltip = computed(() => {
 
 .episode-toolbar .ui-button {
   gap: 6px;
-  min-height: 30px;
+  min-height: var(--control-height-sm);
   padding-inline: 10px;
 }
 
 .episode-back.ui-button {
-  flex: 0 0 30px;
-  width: 30px;
+  flex: 0 0 var(--control-height-sm);
+  width: var(--control-height-sm);
   padding: 0;
 }
 

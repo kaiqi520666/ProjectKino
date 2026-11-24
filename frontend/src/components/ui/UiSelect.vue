@@ -6,13 +6,17 @@ import {
   SelectRoot, SelectTrigger, SelectValue, SelectViewport,
 } from 'reka-ui'
 
-defineProps<{
-  label?: string
-  placeholder?: string
-  options: readonly { value: string; label: string; disabled?: boolean }[]
-  disabled?: boolean
-  required?: boolean
-}>()
+withDefaults(
+  defineProps<{
+    label?: string
+    placeholder?: string
+    options: readonly { value: string; label: string; disabled?: boolean }[]
+    size?: 'sm' | 'md'
+    disabled?: boolean
+    required?: boolean
+  }>(),
+  { size: 'md' },
+)
 const model = defineModel<string>()
 const id = useId()
 </script>
@@ -21,9 +25,14 @@ const id = useId()
   <div class="ui-field">
     <label v-if="label" :for="id" class="ui-label">{{ label }}<span v-if="required" class="ui-required" aria-hidden="true">*</span></label>
     <SelectRoot v-model="model" :disabled="disabled" :required="required">
-      <SelectTrigger :id="id" class="ui-select-trigger" :aria-label="label || placeholder">
+      <SelectTrigger
+        :id="id"
+        class="ui-select-trigger"
+        :class="size === 'sm' ? 'ui-select-trigger--sm' : undefined"
+        :aria-label="label || placeholder"
+      >
         <SelectValue :placeholder="placeholder || '请选择'" />
-        <ChevronDown :size="15" aria-hidden="true" />
+        <ChevronDown :size="size === 'sm' ? 14 : 15" aria-hidden="true" />
       </SelectTrigger>
       <SelectPortal>
         <SelectContent class="ui-popover ui-select-content" position="popper" :side-offset="6" :collision-padding="12">

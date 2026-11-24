@@ -12,6 +12,7 @@ from app.core.errors import AppError
 from app.modules.auth.models import User
 from app.modules.credits.models import CreditLedger, RedeemCode, RedeemCodeUse
 from app.modules.credits.schemas import (
+    REDEEM_CREDIT_TIERS,
     AdminRedeemCodeItemOut,
     AdminRedeemCodeListOut,
     AdminRedeemCodeUseItemOut,
@@ -22,7 +23,7 @@ from app.modules.settings.service import get_redeem_purchase_url
 
 # 剔除易混淆字符 0 / O / 1 / I / L
 REDEEM_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
-_PREFIX_RE = re.compile(r"^[A-Za-z0-9]{1,12}$")
+_ALLOWED_CREDIT_TIERS = frozenset(Decimal(v) for v in REDEEM_CREDIT_TIERS)
 _REDEEM_FAIL_LIMIT = 10
 _REDEEM_FAIL_WINDOW_SECONDS = 60
 
@@ -33,20 +34,10 @@ def normalize_redeem_code(raw: str) -> str:
     return cleaned
 
 
-def sanitize_prefix(prefix: str) -> str:
-    cleaned = prefix.strip().upper()
-    if not cleaned:
-        return ""
-    if not _PREFIX_RE.fullmatch(cleaned):
-        raise AppError(400, "invalid_prefix", "前缀仅支持 1–12 位字母或数字")
-    return cleaned
-
-
-def generate_random_code_str(prefix: str = "") -> str:
-    """生成 12 位去歧义字母数字卡密（XXXX-XXXX-XXXX），可选自定义前缀。"""
-    raw = "".join(secrets.choice(REDEEM_ALPHABET) for _ in range(12))
-    grouped = f"{raw[0:4]}-{raw[4:8]}-{raw[8:12]}"
-    return f"{prefix}-{grouped}" if prefix else grouped
+def generate_random_code_str() -> str:
+    """生成 20 位去歧义字母数字卡密（XXXX-XXXX-XXXX-XXXX-XXXX）。"""
+    raw = "".join(secrets.choice(REDEEM_ALPHABET) for _ in range(20))
+    return "-".join(raw[i : i + 4] for i in range(0, 20, 4))
 
 
 def resolve_redeem_status(
@@ -109,21 +100,20 @@ async def generate_redeem_codes(
     *,
     credits: Decimal,
     count: int,
-    prefix: str = "",
     batch_name: str = "",
     max_uses: int = 1,
     expires_at: datetime | None = None,
     created_by: int | None = None,
 ) -> list[RedeemCode]:
     credit_amount = _q(credits)
-    if credit_amount <= 0:
-        raise AppError(400, "invalid_credit_amount", "兑换码面额必须大于 0")
+    if credit_amount not in _ALLOWED_CREDIT_TIERS:
+        tiers_text = "、".join(str(t) for t in REDEEM_CREDIT_TIERS)
+        raise AppError(400, "invalid_credit_tier", f"面额积分仅支持：{tiers_text}")
     if count < 1 or count > 500:
         raise AppError(400, "invalid_code_count", "单次生成数量必须在 1–500 之间")
     if max_uses < 1:
         raise AppError(400, "invalid_max_uses", "可用次数必须大于等于 1")
 
-    clean_prefix = sanitize_prefix(prefix)
     clean_batch = batch_name.strip()[:120]
     exp = expires_at
     if exp is not None and exp.tzinfo is None:
@@ -134,7 +124,7 @@ async def generate_redeem_codes(
     max_attempts = count * 10
     while len(candidates) < count and attempts < max_attempts:
         attempts += 1
-        display_code = generate_random_code_str(clean_prefix)
+        display_code = generate_random_code_str()
         norm = normalize_redeem_code(display_code)
         if norm not in candidates:
             candidates[norm] = display_code
@@ -151,7 +141,7 @@ async def generate_redeem_codes(
 
     while len(candidates) < count and attempts < max_attempts * 2:
         attempts += 1
-        display_code = generate_random_code_str(clean_prefix)
+        display_code = generate_random_code_str()
         norm = normalize_redeem_code(display_code)
         if norm in candidates or norm in existing:
             continue
@@ -260,6 +250,7 @@ async def list_admin_redeem_codes(
     session: AsyncSession,
     *,
     status_filter: Literal["active", "exhausted", "expired", "disabled"] | None = None,
+    credits_filter: Decimal | None = None,
     batch_name: str | None = None,
     keyword: str | None = None,
     limit: int = 20,
@@ -267,6 +258,9 @@ async def list_admin_redeem_codes(
 ) -> AdminRedeemCodeListOut:
     now = datetime.now(UTC)
     conditions = []
+
+    if credits_filter is not None:
+        conditions.append(RedeemCode.credits == _q(credits_filter))
 
     clean_batch = (batch_name or "").strip()
     if clean_batch:
@@ -376,6 +370,7 @@ async def list_admin_redeem_codes(
         ),
         batches=batch_rows,
         purchase_url=purchase_url,
+        credit_tiers=list(REDEEM_CREDIT_TIERS),
     )
 
 

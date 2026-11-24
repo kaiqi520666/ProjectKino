@@ -131,12 +131,29 @@ export function formatCreditReason(reason?: string | null): string {
   return text
 }
 
-export function formatRateSpec(
+function formatCompactCount(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2).replace(/\.?0+$/u, '')}M`
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1).replace(/\.0$/u, '')}k`
+  return String(Math.round(value))
+}
+
+function readTokenInt(usage: Record<string, unknown>, ...keys: string[]): number {
+  for (const key of keys) {
+    const raw = usage[key]
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) return raw
+    if (typeof raw === 'string' && raw.trim() && Number.isFinite(Number(raw)) && Number(raw) > 0) {
+      return Number(raw)
+    }
+  }
+  return 0
+}
+
+export function formatRateSpecTags(
   rateSnapshot?: Record<string, unknown> | null,
   tokenUsage?: Record<string, unknown> | null,
-): string {
+): string[] {
   if (rateSnapshot && typeof rateSnapshot === 'object') {
-    const parts: string[] = []
+    const tags: string[] = []
     const tier = rateSnapshot.tier
     const ruleKey = rateSnapshot.ruleKey ?? rateSnapshot.rule_key
     const duration = rateSnapshot.durationSeconds ?? rateSnapshot.duration_seconds
@@ -144,19 +161,49 @@ export function formatRateSpec(
     const basePrice = rateSnapshot.basePrice ?? rateSnapshot.base_price
 
     if (typeof tier === 'string' && tier) {
-      parts.push(tier.toUpperCase())
+      tags.push(tier.toUpperCase())
     }
     if (typeof ruleKey === 'string' && ruleKey && ruleKey !== 'default') {
-      parts.push(ruleKey)
+      tags.push(ruleKey)
     }
     if (duration !== undefined && duration !== null && Number(duration) > 0) {
-      parts.push(`${Number(duration)}s`)
+      tags.push(`${Number(duration)}s`)
     }
     if (basePrice !== undefined && basePrice !== null && Number.isFinite(Number(basePrice))) {
       const suffix = unit === 'second' ? '积分/秒' : '积分/次'
-      parts.push(`${formatCredits(String(basePrice))} ${suffix}`)
+      tags.push(`${formatCredits(String(basePrice))} ${suffix}`)
     }
-    if (parts.length) return parts.join(' · ')
+    if (tags.length) return tags
+  }
+
+  if (tokenUsage && typeof tokenUsage === 'object') {
+    const input = readTokenInt(tokenUsage, 'inputTokens', 'input_tokens', 'promptTokens', 'prompt_tokens')
+    const output = readTokenInt(tokenUsage, 'outputTokens', 'output_tokens', 'completionTokens', 'completion_tokens')
+    const cached = readTokenInt(tokenUsage, 'cachedInputTokens', 'cached_input_tokens', 'cachedTokens', 'cached_tokens')
+    const tags: string[] = []
+    if (input > 0 && output > 0) {
+      tags.push(`入 ${formatCompactCount(input)} / 出 ${formatCompactCount(output)}`)
+    } else if (input > 0) {
+      tags.push(`入 ${formatCompactCount(input)}`)
+    } else if (output > 0) {
+      tags.push(`出 ${formatCompactCount(output)}`)
+    }
+    if (cached > 0) {
+      tags.push(`缓存 ${formatCompactCount(cached)}`)
+    }
+    return tags
+  }
+
+  return []
+}
+
+export function formatRateSpec(
+  rateSnapshot?: Record<string, unknown> | null,
+  tokenUsage?: Record<string, unknown> | null,
+): string {
+  if (rateSnapshot && typeof rateSnapshot === 'object') {
+    const tags = formatRateSpecTags(rateSnapshot, null)
+    if (tags.length) return tags.join(' · ')
   }
   return formatTokenUsage(tokenUsage)
 }

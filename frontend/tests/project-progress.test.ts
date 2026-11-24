@@ -4,7 +4,6 @@ import { createPinia, setActivePinia } from 'pinia'
 import {
   resolveProjectCoverUrl,
   resolveProjectProgress,
-  styleCoverUrl,
 } from '../src/features/projects/project-progress.ts'
 import {
   buildEpisodeNavItems,
@@ -38,14 +37,14 @@ test('resolveProjectCoverUrl follows custom > auto > style priority', () => {
   const fallback = resolveProjectCoverUrl({
     coverUrl: '   ',
     autoCoverUrl: null,
+    styleCoverUrl: 'https://cdn.example.com/framedrama/system/art-styles/live-action.webp',
     visualStyle: 'unknown-style',
   })
   assert.deepEqual(fallback, {
-    url: styleCoverUrl('unknown-style'),
+    url: 'https://cdn.example.com/framedrama/system/art-styles/live-action.webp',
     isCustom: false,
     isAuto: false,
   })
-  assert.equal(fallback.url, '/images/art-styles/live-action.webp')
 })
 
 test('resolveProjectProgress covers all production stages and target routes', () => {

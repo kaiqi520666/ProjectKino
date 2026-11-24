@@ -250,8 +250,8 @@ const emit = defineEmits<{
 .episode-cta-split {
   display: inline-flex;
   align-items: stretch;
-  height: 36px;
-  border-radius: 9px;
+  height: var(--control-height-sm);
+  border-radius: var(--radius-control-sm);
   overflow: hidden;
   border: 1px solid rgb(240 184 75 / 55%);
   box-shadow: 0 2px 10px rgb(240 184 75 / 12%);
@@ -297,15 +297,15 @@ const emit = defineEmits<{
 }
 
 .episode-generate-btn.ui-button {
-  min-height: 34px;
+  min-height: 0;
   height: 100%;
-  padding: 0 15px;
+  padding: 0 14px;
   border: 0;
   border-radius: 0;
 }
 
 .episode-cta-split.is-solo .episode-generate-btn.ui-button {
-  border-radius: 9px;
+  border-radius: var(--radius-control-sm);
 }
 
 .episode-clip-job-banner {

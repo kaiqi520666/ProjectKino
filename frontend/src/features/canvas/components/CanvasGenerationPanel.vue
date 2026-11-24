@@ -467,10 +467,10 @@ function applyPrompt() {
 .canvas-generation-controls :deep(.imp-trigger),
 .canvas-generation-controls :deep(.ip-trigger),
 .canvas-generation-controls :deep(.vmp-trigger),
-.canvas-generation-controls :deep(.vp-trigger) { height: 36px; border-radius: 6px; background: var(--color-elevated); }
+.canvas-generation-controls :deep(.vp-trigger) { height: var(--control-height-sm); border-radius: var(--radius-control-sm); background: var(--color-elevated); }
 .canvas-generation-controls :deep(.imp-trigger),
 .canvas-generation-controls :deep(.vmp-trigger) { max-width: 210px; }
-.canvas-generation-trigger { display: inline-flex; align-items: center; gap: 7px; min-height: 36px; padding: 0 9px; border: 1px solid transparent; border-radius: 6px; white-space: nowrap; }
+.canvas-generation-trigger { display: inline-flex; align-items: center; gap: 7px; height: var(--control-height-sm); min-height: var(--control-height-sm); padding: 0 9px; border: 1px solid transparent; border-radius: var(--radius-control-sm); white-space: nowrap; }
 .canvas-generation-trigger svg { flex: none; }
 .canvas-model-select { width: 196px; border-color: var(--border-control); background: var(--color-elevated); }
 .canvas-model-value { flex: 1; min-width: 0; overflow: hidden; text-align: start; text-overflow: ellipsis; }
@@ -478,8 +478,8 @@ function applyPrompt() {
 .canvas-generation-trigger[data-state='open'] { border-color: var(--color-gold); }
 .canvas-generation-trigger[data-state='open'] .canvas-generation-chevron { rotate: 180deg; }
 :global(.ui-popover.canvas-model-popover) { z-index: 100; width: 240px; max-width: var(--reka-select-content-available-width); max-height: var(--reka-select-content-available-height); overflow: auto; cursor: default; }
-.canvas-model-option { min-height: 36px; padding-right: 10px; }
-.canvas-generation-controls :is(.canvas-expand, .canvas-submit) { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 6px; }
+.canvas-model-option { min-height: var(--control-height-sm); padding-right: 10px; }
+.canvas-generation-controls :is(.canvas-expand, .canvas-submit) { display: grid; place-items: center; width: var(--control-height-sm); height: var(--control-height-sm); border-radius: var(--radius-control-sm); }
 .canvas-generation-controls .canvas-expand { margin-left: auto; }
 .canvas-generation-controls .canvas-credits { margin-left: auto; font-variant-numeric: tabular-nums; }
 .canvas-generation-controls .canvas-credits + .canvas-expand { margin-left: 0; }

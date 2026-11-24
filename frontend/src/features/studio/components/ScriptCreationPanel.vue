@@ -497,7 +497,7 @@ watch(open, (isOpen) => {
 .script-entry-symbol { display: grid; place-items: center; width: 40px; height: 40px; flex-shrink: 0; border: 1px solid rgb(240 184 75 / 16%); border-radius: 8px; background: var(--gold-tint); color: var(--color-gold-soft); }
 .script-entry-button { min-width: 128px; }
 .drama-stepper { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 10px; margin-bottom: 20px; padding: 4px; border: 1px solid var(--border-subtle); border-radius: 10px; background: rgb(255 255 255 / 2%); }
-.drama-step-tab { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 36px; padding: 6px 12px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--color-muted); font-size: 13px; font-weight: 500; cursor: pointer; transition: border-color .15s, background-color .15s, color .15s; }
+.drama-step-tab { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: var(--control-height-sm); padding: 4px 12px; border: 1px solid transparent; border-radius: var(--radius-control-sm); background: transparent; color: var(--color-muted); font-size: 13px; font-weight: 500; cursor: pointer; transition: border-color .15s, background-color .15s, color .15s; }
 .drama-step-tab:hover:not(:disabled) { color: var(--color-text); background: var(--surface-hover); }
 .drama-step-tab.is-active { border-color: rgb(240 184 75 / 28%); background: var(--gold-tint); color: var(--color-gold-soft); }
 .drama-step-tab.is-done { color: var(--color-text); }
@@ -552,8 +552,9 @@ watch(open, (isOpen) => {
 .drama-image-defaults { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); align-items: end; gap: 12px; }
 .drama-model-picker-wrap { display: flex; }
 .drama-model-picker-wrap :deep(.vmp-trigger),
-.drama-model-picker-wrap :deep(.imp-trigger) { width: 100%; justify-content: space-between; min-height: 40px; }
-.drama-image-tiers span { min-height: 30px; font-size: 13px; }
+.drama-model-picker-wrap :deep(.imp-trigger) { width: 100%; justify-content: space-between; height: var(--control-height-md); min-height: var(--control-height-md); border-radius: var(--radius-control); }
+.drama-image-tiers { padding: 3px; border-radius: var(--radius-control); }
+.drama-image-tiers span { min-height: calc(var(--control-height-md) - 8px); font-size: 13px; }
 .drama-dialog-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 14px; width: 100%; }
 .drama-footer-summary { color: var(--color-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .drama-footer-summary strong { color: var(--color-text); font-weight: 500; }

@@ -262,19 +262,19 @@ onMounted(() => loadUsers(true))
     <form class="admin-toolbar" @submit.prevent="loadUsers(true)">
       <div class="admin-filters">
         <div class="ui-input-wrap has-leading admin-search-input">
-          <Search :size="15" class="ui-input-icon" />
+          <Search :size="14" class="ui-input-icon" />
           <input
             v-model="filters.q"
-            class="ui-input"
+            class="ui-input ui-input--sm"
             type="search"
             placeholder="搜索邮箱或昵称..."
           />
         </div>
         <div class="admin-filter-select">
-          <UiSelect v-model="filters.role" :options="roleFilterOptions" placeholder="筛选角色" @update:model-value="loadUsers(true)" />
+          <UiSelect v-model="filters.role" size="sm" :options="roleFilterOptions" placeholder="筛选角色" @update:model-value="loadUsers(true)" />
         </div>
         <div class="admin-filter-select">
-          <UiSelect v-model="filters.status" :options="statusFilterOptions" placeholder="筛选状态" @update:model-value="loadUsers(true)" />
+          <UiSelect v-model="filters.status" size="sm" :options="statusFilterOptions" placeholder="筛选状态" @update:model-value="loadUsers(true)" />
         </div>
         <button type="submit" class="ui-button ui-button--primary ui-button--sm">查询</button>
       </div>
@@ -297,8 +297,14 @@ onMounted(() => loadUsers(true))
         <span class="admin-mono">#{{ row.id }}</span>
       </template>
       <template #cell-account="{ row }">
-        <div class="admin-cell-primary">{{ row.email }}</div>
-        <div class="admin-cell-sub">{{ row.nickname || '未设昵称' }}</div>
+        <div
+          class="admin-inline-meta"
+          :title="`${row.email} · ${row.nickname || '未设昵称'}`"
+        >
+          <span class="admin-cell-primary">{{ row.email }}</span>
+          <span class="admin-inline-sep" aria-hidden="true">·</span>
+          <span class="admin-inline-sub">{{ row.nickname || '未设昵称' }}</span>
+        </div>
       </template>
       <template #cell-role="{ row }">
         <span class="admin-badge" :class="roleBadgeClass(row.role)">
@@ -329,16 +335,16 @@ onMounted(() => loadUsers(true))
       </template>
       <template #cell-actions="{ row }">
         <div class="admin-actions">
-          <button type="button" class="ui-button ui-button--outline ui-button--sm" @click="openCreditDialog(row)">
-            <Coins :size="13" />
+          <button type="button" class="ui-button ui-button--outline ui-button--xs" @click="openCreditDialog(row)">
+            <Coins :size="12" />
             <span>充/扣积分</span>
           </button>
-          <button type="button" class="ui-button ui-button--secondary ui-button--sm" @click="openEditDialog(row)">
-            <Shield :size="13" />
+          <button type="button" class="ui-button ui-button--secondary ui-button--xs" @click="openEditDialog(row)">
+            <Shield :size="12" />
             <span>改权限</span>
           </button>
-          <button type="button" class="ui-button ui-button--ghost ui-button--sm" @click="openLedgerDialog(row)">
-            <FileText :size="13" />
+          <button type="button" class="ui-button ui-button--ghost ui-button--xs" @click="openLedgerDialog(row)">
+            <FileText :size="12" />
             <span>查流水</span>
           </button>
         </div>

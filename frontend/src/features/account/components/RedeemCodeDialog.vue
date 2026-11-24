@@ -58,7 +58,7 @@ async function handleSubmit() {
       <UiInput
         v-model="code"
         label="兑换码"
-        placeholder="输入兑换码，如 ABCD-EFGH-JKLM"
+        placeholder="输入兑换码，如 ABCD-EFGH-JKLM-NPQR-STUV"
         autocomplete="off"
         :error="errorText"
         required

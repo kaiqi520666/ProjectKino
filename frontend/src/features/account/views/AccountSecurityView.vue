@@ -469,10 +469,10 @@ async function savePassword() {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  min-height: 36px;
-  padding: 7px 11px;
+  height: var(--control-height-md);
+  padding: 0 12px;
   border: 1px solid var(--border-subtle);
-  border-radius: 7px;
+  border-radius: var(--radius-control);
   background: var(--color-canvas);
   color: var(--color-muted);
   font-size: 13px;

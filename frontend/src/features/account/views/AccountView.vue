@@ -99,12 +99,13 @@ async function handleLogout() {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 9px 14px 11px;
+  height: var(--control-height-md);
+  padding: 0 14px;
   color: var(--color-muted);
   font-size: 13.5px;
   font-weight: 500;
   text-decoration: none;
-  border-radius: 7px 7px 0 0;
+  border-radius: var(--radius-control-sm) var(--radius-control-sm) 0 0;
   transition: color 0.16s ease, background-color 0.16s ease;
 }
 

@@ -38,9 +38,9 @@ function select(value: string) {
 </template>
 
 <style scoped>
-.workspace-user-trigger { display: inline-flex; align-items: center; gap: 8px; min-width: 0; min-height: 36px; padding: 3px 6px; border: 0; border-radius: 6px; background: transparent; color: #d2d2d6; font-size: 12px; }
+.workspace-user-trigger { display: inline-flex; align-items: center; gap: 8px; min-width: 0; height: var(--control-height-sm); padding: 0 8px 0 4px; border: 0; border-radius: var(--radius-control-sm); background: transparent; color: #d2d2d6; font-size: 13px; }
 .workspace-user-trigger:hover, .workspace-user-trigger[data-state="open"] { background: var(--surface-hover); }
-.workspace-avatar { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; overflow: hidden; border: 1px solid var(--border-control); border-radius: 50%; background: #232328; color: #bcbcc4; }
+.workspace-avatar { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; overflow: hidden; border: 1px solid var(--border-control); border-radius: 50%; background: #232328; color: #bcbcc4; }
 .workspace-avatar img { width: 100%; height: 100%; object-fit: cover; }
 .workspace-user-name { max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 960px) { .workspace-user-name { display: none; } }

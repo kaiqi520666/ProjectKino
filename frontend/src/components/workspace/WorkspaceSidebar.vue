@@ -2,8 +2,10 @@
 import { computed, onUnmounted, ref } from 'vue'
 import {
   Activity,
+  Bell,
   FolderArchive,
   LayoutDashboard,
+  Palette,
   Server,
   Settings2,
   ShieldCheck,
@@ -36,8 +38,10 @@ const adminMenuItems = computed(() => [
   { key: 'overview', to: '/admin', label: '概览', icon: LayoutDashboard, badge: 0, danger: false },
   { key: 'users', to: '/admin/users', label: '用户与积分', icon: Users, badge: 0, danger: false },
   { key: 'redeem-codes', to: '/admin/redeem-codes', label: '兑换码', icon: Ticket, badge: 0, danger: false },
+  { key: 'announcements', to: '/admin/announcements', label: '系统公告', icon: Bell, badge: 0, danger: false },
   { key: 'jobs', to: '/admin/jobs', label: '任务与核对', icon: Activity, badge: props.adminReviewCount, danger: true },
   { key: 'models', to: '/admin/models', label: '供应商与定价', icon: Server, badge: 0, danger: false },
+  { key: 'art-styles', to: '/admin/art-styles', label: '画风管理', icon: Palette, badge: 0, danger: false },
   { key: 'settings', to: '/admin/settings', label: '系统与 OSS', icon: Settings2, badge: 0, danger: false },
   { key: 'projects', to: '/admin/projects', label: '项目与清理', icon: FolderArchive, badge: props.adminArchivedCount, danger: false },
 ])

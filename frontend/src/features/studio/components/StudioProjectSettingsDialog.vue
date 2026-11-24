@@ -20,8 +20,8 @@ import {
   type ImageTier,
 } from '../model-defaults'
 import type { StudioProject } from '../studio-project'
+import { useArtStylesStore } from '@/features/art-styles/art-styles-store'
 import { useStudioStore } from '../studio-store'
-import { artStyles } from './art-styles'
 import ArtStylePicker from './ArtStylePicker.vue'
 import {
   defaultSegmentDuration,
@@ -39,6 +39,7 @@ const props = defineProps<{
 const open = defineModel<boolean>('open', { required: true })
 
 const studio = useStudioStore()
+const artStylesStore = useArtStylesStore()
 const ui = useUiStore()
 const { imageModels, videoModels, ensureLoaded: ensureModelCatalog } = useModelCatalog()
 
@@ -140,10 +141,10 @@ async function submit() {
     return
   }
 
-  const styleMeta = artStyles.find((item) => item.value === visualStyle.value)
+  const stylePrompt = artStylesStore.getPrompt(visualStyle.value)
   const payload: ProjectMetaUpdatePayload = {
     visualStyle: visualStyle.value,
-    visualStyleLabel: styleMeta?.prompt ?? null,
+    visualStyleLabel: stylePrompt || null,
     ratio: ratio.value,
     maxSegmentDuration: maxSegmentDuration.value,
     backgroundMusic: backgroundMusic.value,
@@ -340,10 +341,10 @@ async function submit() {
   align-items: center;
   justify-content: center;
   gap: 2px;
-  min-height: 36px;
+  min-height: var(--control-height-md);
   padding: 6px 8px;
   border: 1px solid var(--border-control);
-  border-radius: 7px;
+  border-radius: var(--radius-control);
   background: var(--color-canvas);
   color: var(--color-muted);
   font-size: 12px;
@@ -381,10 +382,10 @@ async function submit() {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 36px;
-  padding: 6px 10px;
+  min-height: var(--control-height-md);
+  padding: 0 12px;
   border: 1px solid var(--border-control);
-  border-radius: 7px;
+  border-radius: var(--radius-control);
   background: var(--color-canvas);
 }
 

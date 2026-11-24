@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, provide, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Bell, ExternalLink, Headphones, RefreshCw, Tags, Ticket, Wallet } from 'lucide-vue-next'
+import { ExternalLink, Headphones, RefreshCw, Tags, Ticket, Wallet } from 'lucide-vue-next'
 import UiAlert from '@/components/ui/UiAlert.vue'
+import UiBadge from '@/components/ui/UiBadge.vue'
+import UiButton from '@/components/ui/UiButton.vue'
 import UiDataTable, { type DataTableColumn } from '@/components/ui/UiDataTable.vue'
 import UiDialog from '@/components/ui/UiDialog.vue'
 import WorkspaceHeader from '@/components/workspace/WorkspaceHeader.vue'
@@ -11,6 +13,9 @@ import type { WorkspaceBreadcrumb, WorkspaceUser } from '@/components/workspace/
 import RedeemCodeDialog from '@/features/account/components/RedeemCodeDialog.vue'
 import { fetchCreditBills, type CreditBillItem } from '@/features/account/credits-api'
 import { formatCreditReason } from '@/features/account/credits-helpers'
+import AnnouncementsDialog from '@/features/announcements/components/AnnouncementsDialog.vue'
+import { useAnnouncementStore } from '@/features/announcements/announcement-store'
+import { useArtStylesStore } from '@/features/art-styles/art-styles-store'
 import { getAdminOverview } from '@/features/admin/api'
 import { LEDGER_OP_LABELS } from '@/features/admin/format'
 import { useCanvasStore } from '@/features/canvas/canvas-store'
@@ -35,9 +40,12 @@ const ui = useUiStore()
 const studio = useStudioStore()
 const canvas = useCanvasStore()
 const userAssets = useUserAssetsStore()
+const announcements = useAnnouncementStore()
+const artStylesStore = useArtStylesStore()
 
 const mobileOpen = ref(false)
-const panel = ref<'prices' | 'support' | 'announcements' | 'recharge' | null>(null)
+const panel = ref<'prices' | 'support' | 'recharge' | null>(null)
+const announcementsOpen = ref(false)
 const adminReviewCount = ref(0)
 const adminArchivedCount = ref(0)
 
@@ -61,6 +69,25 @@ const rechargeColumns: DataTableColumn[] = [
   { key: 'amount', label: '到账积分', align: 'right', width: '110px' },
   { key: 'balanceAfter', label: '入账后余额', align: 'right', width: '120px' },
   { key: 'reason', label: '说明' },
+]
+
+const textPriceColumns: DataTableColumn[] = [
+  { key: 'displayName', label: '模型', width: '260px' },
+  { key: 'input', label: '输入（积分/百万 Token）', align: 'right' },
+  { key: 'cached', label: '缓存命中（积分/百万 Token）', align: 'right' },
+  { key: 'output', label: '输出（积分/百万 Token）', align: 'right' },
+]
+
+const imagePriceColumns: DataTableColumn[] = [
+  { key: 'displayName', label: '模型', width: '260px' },
+  { key: 'prices', label: '各分辨率档位单价（积分/张）' },
+]
+
+const videoPriceColumns: DataTableColumn[] = [
+  { key: 'category', label: '系列', width: '132px' },
+  { key: 'displayName', label: '模型', width: '250px' },
+  { key: 'spec', label: '分辨率 / 时长', width: '180px' },
+  { key: 'prices', label: '计费方式与价格' },
 ]
 
 const isAdminRoute = computed(() => route.matched.some((r) => Boolean(r.meta.requiresAdmin)))
@@ -94,7 +121,6 @@ provide('refreshAdminReviewBadge', refreshAdminReviewBadge)
 const panels = {
   prices: { title: '模型价格表', description: '', icon: Tags, message: '' },
   support: { title: '联系客服', description: '', icon: Headphones, message: '客服联系方式尚未配置。' },
-  announcements: { title: '系统公告', description: '', icon: Bell, message: '暂无新公告。' },
   recharge: { title: '积分充值', description: '', icon: Wallet, message: '' },
 }
 const currentPanel = computed(() => panels[panel.value || 'prices'])
@@ -141,7 +167,7 @@ function goToCreditBills() {
   void router.push({ name: 'account-credits' })
 }
 
-function openPanel(next: 'prices' | 'support' | 'announcements' | 'recharge') {
+function openPanel(next: 'prices' | 'support' | 'recharge') {
   panel.value = next
   if (next === 'prices') loadPrices()
   if (next === 'recharge') loadRechargeRecords(true)
@@ -154,11 +180,14 @@ watch(() => route.fullPath, () => {
 }, { immediate: true })
 
 onMounted(async () => {
+  void artStylesStore.ensureLoaded()
   if (auth.isAdmin) await refreshAdminReviewBadge()
 })
 
 async function handleLogout() {
   await auth.logout()
+  announcements.clearSession()
+  artStylesStore.clear()
   studio.clearProjects()
   canvas.clearAll()
   userAssets.clear()
@@ -185,10 +214,11 @@ onUnmounted(() => { document.title = previousTitle })
         :user="user"
         :is-admin="auth.isAdmin"
         :preview="false"
+        :unread-announcements="announcements.unreadCount"
         @menu="mobileOpen = true"
         @prices="openPanel('prices')"
         @support="openPanel('support')"
-        @announcements="openPanel('announcements')"
+        @announcements="announcementsOpen = true"
         @recharge="openPanel('recharge')"
         @account="router.push('/account')"
         @admin="router.push('/admin')"
@@ -213,84 +243,98 @@ onUnmounted(() => { document.title = previousTitle })
       <!-- 实时模型价格表 -->
       <div v-if="panel === 'prices'" class="ws-live-panel">
         <div class="ws-live-bar ws-live-bar--end">
-          <button type="button" class="ui-button ui-button--secondary ui-button--sm" :disabled="catalogLoading" @click="loadPrices">
-            <RefreshCw :size="13" :class="{ 'ui-spin': catalogLoading }" />
-            <span>刷新价格</span>
-          </button>
+          <UiButton variant="secondary" size="sm" :disabled="catalogLoading" @click="loadPrices">
+            <template #leading><RefreshCw :size="13" :class="{ 'ui-spin': catalogLoading }" aria-hidden="true" /></template>
+            刷新价格
+          </UiButton>
         </div>
         <div v-if="catalogLoading && !catalog" class="ws-live-empty">正在加载最新模型价格...</div>
         <div v-else-if="catalog" class="ws-price-sections">
           <div class="ws-price-group">
             <h4>文本模型（按真实 Token 后扣）</h4>
-            <table class="ws-table">
-              <thead>
-                <tr>
-                  <th>模型</th>
-                  <th>输入（积分/百万 Token）</th>
-                  <th>缓存命中（积分/百万 Token）</th>
-                  <th>输出（积分/百万 Token）</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="m in catalog.text" :key="m.id">
-                  <td><strong>{{ m.displayName }}</strong> <small v-if="m.isDefault" class="ws-tag">默认</small></td>
-                  <td class="ws-mono">{{ formatCredits(m.textPrice?.inputPricePerMillion) }}</td>
-                  <td class="ws-mono">{{ formatCredits(m.textPrice?.cachedInputPricePerMillion) }}</td>
-                  <td class="ws-mono">{{ formatCredits(m.textPrice?.outputPricePerMillion) }}</td>
-                </tr>
-              </tbody>
-            </table>
+            <UiDataTable
+              :columns="textPriceColumns"
+              :rows="catalog.text"
+              row-key="id"
+              :loading="catalogLoading"
+              empty-text="暂无可用文本模型"
+            >
+              <template #cell-displayName="{ row }">
+                <div class="ws-model-cell">
+                  <strong>{{ row.displayName }}</strong>
+                  <UiBadge v-if="row.isDefault" tone="gold">默认</UiBadge>
+                </div>
+              </template>
+              <template #cell-input="{ row }">
+                <span class="ws-mono">{{ formatCredits(row.textPrice?.inputPricePerMillion) }}</span>
+              </template>
+              <template #cell-cached="{ row }">
+                <span class="ws-mono">{{ formatCredits(row.textPrice?.cachedInputPricePerMillion) }}</span>
+              </template>
+              <template #cell-output="{ row }">
+                <span class="ws-mono">{{ formatCredits(row.textPrice?.outputPricePerMillion) }}</span>
+              </template>
+            </UiDataTable>
           </div>
 
           <div class="ws-price-group">
             <h4>生图模型（预冻结，失败自动退还）</h4>
-            <table class="ws-table">
-              <thead>
-                <tr>
-                  <th>模型</th>
-                  <th>各分辨率档位单价（积分/张）</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="m in catalog.image" :key="m.id">
-                  <td><strong>{{ m.displayName }}</strong> <small v-if="m.isDefault" class="ws-tag">默认</small></td>
-                  <td class="ws-mono">
-                    <span v-for="p in m.imagePrices" :key="p.tier" class="ws-price-chip">
-                      {{ p.tier.toUpperCase() }}: {{ formatCredits(p.creditPrice) }}
-                    </span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+            <UiDataTable
+              :columns="imagePriceColumns"
+              :rows="catalog.image"
+              row-key="id"
+              :loading="catalogLoading"
+              empty-text="暂无可用生图模型"
+            >
+              <template #cell-displayName="{ row }">
+                <div class="ws-model-cell">
+                  <strong>{{ row.displayName }}</strong>
+                  <UiBadge v-if="row.isDefault" tone="gold">默认</UiBadge>
+                </div>
+              </template>
+              <template #cell-prices="{ row }">
+                <div class="ws-chip-row">
+                  <UiBadge v-for="p in row.imagePrices" :key="p.tier" variant="chip">
+                    {{ p.tier.toUpperCase() }}: {{ formatCredits(p.creditPrice) }}
+                  </UiBadge>
+                </div>
+              </template>
+            </UiDataTable>
           </div>
 
           <div class="ws-price-group">
             <h4>生视频模型（预冻结，失败自动退还）</h4>
-            <table class="ws-table">
-              <thead>
-                <tr>
-                  <th>系列</th>
-                  <th>模型</th>
-                  <th>分辨率 / 时长</th>
-                  <th>计费方式与价格</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="m in catalog.video" :key="m.id">
-                  <td><span v-if="m.category" class="ws-tag">{{ m.category }}</span><span v-else>-</span></td>
-                  <td><strong>{{ m.displayName }}</strong> <small v-if="m.isDefault" class="ws-tag">默认</small></td>
-                  <td class="ws-mono">
-                    {{ Array.isArray(m.capabilities?.resolutions) ? m.capabilities.resolutions.join('/') : '720p' }}
-                    · {{ m.capabilities?.minDuration ?? 4 }}–{{ m.capabilities?.maxDuration ?? 15 }}s
-                  </td>
-                  <td class="ws-mono">
-                    <span v-for="p in m.videoPrices" :key="p.ruleKey" class="ws-price-chip">
-                      {{ formatCredits(p.creditPrice) }} 积分 / {{ p.unit === 'second' ? '秒' : '条' }}
-                    </span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+            <UiDataTable
+              :columns="videoPriceColumns"
+              :rows="catalog.video"
+              row-key="id"
+              :loading="catalogLoading"
+              empty-text="暂无可用生视频模型"
+            >
+              <template #cell-category="{ row }">
+                <UiBadge v-if="row.category" tone="gold">{{ row.category }}</UiBadge>
+                <span v-else class="ws-muted">-</span>
+              </template>
+              <template #cell-displayName="{ row }">
+                <div class="ws-model-cell">
+                  <strong>{{ row.displayName }}</strong>
+                  <UiBadge v-if="row.isDefault" tone="gold">默认</UiBadge>
+                </div>
+              </template>
+              <template #cell-spec="{ row }">
+                <span class="ws-mono">
+                  {{ Array.isArray(row.capabilities?.resolutions) ? row.capabilities.resolutions.join('/') : '720p' }}
+                  · {{ row.capabilities?.minDuration ?? 4 }}–{{ row.capabilities?.maxDuration ?? 15 }}s
+                </span>
+              </template>
+              <template #cell-prices="{ row }">
+                <div class="ws-chip-row">
+                  <UiBadge v-for="p in row.videoPrices" :key="p.ruleKey" variant="chip">
+                    {{ formatCredits(p.creditPrice) }} 积分 / {{ p.unit === 'second' ? '秒' : '条' }}
+                  </UiBadge>
+                </div>
+              </template>
+            </UiDataTable>
           </div>
         </div>
       </div>
@@ -313,29 +357,29 @@ onUnmounted(() => { document.title = previousTitle })
         </div>
         <div class="ws-live-bar">
           <div class="ws-live-bar-actions">
-            <button type="button" class="ui-button ui-button--primary ui-button--sm" @click="redeemDialogOpen = true">
-              <Ticket :size="13" />
-              <span>兑换积分</span>
-            </button>
-            <a
+            <UiButton variant="primary" size="sm" @click="redeemDialogOpen = true">
+              <template #leading><Ticket :size="13" aria-hidden="true" /></template>
+              兑换积分
+            </UiButton>
+            <UiButton
               v-if="auth.redeemPurchaseUrl"
+              variant="outline"
+              size="sm"
               :href="auth.redeemPurchaseUrl"
               target="_blank"
-              rel="noopener noreferrer"
-              class="ui-button ui-button--secondary ui-button--sm"
             >
-              <span>购买兑换码</span>
-              <ExternalLink :size="12" />
-            </a>
+              购买兑换码
+              <template #trailing><ExternalLink :size="12" aria-hidden="true" /></template>
+            </UiButton>
           </div>
           <div class="ws-live-bar-actions">
-            <button type="button" class="ui-button ui-button--secondary ui-button--sm" @click="goToCreditBills">
-              <span>消费账单</span>
-            </button>
-            <button type="button" class="ui-button ui-button--secondary ui-button--sm" :disabled="rechargeLoading" @click="loadRechargeRecords()">
-              <RefreshCw :size="13" :class="{ 'ui-spin': rechargeLoading }" />
-              <span>刷新</span>
-            </button>
+            <UiButton variant="secondary" size="sm" @click="goToCreditBills">
+              消费账单
+            </UiButton>
+            <UiButton variant="secondary" size="sm" :disabled="rechargeLoading" @click="loadRechargeRecords()">
+              <template #leading><RefreshCw :size="13" :class="{ 'ui-spin': rechargeLoading }" aria-hidden="true" /></template>
+              刷新
+            </UiButton>
           </div>
         </div>
         <UiDataTable
@@ -346,7 +390,6 @@ onUnmounted(() => { document.title = previousTitle })
           row-key="id"
           :loading="rechargeLoading"
           empty-text="暂无充值与入账记录"
-          compact
           paginated
           :total="rechargeTotal"
           @change="loadRechargeRecords()"
@@ -355,7 +398,7 @@ onUnmounted(() => { document.title = previousTitle })
             <span class="ws-mono">{{ formatDateTime(row.createdAt) }}</span>
           </template>
           <template #cell-operation="{ row }">
-            <span class="ws-tag">{{ LEDGER_OP_LABELS[row.operation] || row.operation }}</span>
+            <UiBadge tone="gold">{{ LEDGER_OP_LABELS[row.operation] || row.operation }}</UiBadge>
           </template>
           <template #cell-amount="{ row }">
             <span class="ws-mono is-pos">{{ formatSignedCredits(row.amount) }}</span>
@@ -381,6 +424,8 @@ onUnmounted(() => { document.title = previousTitle })
       :purchase-url="auth.redeemPurchaseUrl"
       @redeemed="loadRechargeRecords(true)"
     />
+
+    <AnnouncementsDialog v-model:open="announcementsOpen" />
   </div>
 </template>
 
@@ -399,15 +444,10 @@ onUnmounted(() => { document.title = previousTitle })
 .ws-balance-card strong.is-neg { color: var(--color-error); }
 .ws-price-sections { display: flex; flex-direction: column; gap: 16px; }
 .ws-price-group h4 { margin: 0 0 8px; font-size: 13px; color: var(--color-gold-soft); font-weight: 600; }
-.ws-table-wrap { overflow-x: auto; border: 1px solid var(--border-subtle); border-radius: 8px; }
-.ws-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.ws-table th { padding: 9px 12px; text-align: left; font-size: 12px; font-weight: 500; color: var(--color-muted); background: rgb(255 255 255 / 2.5%); border-bottom: 1px solid var(--border-subtle); white-space: nowrap; }
-.ws-table td { padding: 9px 12px; border-bottom: 1px solid var(--border-subtle); vertical-align: middle; }
-.ws-table tbody tr:last-child td { border-bottom: 0; }
-.ws-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; font-variant-numeric: tabular-nums; }
-.ws-tag { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; background: var(--gold-tint); color: var(--color-gold-soft); border: 1px solid rgb(240 184 75 / 28%); }
-.ws-price-chip { display: inline-block; margin: 2px 8px 2px 0; padding: 2px 7px; border-radius: 5px; background: rgb(255 255 255 / 4%); border: 1px solid var(--border-subtle); }
-.ws-token-sub { margin-top: 2px; font-size: 11px; color: var(--color-muted); }
+.ws-model-cell { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.ws-chip-row { display: inline-flex; align-items: center; gap: 6px; flex-wrap: nowrap; }
+.ws-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ws-muted { color: var(--color-muted); }
 .is-pos { color: var(--color-success); font-weight: 600; }
 .is-neg { color: var(--color-error); font-weight: 600; }
 @media (max-width: 640px) { .ws-balance-cards { grid-template-columns: minmax(0, 1fr); } }

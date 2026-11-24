@@ -13,7 +13,7 @@ const name = useId()
     <label v-for="style in styles" :key="style.value" class="art-style-card">
       <input v-model="selected" class="sr-only" type="radio" :name="name" :value="style.value" />
       <span class="art-style-tile">
-        <img :src="`/images/art-styles/${style.value}.webp`" alt="" :loading="compact ? 'eager' : 'lazy'" decoding="async" />
+        <img v-if="style.imageUrl" :src="style.imageUrl" alt="" :loading="compact ? 'eager' : 'lazy'" decoding="async" />
         <span class="art-style-name">{{ style.label }}</span>
         <Check v-if="selected === style.value" class="art-style-check" :size="18" aria-hidden="true" />
       </span>

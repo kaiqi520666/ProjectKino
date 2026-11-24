@@ -249,13 +249,13 @@ function resetRatio() {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 36px;
-  padding: 0 11px;
-  border-radius: 9px;
+  height: var(--control-height-sm);
+  padding: 0 10px;
+  border-radius: var(--radius-control-sm);
   border: 1px solid var(--border-control);
   background: var(--color-surface);
   color: var(--color-text);
-  font-size: 12.5px;
+  font-size: 13px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   cursor: pointer;

@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import { readdirSync } from 'node:fs'
 import { test } from 'node:test'
 import { wrapSlideIndex } from '../src/features/dashboard/components/carousel-index.ts'
 import { storyMaxLength, validateStory } from '../src/features/studio/components/story-input.ts'
@@ -9,7 +8,7 @@ import {
   maxEpisodesForDuration,
   resolveDramaSettings,
 } from '../src/features/studio/components/drama-creation.ts'
-import { artStyles, defaultArtStyle, quickArtStyles } from '../src/features/studio/components/art-styles.ts'
+import { defaultArtStyle } from '../src/features/studio/components/art-styles.ts'
 
 test('carousel wraps next and previous indices without exceeding the slide count', () => {
   assert.equal(wrapSlideIndex(3, 3), 0)
@@ -70,15 +69,10 @@ test('short drama enforces episode duration 120-600s and initial total cap of 36
   assert.equal(formatDurationLabel(3600), '60 分钟')
 })
 
-test('the style catalog has a local preview for each pure visual style and defaults to live-action', () => {
-  const assets = new Set(readdirSync(new URL('../public/images/art-styles/', import.meta.url)))
-  const expected = artStyles.map(({ value }) => `${value}.webp`)
-  assert.equal(new Set(expected).size, expected.length)
-  for (const file of expected) {
-    assert.ok(assets.has(file), `missing preview asset: ${file}`)
-  }
-  assert.ok(artStyles.every(({ prompt }) => prompt.trim().length > 0))
-  assert.deepEqual(quickArtStyles.map(({ label }) => label), ['真人电影写实', '半写实 3D', '日漫'])
+test('initial drama settings default to live-action and accept dynamic admin style codes', () => {
   assert.equal(defaultArtStyle, 'live-action')
   assert.equal(initialDramaSettings().visualStyle, defaultArtStyle)
+  const draft = { ...initialDramaSettings(), name: 'Custom Style Drama', visualStyle: 'custom-oil-paint' }
+  assert.equal(resolveDramaSettings(draft)?.visualStyle, 'custom-oil-paint')
+  assert.equal(resolveDramaSettings({ ...draft, visualStyle: '   ' }), null)
 })

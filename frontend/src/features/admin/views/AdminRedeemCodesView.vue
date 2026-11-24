@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import {
   Ban,
   Check,
@@ -13,12 +13,13 @@ import {
   Save,
   Search,
   Ticket,
-  X,
 } from 'lucide-vue-next'
+import UiBadge, { type UiBadgeTone } from '@/components/ui/UiBadge.vue'
 import UiButton from '@/components/ui/UiButton.vue'
 import UiDataTable, { type DataTableColumn } from '@/components/ui/UiDataTable.vue'
 import UiDialog from '@/components/ui/UiDialog.vue'
 import UiInput from '@/components/ui/UiInput.vue'
+import UiSegmented from '@/components/ui/UiSegmented.vue'
 import UiSelect from '@/components/ui/UiSelect.vue'
 import WorkspacePageHeader from '@/components/workspace/WorkspacePageHeader.vue'
 import {
@@ -50,9 +51,13 @@ const stats = ref<AdminRedeemStats>({
   usedCountTotal: 0,
   redeemedCreditsTotal: '0',
 })
+const DEFAULT_CREDIT_TIERS = [100, 200, 300, 500, 1000, 2000, 3000, 5000] as const
+
 const batches = ref<string[]>([])
+const creditTiers = ref<number[]>([...DEFAULT_CREDIT_TIERS])
 
 const statusFilter = ref<'' | AdminRedeemCodeStatus>('')
+const creditsFilter = ref<number | null>(null)
 const batchFilter = ref('')
 const keyword = ref('')
 
@@ -69,10 +74,9 @@ const createOpen = ref(false)
 const creating = ref(false)
 const generatedResult = ref<AdminRedeemBatchCreateResult | null>(null)
 const copiedBatch = ref(false)
-const createForm = reactive({
-  credits: '100',
+const createForm = ref({
+  credits: 100,
   count: '20',
-  prefix: '',
   batchName: '',
   maxUses: '1',
   expiresAtLocal: '',
@@ -92,12 +96,41 @@ const statusTabs: ReadonlyArray<{ value: '' | AdminRedeemCodeStatus; label: stri
   { value: 'disabled', label: '已作废' },
 ]
 
+const statusFilterModel = computed({
+  get: () => statusFilter.value,
+  set: (val: string) => selectStatus(val as '' | AdminRedeemCodeStatus),
+})
+
 const STATUS_LABELS: Record<AdminRedeemCodeStatus, string> = {
   active: '可用',
   exhausted: '已兑完',
   expired: '已过期',
   disabled: '已作废',
 }
+
+function redeemStatusLabel(status: AdminRedeemCodeStatus): string {
+  return STATUS_LABELS[status] || status
+}
+
+function redeemStatusTone(status: AdminRedeemCodeStatus): UiBadgeTone {
+  if (status === 'active') return 'success'
+  if (status === 'expired') return 'gold'
+  if (status === 'disabled') return 'danger'
+  return 'neutral'
+}
+
+const creditsSelectOptions = computed(() => [
+  { value: 'all', label: '全部面额' },
+  ...creditTiers.value.map((tier) => ({ value: String(tier), label: `${tier} 积分` })),
+])
+
+const creditsSelectModel = computed({
+  get: () => (creditsFilter.value === null ? 'all' : String(creditsFilter.value)),
+  set: (val: string) => {
+    creditsFilter.value = val === 'all' ? null : Number(val)
+    void loadCodes(true)
+  },
+})
 
 const batchSelectOptions = computed(() => [
   { value: 'all', label: '全部批次' },
@@ -117,7 +150,7 @@ const canSavePurchaseUrl = computed(
 )
 
 const columns: DataTableColumn[] = [
-  { key: 'code', label: '兑换码', width: '240px' },
+  { key: 'code', label: '兑换码', width: '295px' },
   { key: 'batchName', label: '批次' },
   { key: 'credits', label: '面额', align: 'right', width: '100px' },
   { key: 'usage', label: '进度', align: 'right', width: '88px' },
@@ -140,6 +173,7 @@ async function loadCodes(resetPage = false) {
   try {
     const res = await listAdminRedeemCodes({
       status: statusFilter.value || undefined,
+      credits: creditsFilter.value ?? undefined,
       batch_name: batchFilter.value || undefined,
       keyword: keyword.value.trim() || undefined,
       limit: pageSize.value,
@@ -149,6 +183,12 @@ async function loadCodes(resetPage = false) {
     total.value = res.total
     stats.value = res.stats
     batches.value = res.batches
+    if (res.creditTiers?.length) {
+      creditTiers.value = res.creditTiers
+      if (!res.creditTiers.includes(createForm.value.credits)) {
+        createForm.value.credits = res.creditTiers[0] ?? 100
+      }
+    }
     purchaseUrl.value = res.purchaseUrl || ''
     savedPurchaseUrl.value = res.purchaseUrl || ''
   } catch (err) {
@@ -184,20 +224,20 @@ function openCreateDialog() {
 }
 
 async function submitCreateBatch() {
-  const creditsNum = Number(createForm.credits)
-  if (!Number.isFinite(creditsNum) || creditsNum <= 0) {
-    ui.notify('面额积分必须大于 0', 'error')
+  const creditsNum = createForm.value.credits
+  if (!creditTiers.value.includes(creditsNum)) {
+    ui.notify('请选择有效的面额档位', 'error')
     return
   }
-  const countNum = Math.round(Number(createForm.count))
+  const countNum = Math.round(Number(createForm.value.count))
   if (!Number.isFinite(countNum) || countNum < 1 || countNum > 500) {
     ui.notify('生成数量需在 1–500 之间', 'error')
     return
   }
-  const maxUsesNum = Math.max(1, Math.round(Number(createForm.maxUses) || 1))
+  const maxUsesNum = Math.max(1, Math.round(Number(createForm.value.maxUses) || 1))
   let expiresIso: string | null = null
-  if (createForm.expiresAtLocal.trim()) {
-    const dt = new Date(createForm.expiresAtLocal)
+  if (createForm.value.expiresAtLocal.trim()) {
+    const dt = new Date(createForm.value.expiresAtLocal)
     if (Number.isNaN(dt.getTime())) {
       ui.notify('过期时间格式无效', 'error')
       return
@@ -210,8 +250,7 @@ async function submitCreateBatch() {
     const res = await createAdminRedeemBatch({
       credits: String(creditsNum),
       count: countNum,
-      prefix: createForm.prefix.trim(),
-      batchName: createForm.batchName.trim(),
+      batchName: createForm.value.batchName.trim(),
       maxUses: maxUsesNum,
       expiresAt: expiresIso,
     })
@@ -268,7 +307,7 @@ function downloadGenerated(format: 'txt' | 'csv') {
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
-  link.download = `redeem-codes-${stamp}.${format}`
+  link.download = `redeem-${formatCredits(credits)}积分-${stamp}.${format}`
   document.body.appendChild(link)
   link.click()
   document.body.removeChild(link)
@@ -373,22 +412,25 @@ onMounted(() => {
         <Link2 :size="14" aria-hidden="true" />
         购买兑换码链接
       </span>
-      <input
-        v-model="purchaseUrl"
-        type="url"
-        class="redeem-url-input"
-        placeholder="输入外部购买链接（如发卡网地址 https://...），留空则隐藏前台入口"
-      />
-      <a
+      <div class="redeem-url-input-wrap">
+        <UiInput
+          v-model="purchaseUrl"
+          type="url"
+          size="sm"
+          clearable
+          placeholder="输入外部购买链接（如发卡网地址 https://...），留空则隐藏前台入口"
+        />
+      </div>
+      <UiButton
         v-if="savedPurchaseUrl"
+        variant="ghost"
+        size="sm"
         :href="savedPurchaseUrl"
         target="_blank"
-        rel="noopener noreferrer"
-        class="redeem-url-preview"
       >
-        <span>打开</span>
-        <ExternalLink :size="12" aria-hidden="true" />
-      </a>
+        打开
+        <template #trailing><ExternalLink :size="12" aria-hidden="true" /></template>
+      </UiButton>
       <UiButton type="submit" variant="primary" size="sm" :disabled="!canSavePurchaseUrl" :loading="savingUrl">
         <template #leading><Save :size="13" aria-hidden="true" /></template>
         保存
@@ -397,42 +439,29 @@ onMounted(() => {
 
     <!-- 筛选条 -->
     <div class="redeem-toolbar">
-      <div class="admin-chip-group">
-        <button
-          v-for="tab in statusTabs"
-          :key="tab.value || 'all'"
-          type="button"
-          class="admin-chip"
-          :class="{ 'is-active': statusFilter === tab.value }"
-          @click="selectStatus(tab.value)"
-        >
-          {{ tab.label }}
-        </button>
-      </div>
+      <UiSegmented v-model="statusFilterModel" :options="statusTabs" variant="pills" aria-label="按状态筛选" />
 
       <div class="redeem-toolbar-right">
-        <div v-if="batches.length" class="redeem-batch-select">
-          <UiSelect v-model="batchSelectModel" :options="batchSelectOptions" placeholder="全部批次" />
+        <div class="redeem-tier-select">
+          <UiSelect v-model="creditsSelectModel" size="sm" :options="creditsSelectOptions" placeholder="全部面额" />
         </div>
 
-        <label class="redeem-search">
-          <Search :size="13" aria-hidden="true" />
-          <input
+        <div v-if="batches.length" class="redeem-batch-select">
+          <UiSelect v-model="batchSelectModel" size="sm" :options="batchSelectOptions" placeholder="全部批次" />
+        </div>
+
+        <div class="redeem-search-wrap">
+          <UiInput
             v-model="keyword"
-            type="text"
+            size="sm"
+            clearable
             placeholder="搜索兑换码或批次"
             @keyup.enter="loadCodes(true)"
-          />
-          <button
-            v-if="keyword"
-            type="button"
-            class="redeem-search-clear"
-            aria-label="清空"
-            @click="keyword = ''; loadCodes(true)"
+            @clear="loadCodes(true)"
           >
-            <X :size="12" aria-hidden="true" />
-          </button>
-        </label>
+            <template #leading><Search :size="13" aria-hidden="true" /></template>
+          </UiInput>
+        </div>
 
         <UiButton
           v-if="batchFilter"
@@ -456,7 +485,6 @@ onMounted(() => {
       row-key="id"
       :loading="loading"
       empty-text="暂无兑换码"
-      compact
       paginated
       :total="total"
       :page-size-options="[20, 50, 100]"
@@ -488,9 +516,9 @@ onMounted(() => {
       </template>
 
       <template #cell-status="{ row }">
-        <span class="redeem-status-pill" :class="`is-${row.status}`">
-          {{ STATUS_LABELS[row.status as AdminRedeemCodeStatus] || row.status }}
-        </span>
+        <UiBadge :tone="redeemStatusTone(row.status as AdminRedeemCodeStatus)">
+          {{ redeemStatusLabel(row.status as AdminRedeemCodeStatus) }}
+        </UiBadge>
       </template>
 
       <template #cell-expiresAt="{ row }">
@@ -503,25 +531,24 @@ onMounted(() => {
 
       <template #cell-actions="{ row }">
         <div class="redeem-row-actions">
-          <button
+          <UiButton
             v-if="row.usedCount > 0"
-            type="button"
-            class="redeem-link-btn"
+            variant="ghost"
+            size="xs"
             @click="openUsesDialog(row)"
           >
             记录
-          </button>
-          <button
+          </UiButton>
+          <UiButton
             v-if="row.status !== 'exhausted'"
-            type="button"
-            class="redeem-link-btn"
-            :class="row.rawStatus === 'disabled' ? 'is-enable' : 'is-danger'"
+            :variant="row.rawStatus === 'disabled' ? 'outline' : 'danger'"
+            size="xs"
             :disabled="togglingId === row.id"
             @click="toggleCodeStatus(row)"
           >
-            <RotateCcw v-if="row.rawStatus === 'disabled'" :size="12" aria-hidden="true" />
+            <template v-if="row.rawStatus === 'disabled'" #leading><RotateCcw :size="12" aria-hidden="true" /></template>
             {{ row.rawStatus === 'disabled' ? '启用' : '作废' }}
-          </button>
+          </UiButton>
         </div>
       </template>
     </UiDataTable>
@@ -529,30 +556,37 @@ onMounted(() => {
     <!-- 批量生成弹窗 -->
     <UiDialog v-model:open="createOpen" :title="generatedResult ? '生成结果' : '批量生成兑换码'" size="wide">
       <form v-if="!generatedResult" class="redeem-create-form" @submit.prevent="submitCreateBatch">
+        <div class="redeem-tier-field">
+          <span class="ui-label">面额积分</span>
+          <div class="redeem-tier-grid" role="radiogroup" aria-label="面额积分">
+            <button
+              v-for="tier in creditTiers"
+              :key="tier"
+              type="button"
+              role="radio"
+              :aria-checked="createForm.credits === tier"
+              class="redeem-tier-option"
+              :class="{ 'is-selected': createForm.credits === tier }"
+              @click="createForm.credits = tier"
+            >
+              <strong class="admin-mono">{{ tier }}</strong>
+              <span>积分</span>
+            </button>
+          </div>
+        </div>
+
         <div class="redeem-create-grid">
-          <UiInput
-            v-model="createForm.credits"
-            type="number"
-            label="面额积分"
-            placeholder="例如 100"
-            required
-          />
           <UiInput
             v-model="createForm.count"
             type="number"
             label="生成数量（1–500）"
-            placeholder="10"
+            placeholder="20"
             required
-          />
-          <UiInput
-            v-model="createForm.prefix"
-            label="卡密前缀（可选）"
-            placeholder="例如 KINO"
           />
           <UiInput
             v-model="createForm.batchName"
             label="批次备注（可选）"
-            placeholder="例如 发卡网-100积分"
+            placeholder="例如 链动小铺-500积分"
           />
           <UiInput
             v-model="createForm.maxUses"
@@ -561,15 +595,12 @@ onMounted(() => {
             placeholder="1"
             required
           />
-          <div class="redeem-date-field">
-            <label class="ui-label" for="redeem-expires-input">过期时间（可选）</label>
-            <input
-              id="redeem-expires-input"
-              v-model="createForm.expiresAtLocal"
-              type="datetime-local"
-              class="redeem-datetime-input"
-            />
-          </div>
+          <UiInput
+            id="redeem-expires-input"
+            v-model="createForm.expiresAtLocal"
+            type="datetime-local"
+            label="过期时间（可选）"
+          />
         </div>
 
         <div class="redeem-dialog-foot">
@@ -639,7 +670,6 @@ onMounted(() => {
         row-key="id"
         :loading="usesLoading"
         empty-text="暂无核销记录"
-        compact
       >
         <template #cell-credits="{ row }">
           <strong class="admin-mono is-gold">+{{ formatCredits(row.credits) }}</strong>
@@ -682,35 +712,9 @@ onMounted(() => {
   white-space: nowrap;
 }
 
-.redeem-url-input {
+.redeem-url-input-wrap {
   flex: 1 1 280px;
   min-width: 220px;
-  height: 32px;
-  padding: 0 10px;
-  border: 1px solid var(--border-control);
-  border-radius: 7px;
-  background: var(--color-canvas);
-  color: var(--color-text);
-  font-size: 13px;
-  outline: none;
-}
-
-.redeem-url-input:focus {
-  border-color: rgb(240 184 75 / 55%);
-}
-
-.redeem-url-preview {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12.5px;
-  color: var(--color-gold-soft);
-  text-decoration: none;
-  padding: 0 6px;
-}
-
-.redeem-url-preview:hover {
-  text-decoration: underline;
 }
 
 .redeem-toolbar {
@@ -728,40 +732,16 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 
+.redeem-tier-select {
+  min-width: 120px;
+}
+
 .redeem-batch-select {
-  min-width: 150px;
+  min-width: 146px;
 }
 
-.redeem-search {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 32px;
-  padding: 0 10px;
-  border: 1px solid var(--border-control);
-  border-radius: 7px;
-  background: var(--color-surface);
-  color: var(--color-muted);
-}
-
-.redeem-search input {
-  width: 170px;
-  border: none;
-  background: transparent;
-  color: var(--color-text);
-  font-size: 12.5px;
-  outline: none;
-}
-
-.redeem-search-clear {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  background: transparent;
-  color: var(--color-muted);
-  cursor: pointer;
-  padding: 0;
+.redeem-search-wrap {
+  width: 204px;
 }
 
 .redeem-code-copy {
@@ -786,67 +766,10 @@ onMounted(() => {
   color: #4ade80;
 }
 
-.redeem-status-pill {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 500;
-}
-
-.redeem-status-pill.is-active {
-  background: rgb(74 222 128 / 12%);
-  color: #4ade80;
-  border: 1px solid rgb(74 222 128 / 28%);
-}
-
-.redeem-status-pill.is-exhausted {
-  background: rgb(148 163 184 / 12%);
-  color: var(--color-muted);
-  border: 1px solid var(--border-subtle);
-}
-
-.redeem-status-pill.is-expired {
-  background: rgb(245 158 11 / 12%);
-  color: #fbbf24;
-  border: 1px solid rgb(245 158 11 / 28%);
-}
-
-.redeem-status-pill.is-disabled {
-  background: rgb(248 113 113 / 12%);
-  color: #f87171;
-  border: 1px solid rgb(248 113 113 / 28%);
-}
-
 .redeem-row-actions {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-}
-
-.redeem-link-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  border: none;
-  background: transparent;
-  color: var(--color-gold-soft);
-  font-size: 12.5px;
-  cursor: pointer;
-  padding: 0;
-}
-
-.redeem-link-btn:hover {
-  text-decoration: underline;
-}
-
-.redeem-link-btn.is-danger {
-  color: #f87171;
-}
-
-.redeem-link-btn.is-enable {
-  color: #4ade80;
+  gap: 6px;
 }
 
 .redeem-create-form {
@@ -855,27 +778,62 @@ onMounted(() => {
   gap: 18px;
 }
 
+.redeem-tier-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.redeem-tier-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.redeem-tier-option {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 4px;
+  height: var(--control-height-md);
+  padding: 0 10px;
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-control-sm);
+  background: var(--color-canvas);
+  color: var(--color-text);
+  cursor: pointer;
+  transition: border-color 0.14s ease, background-color 0.14s ease, color 0.14s ease;
+}
+
+.redeem-tier-option strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.redeem-tier-option span {
+  font-size: 12px;
+  color: var(--color-muted);
+}
+
+.redeem-tier-option:hover {
+  border-color: rgb(240 184 75 / 45%);
+  background: rgb(240 184 75 / 6%);
+}
+
+.redeem-tier-option.is-selected {
+  border-color: var(--color-gold-soft);
+  background: rgb(240 184 75 / 14%);
+  color: var(--color-gold-soft);
+}
+
+.redeem-tier-option.is-selected span {
+  color: var(--color-gold-soft);
+}
+
 .redeem-create-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
-}
-
-.redeem-date-field {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-
-.redeem-datetime-input {
-  height: 36px;
-  padding: 0 10px;
-  border: 1px solid var(--border-control);
-  border-radius: 7px;
-  background: var(--color-canvas);
-  color: var(--color-text);
-  font-size: 13px;
-  color-scheme: dark;
 }
 
 .redeem-result-box {
@@ -930,6 +888,10 @@ onMounted(() => {
 }
 
 @media (max-width: 640px) {
+  .redeem-tier-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .redeem-create-grid {
     grid-template-columns: minmax(0, 1fr);
   }

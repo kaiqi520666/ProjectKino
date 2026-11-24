@@ -85,22 +85,14 @@ class OssStorage:
         clean_cat = category.strip("/")
         return f"{self.config.prefix}/{user_id}/{clean_cat}/{filename}"
 
+    def make_system_key(self, category: str, filename: str) -> str:
+        clean_cat = category.strip("/")
+        return f"{self.config.prefix}/system/{clean_cat}/{filename}"
+
     def public_url(self, key: str) -> str:
         return f"{self.config.public_domain}/{quote(key, safe='/')}"
 
-    def upload_policy(
-        self,
-        *,
-        user_id: int,
-        kind: str,
-        file_name: str,
-        mime_type: str,
-        size: int,
-    ) -> dict[str, Any]:
-        match = re.search(r"\.[a-z0-9]{1,10}$", file_name, re.IGNORECASE)
-        suffix = match.group().lower() if match else ""
-        directory = {"image": "images", "video": "videos", "audio": "audios"}.get(kind, "files")
-        key = self.make_key(user_id, directory, f"{uuid4().hex}{suffix}")
+    def _build_post_policy(self, *, key: str, mime_type: str, size: int) -> dict[str, Any]:
         expires = datetime.now(UTC) + timedelta(minutes=5)
         fields = {
             "key": key,
@@ -140,6 +132,37 @@ class OssStorage:
             "fields": fields,
             "expiresAt": expires.isoformat(),
         }
+
+    def upload_policy(
+        self,
+        *,
+        user_id: int,
+        kind: str,
+        file_name: str,
+        mime_type: str,
+        size: int,
+    ) -> dict[str, Any]:
+        match = re.search(r"\.[a-z0-9]{1,10}$", file_name, re.IGNORECASE)
+        suffix = match.group().lower() if match else ""
+        directory = {"image": "images", "video": "videos", "audio": "audios"}.get(kind, "files")
+        key = self.make_key(user_id, directory, f"{uuid4().hex}{suffix}")
+        return self._build_post_policy(key=key, mime_type=mime_type, size=size)
+
+    def system_upload_policy(
+        self,
+        *,
+        category: str,
+        file_name: str,
+        mime_type: str,
+        size: int,
+        slug: str | None = None,
+    ) -> dict[str, Any]:
+        match = re.search(r"\.[a-z0-9]{1,10}$", file_name, re.IGNORECASE)
+        suffix = match.group().lower() if match else ".webp"
+        clean_slug = re.sub(r"[^a-z0-9-]+", "-", (slug or "").strip().lower()).strip("-")
+        stem = f"{clean_slug}-{uuid4().hex[:10]}" if clean_slug else uuid4().hex
+        key = self.make_system_key(category, f"{stem}{suffix}")
+        return self._build_post_policy(key=key, mime_type=mime_type, size=size)
 
     @contextmanager
     def client(self):
@@ -201,3 +224,11 @@ class OssStorage:
 async def load_storage(session: AsyncSession) -> OssStorage:
     raw = await session.scalar(select(SystemSetting.value).where(SystemSetting.key == "storage.oss"))
     return OssStorage(parse_oss_config(raw))
+
+
+async def try_load_storage(session: AsyncSession) -> OssStorage | None:
+    raw = await session.scalar(select(SystemSetting.value).where(SystemSetting.key == "storage.oss"))
+    try:
+        return OssStorage(parse_oss_config(raw))
+    except AppError:
+        return None

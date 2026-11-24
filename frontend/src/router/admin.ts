@@ -25,6 +25,12 @@ export const adminRoutes: RouteRecordRaw[] = [
         component: () => import('@/features/admin/views/AdminRedeemCodesView.vue'),
       },
       {
+        path: 'announcements',
+        name: 'admin-announcements',
+        meta: { title: '系统公告', adminNav: 'announcements', workspaceNav: 'admin', requiresAdmin: true },
+        component: () => import('@/features/admin/views/AdminAnnouncementsView.vue'),
+      },
+      {
         path: 'jobs',
         name: 'admin-jobs',
         meta: { title: '任务与核对', adminNav: 'jobs', workspaceNav: 'admin', requiresAdmin: true },
@@ -35,6 +41,12 @@ export const adminRoutes: RouteRecordRaw[] = [
         name: 'admin-models',
         meta: { title: '供应商与定价', adminNav: 'models', workspaceNav: 'admin', requiresAdmin: true },
         component: () => import('@/features/admin/views/AdminModelsView.vue'),
+      },
+      {
+        path: 'art-styles',
+        name: 'admin-art-styles',
+        meta: { title: '画风管理', adminNav: 'art-styles', workspaceNav: 'admin', requiresAdmin: true },
+        component: () => import('@/features/admin/views/AdminArtStylesView.vue'),
       },
       {
         path: 'settings',

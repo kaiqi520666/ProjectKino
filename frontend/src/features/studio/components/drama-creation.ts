@@ -1,5 +1,5 @@
 import type { ImageAspectRatio } from '../../../components/ui/image-types'
-import { artStyles, defaultArtStyle } from './art-styles.ts'
+import { defaultArtStyle } from './art-styles.ts'
 
 export const videoRatios: readonly ImageAspectRatio[] = ['16:9', '9:16', '1:1', '4:3', '3:4']
 export const segmentDurations = [15, 30] as const
@@ -80,12 +80,13 @@ export function initialDramaSettings(): DramaSettingsDraft {
 
 export function resolveDramaSettings(draft: DramaSettingsDraft): DramaSettings | null {
   const name = draft.name.trim()
+  const visualStyle = draft.visualStyle.trim()
   const { episodeCount, secondsPerEpisode } = draft
   if (
     !name ||
     !videoRatios.includes(draft.ratio) ||
     !contentLanguages.some(({ value }) => value === draft.language) ||
-    !artStyles.some(({ value }) => value === draft.visualStyle) ||
+    !visualStyle ||
     !segmentDurations.includes(draft.maxSegmentDuration) ||
     typeof draft.backgroundMusic !== 'boolean' ||
     typeof episodeCount !== 'number' ||
@@ -99,5 +100,5 @@ export function resolveDramaSettings(draft: DramaSettingsDraft): DramaSettings |
   ) {
     return null
   }
-  return { ...draft, name, episodeCount, secondsPerEpisode }
+  return { ...draft, name, visualStyle, episodeCount, secondsPerEpisode }
 }

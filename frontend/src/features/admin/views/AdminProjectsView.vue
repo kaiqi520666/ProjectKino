@@ -152,8 +152,8 @@ onMounted(() => loadProjects(true))
 
       <div class="admin-actions">
         <div class="ui-input-wrap has-leading admin-search-input">
-          <Search :size="15" class="ui-input-icon" />
-          <input v-model="filters.q" class="ui-input" type="search" placeholder="搜索项目名或所属邮箱..." />
+          <Search :size="14" class="ui-input-icon" />
+          <input v-model="filters.q" class="ui-input ui-input--sm" type="search" placeholder="搜索项目名或所属邮箱..." />
         </div>
         <button type="submit" class="ui-button ui-button--primary ui-button--sm">查询</button>
       </div>
@@ -173,12 +173,14 @@ onMounted(() => loadProjects(true))
       @change="loadProjects()"
     >
       <template #cell-name="{ row }">
-        <div class="admin-cell-primary">{{ row.name }}</div>
-        <div class="admin-cell-sub admin-mono">{{ row.id }}</div>
+        <span class="admin-cell-primary" :title="`${row.name} (${row.id})`">{{ row.name }}</span>
       </template>
       <template #cell-owner="{ row }">
-        <div class="admin-cell-primary">{{ row.userEmail }}</div>
-        <div class="admin-cell-sub admin-mono">#{{ row.userId }}</div>
+        <div class="admin-inline-meta" :title="`${row.userEmail} (#${row.userId})`">
+          <span class="admin-cell-primary">{{ row.userEmail }}</span>
+          <span class="admin-inline-sep" aria-hidden="true">·</span>
+          <span class="admin-inline-sub admin-mono">#{{ row.userId }}</span>
+        </div>
       </template>
       <template #cell-status="{ row }">
         <span class="admin-badge" :class="row.status === 'active' ? 'admin-badge--success' : 'admin-badge--danger'">
@@ -204,21 +206,21 @@ onMounted(() => loadProjects(true))
         <div v-if="row.status === 'archived'" class="admin-actions">
           <button
             type="button"
-            class="ui-button ui-button--secondary ui-button--sm"
+            class="ui-button ui-button--secondary ui-button--xs"
             :disabled="restoringId === row.id"
             @click="handleRestore(row)"
           >
-            <RotateCcw :size="13" />
+            <RotateCcw :size="12" />
             <span>{{ restoringId === row.id ? '恢复中...' : '恢复项目' }}</span>
           </button>
           <button
             type="button"
-            class="ui-button ui-button--danger ui-button--sm"
+            class="ui-button ui-button--danger ui-button--xs"
             :disabled="row.activeJobCount > 0"
             :title="row.activeJobCount > 0 ? '项目仍有运行中任务，暂不可清理' : '彻底删除项目与 OSS 文件'"
             @click="openPurge(row)"
           >
-            <Trash2 :size="13" />
+            <Trash2 :size="12" />
             <span>彻底清理</span>
           </button>
         </div>

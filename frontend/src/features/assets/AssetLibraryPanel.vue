@@ -4,6 +4,7 @@ import {
   FileText,
   Film,
   Image as ImageIcon,
+  LayoutGrid,
   Loader2,
   Maximize2,
   Music,
@@ -14,10 +15,11 @@ import {
   Search,
   Trash2,
   UserRound,
-  X,
 } from 'lucide-vue-next'
 import ImagePreview from '@/components/ui/ImagePreview.vue'
 import UiButton from '@/components/ui/UiButton.vue'
+import UiInput from '@/components/ui/UiInput.vue'
+import UiSegmented, { type UiSegmentedOption } from '@/components/ui/UiSegmented.vue'
 import VideoPreview from '@/components/ui/VideoPreview.vue'
 import { useUiStore } from '@/stores/ui'
 import { apiErrorMessage } from '@/features/studio/api'
@@ -127,6 +129,51 @@ const kindLabels: Record<AssetMediaKind, string> = {
   audio: '音频',
   text: '文本',
 }
+
+const kindIcons: Record<AssetMediaKind, typeof ImageIcon> = {
+  image: ImageIcon,
+  video: Film,
+  audio: Music,
+  text: FileText,
+}
+
+const sourceOptions: readonly UiSegmentedOption[] = [
+  { value: 'project', label: '本项目' },
+  { value: 'personal', label: '我的素材' },
+]
+
+const sourceModel = computed({
+  get: () => source.value,
+  set: (val: string) => {
+    source.value = val as AssetLibrarySource
+  },
+})
+
+const projectKindOptions: readonly UiSegmentedOption[] = [
+  { value: 'all', label: '全部', icon: LayoutGrid },
+  { value: 'character', label: '角色', icon: UserRound },
+  { value: 'scene', label: '场景', icon: ImageIcon },
+  { value: 'prop', label: '物品', icon: Package },
+]
+
+const projectKindModel = computed({
+  get: () => projectKindFilter.value,
+  set: (val: string) => {
+    projectKindFilter.value = val as StudioAssetKind | 'all'
+  },
+})
+
+const personalKindOptions = computed<UiSegmentedOption[]>(() => [
+  { value: 'all', label: '全部', icon: LayoutGrid },
+  ...props.allowedKinds.map((k) => ({ value: k, label: kindLabels[k], icon: kindIcons[k] })),
+])
+
+const personalKindModel = computed({
+  get: () => personalKindFilter.value,
+  set: (val: string) => {
+    personalKindFilter.value = val as AssetMediaKind | 'all'
+  },
+})
 
 const projectKindLabels: Record<StudioAssetKind, string> = {
   character: '角色',
@@ -491,90 +538,41 @@ defineExpose({ resetState, stopAudio })
   <div class="asset-lib" :class="{ 'is-full-page': fullPage }">
     <div class="asset-lib-bar">
       <div class="asset-lib-filters">
-        <div v-if="hasProjectSource" class="asset-lib-segment" role="tablist" aria-label="素材来源">
-          <button
-            type="button"
-            role="tab"
-            :aria-selected="source === 'project'"
-            class="asset-lib-seg-btn"
-            :class="{ 'is-active': source === 'project' }"
-            @click="source = 'project'"
-          >
-            本项目
-          </button>
-          <button
-            type="button"
-            role="tab"
-            :aria-selected="source === 'personal'"
-            class="asset-lib-seg-btn"
-            :class="{ 'is-active': source === 'personal' }"
-            @click="source = 'personal'"
-          >
-            我的素材
-          </button>
-        </div>
+        <UiSegmented
+          v-if="hasProjectSource"
+          v-model="sourceModel"
+          :options="sourceOptions"
+          aria-label="素材来源"
+        />
 
-        <div v-if="source === 'project'" class="asset-lib-pills" role="group" aria-label="资产分类">
-          <button
-            type="button"
-            class="asset-lib-pill"
-            :class="{ 'is-active': projectKindFilter === 'all' }"
-            @click="projectKindFilter = 'all'"
-          >
-            全部
-          </button>
-          <button
-            v-for="k in (['character', 'scene', 'prop'] as const)"
-            :key="k"
-            type="button"
-            class="asset-lib-pill"
-            :class="{ 'is-active': projectKindFilter === k }"
-            @click="projectKindFilter = k"
-          >
-            {{ projectKindLabels[k] }}
-          </button>
-        </div>
+        <UiSegmented
+          v-if="source === 'project'"
+          v-model="projectKindModel"
+          :options="projectKindOptions"
+          variant="pills"
+          aria-label="资产分类"
+        />
 
-        <div
+        <UiSegmented
           v-else-if="allowedKinds.length > 1"
-          class="asset-lib-pills"
-          role="group"
+          v-model="personalKindModel"
+          :options="personalKindOptions"
+          variant="pills"
           aria-label="素材类型"
-        >
-          <button
-            type="button"
-            class="asset-lib-pill"
-            :class="{ 'is-active': personalKindFilter === 'all' }"
-            @click="personalKindFilter = 'all'"
-          >
-            全部
-          </button>
-          <button
-            v-for="k in allowedKinds"
-            :key="k"
-            type="button"
-            class="asset-lib-pill"
-            :class="{ 'is-active': personalKindFilter === k }"
-            @click="personalKindFilter = k"
-          >
-            {{ kindLabels[k] }}
-          </button>
-        </div>
+        />
       </div>
 
-      <label class="asset-lib-search">
-        <Search :size="14" aria-hidden="true" />
-        <input v-model="keyword" type="text" placeholder="搜索" aria-label="搜索素材" />
-        <button
-          v-if="keyword"
-          type="button"
-          class="asset-lib-search-clear"
-          aria-label="清空搜索"
-          @click="keyword = ''"
+      <div class="asset-lib-search-wrap">
+        <UiInput
+          v-model="keyword"
+          size="sm"
+          clearable
+          placeholder="搜索"
+          aria-label="搜索素材"
         >
-          <X :size="12" />
-        </button>
-      </label>
+          <template #leading><Search :size="13" aria-hidden="true" /></template>
+        </UiInput>
+      </div>
     </div>
 
     <div class="asset-lib-body">
@@ -791,113 +789,8 @@ defineExpose({ resetState, stopAudio })
   min-width: 0;
 }
 
-.asset-lib-segment {
-  display: inline-flex;
-  padding: 2px;
-  border-radius: 8px;
-  border: 1px solid var(--border-control);
-  background: rgb(255 255 255 / 3%);
-}
-
-.asset-lib-seg-btn {
-  height: 28px;
-  padding: 0 12px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--color-muted);
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 140ms ease, color 140ms ease;
-}
-
-.asset-lib-seg-btn:hover {
-  color: var(--color-text);
-}
-
-.asset-lib-seg-btn.is-active {
-  background: rgb(212 175 55 / 16%);
-  color: var(--color-gold-soft);
-}
-
-.asset-lib-pills {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  flex-wrap: wrap;
-}
-
-.asset-lib-pill {
-  height: 28px;
-  padding: 0 10px;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--color-muted);
-  font-size: 12px;
-  cursor: pointer;
-  transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
-}
-
-.asset-lib-pill:hover {
-  background: rgb(255 255 255 / 5%);
-  color: var(--color-text);
-}
-
-.asset-lib-pill.is-active {
-  border-color: rgb(212 175 55 / 35%);
-  background: rgb(212 175 55 / 10%);
-  color: var(--color-gold-soft);
-}
-
-.asset-lib-search {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  width: 196px;
-  height: 32px;
-  padding: 0 10px;
-  border-radius: 8px;
-  border: 1px solid var(--border-control);
-  background: rgb(255 255 255 / 3%);
-  color: var(--color-muted);
-  transition: border-color 140ms ease;
-}
-
-.asset-lib-search:focus-within {
-  border-color: rgb(212 175 55 / 50%);
-  color: var(--color-text);
-}
-
-.asset-lib-search input {
-  width: 100%;
-  min-width: 0;
-  border: 0;
-  background: transparent;
-  color: var(--color-text);
-  font-size: 12px;
-  outline: none;
-}
-
-.asset-lib-search input::placeholder {
-  color: var(--color-muted);
-}
-
-.asset-lib-search-clear {
-  display: grid;
-  place-items: center;
-  width: 18px;
-  height: 18px;
-  border: 0;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--color-muted);
-  cursor: pointer;
-}
-
-.asset-lib-search-clear:hover {
-  color: var(--color-text);
+.asset-lib-search-wrap {
+  width: 204px;
 }
 
 .asset-lib-body {

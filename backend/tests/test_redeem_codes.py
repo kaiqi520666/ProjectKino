@@ -14,8 +14,8 @@ from app.modules.credits.redeem_service import (
     normalize_redeem_code,
     redeem_code_for_user,
     resolve_redeem_status,
-    sanitize_prefix,
 )
+from app.modules.credits.schemas import REDEEM_CREDIT_TIERS, AdminRedeemBatchCreateRequest
 from app.modules.credits.service import build_credit_bill_item
 
 
@@ -124,20 +124,35 @@ def test_random_code_format_and_normalization():
     for _ in range(30):
         code = generate_random_code_str()
         parts = code.split("-")
-        assert len(parts) == 3
+        assert len(parts) == 5
         assert all(len(p) == 4 for p in parts)
         joined = "".join(parts)
+        assert len(joined) == 20
         assert all(ch in REDEEM_ALPHABET for ch in joined)
         for ambiguous in ("0", "O", "1", "I", "L"):
             assert ambiguous not in joined
 
-    prefixed = generate_random_code_str("KINO")
-    assert prefixed.startswith("KINO-")
-    assert normalize_redeem_code(f"  {prefixed.lower()} ") == normalize_redeem_code(prefixed)
+    sample = generate_random_code_str()
+    assert normalize_redeem_code(f"  {sample.lower()} ") == normalize_redeem_code(sample)
 
-    assert sanitize_prefix(" pk26 ") == "PK26"
-    with pytest.raises(AppError):
-        sanitize_prefix("BAD-PREFIX!")
+
+async def test_generate_rejects_non_tier_credits():
+    session = InMemoryRedeemSession([])
+    assert REDEEM_CREDIT_TIERS == (100, 200, 300, 500, 1000, 2000, 3000, 5000)
+
+    with pytest.raises(AppError) as exc_tier:
+        await generate_redeem_codes(
+            session,  # type: ignore[arg-type]
+            credits=Decimal("150"),
+            count=2,
+        )
+    assert exc_tier.value.code == "invalid_credit_tier"
+
+    with pytest.raises(ValueError):
+        AdminRedeemBatchCreateRequest(credits=Decimal("99"), count=1)
+
+    valid_req = AdminRedeemBatchCreateRequest(credits=Decimal("5000"), count=5)
+    assert valid_req.credits == Decimal("5000")
 
 
 async def test_generate_and_redeem_single_use_code_happy_path():
@@ -150,7 +165,6 @@ async def test_generate_and_redeem_single_use_code_happy_path():
         session,  # type: ignore[arg-type]
         credits=Decimal("100"),
         count=3,
-        prefix="PK",
         batch_name="发卡网100积分",
         created_by=99,
     )

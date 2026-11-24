@@ -20,6 +20,7 @@ const props = withDefaults(
     disableFuture?: boolean
     clearable?: boolean
     placeholder?: string
+    size?: 'sm' | 'md'
   }>(),
   {
     presets: () => DEFAULT_DATE_RANGE_PRESETS,
@@ -27,6 +28,7 @@ const props = withDefaults(
     disableFuture: true,
     clearable: true,
     placeholder: '全部时间',
+    size: 'md',
   },
 )
 
@@ -177,7 +179,7 @@ const todayIso = computed(() => formatLocalDate(new Date()))
 </script>
 
 <template>
-  <div class="ui-date-range">
+  <div class="ui-date-range" :class="{ 'is-sm': size === 'sm' }">
     <div v-if="inlinePresets && presets.length" class="ui-date-presets" role="group" aria-label="快捷时间范围">
       <button
         v-for="preset in presets"
@@ -339,11 +341,16 @@ const todayIso = computed(() => formatLocalDate(new Date()))
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  height: 42px;
+  height: var(--control-height-md);
   padding: 3px;
   border: 1px solid var(--border-control);
   border-radius: var(--radius-control);
   background: var(--color-surface);
+}
+
+.ui-date-range.is-sm .ui-date-presets {
+  height: var(--control-height-sm);
+  border-radius: var(--radius-control-sm);
 }
 
 .ui-date-preset-btn {
@@ -379,7 +386,7 @@ const todayIso = computed(() => formatLocalDate(new Date()))
   align-items: center;
   gap: 8px;
   min-width: 224px;
-  height: 42px;
+  height: var(--control-height-md);
   padding: 0 10px 0 12px;
   border: 1px solid var(--border-control);
   border-radius: var(--radius-control);
@@ -389,6 +396,13 @@ const todayIso = computed(() => formatLocalDate(new Date()))
   font-variant-numeric: tabular-nums;
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
+}
+
+.ui-date-range.is-sm .ui-date-trigger {
+  min-width: 196px;
+  height: var(--control-height-sm);
+  padding: 0 8px 0 10px;
+  border-radius: var(--radius-control-sm);
 }
 
 .ui-date-trigger:hover {

@@ -23,6 +23,17 @@
   --surface-hover: rgb(255 255 255 / 6%);
   --gold-tint: rgb(240 184 75 / 10%);
   --focus-ring: rgb(240 184 75 / 28%);
+  --radius-control-xs: 6px;
+  --radius-control-sm: 8px;
   --radius-control: 10px;
+  --radius-control-lg: 12px;
   --radius-panel: 12px;
+  --radius-badge: 5px;
+  --control-height-xs: 28px;
+  --control-height-sm: 34px;
+  --control-height-md: 40px;
+  --control-height-lg: 46px;
+  --badge-height: 22px;
+  --table-head-height: 40px;
+  --table-row-height: 48px;
 }

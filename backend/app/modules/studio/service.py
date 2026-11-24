@@ -7,6 +7,7 @@ from sqlalchemy import case, delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
+from app.modules.art_styles.service import resolve_art_style_prompt
 from app.modules.catalog.models import AiModel
 from app.modules.jobs.models import Job
 from app.modules.jobs.schemas import JobOut
@@ -390,6 +391,10 @@ async def update_project_meta(
 
     if "visual_style" in fields and body.visual_style is not None:
         next_settings["visualStyle"] = body.visual_style
+        if "visual_style_label" not in fields:
+            resolved_prompt = await resolve_art_style_prompt(session, body.visual_style)
+            if resolved_prompt:
+                next_settings["visualStyleLabel"] = resolved_prompt
 
     if "visual_style_label" in fields:
         if body.visual_style_label:

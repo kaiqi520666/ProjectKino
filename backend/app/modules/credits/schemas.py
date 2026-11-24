@@ -3,9 +3,12 @@ from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from app.core.schemas import CamelModel
+
+REDEEM_CREDIT_TIERS: tuple[int, ...] = (100, 200, 300, 500, 1000, 2000, 3000, 5000)
+_ALLOWED_REDEEM_CREDIT_TIERS = frozenset(Decimal(v) for v in REDEEM_CREDIT_TIERS)
 
 
 class CreditBalanceOut(CamelModel):
@@ -138,10 +141,17 @@ class RedeemCodeResultOut(CamelModel):
 class AdminRedeemBatchCreateRequest(CamelModel):
     credits: Decimal = Field(gt=0, le=Decimal("10000000"))
     count: int = Field(default=10, ge=1, le=500)
-    prefix: str = Field(default="", max_length=12)
     batch_name: str = Field(default="", max_length=120)
     max_uses: int = Field(default=1, ge=1, le=100000)
     expires_at: datetime | None = None
+
+    @field_validator("credits")
+    @classmethod
+    def validate_credit_tier(cls, value: Decimal) -> Decimal:
+        if value not in _ALLOWED_REDEEM_CREDIT_TIERS:
+            tiers_text = "、".join(str(t) for t in REDEEM_CREDIT_TIERS)
+            raise ValueError(f"面额积分仅支持：{tiers_text}")
+        return value
 
 
 class AdminRedeemCodeItemOut(CamelModel):
@@ -170,6 +180,7 @@ class AdminRedeemCodeListOut(CamelModel):
     stats: AdminRedeemStatsOut
     batches: list[str]
     purchase_url: str = ""
+    credit_tiers: list[int] = Field(default_factory=lambda: list(REDEEM_CREDIT_TIERS))
 
 
 class AdminRedeemBatchCreateOut(CamelModel):

@@ -12,7 +12,8 @@ withDefaults(defineProps<{
   user?: WorkspaceUser | null
   isAdmin?: boolean
   preview?: boolean
-}>(), { breadcrumbs: () => [] })
+  unreadAnnouncements?: number
+}>(), { breadcrumbs: () => [], unreadAnnouncements: 0 })
 defineEmits<{
   menu: []
   prices: []
@@ -41,15 +42,22 @@ defineEmits<{
       </nav>
     </div>
     <div class="workspace-header-actions">
-      <UiButton variant="ghost" class="workspace-header-action" title="模型价格" aria-label="模型价格" @click="$emit('prices')">
-        <template #leading><Tags :size="16" :stroke-width="1.7" aria-hidden="true" /></template>
+      <UiButton variant="ghost" size="sm" class="workspace-header-action" title="模型价格" aria-label="模型价格" @click="$emit('prices')">
+        <template #leading><Tags :size="15" :stroke-width="1.7" aria-hidden="true" /></template>
         <span class="workspace-header-action-label">模型价格</span>
       </UiButton>
-      <UiButton variant="ghost" class="workspace-header-action" title="客服" aria-label="客服" @click="$emit('support')">
-        <template #leading><Headphones :size="16" :stroke-width="1.7" aria-hidden="true" /></template>
+      <UiButton variant="ghost" size="sm" class="workspace-header-action" title="客服" aria-label="客服" @click="$emit('support')">
+        <template #leading><Headphones :size="15" :stroke-width="1.7" aria-hidden="true" /></template>
         <span class="workspace-header-action-label">客服</span>
       </UiButton>
-      <UiIconButton class="workspace-announcements" label="公告" @click="$emit('announcements')"><Bell :size="17" :stroke-width="1.7" /></UiIconButton>
+      <UiIconButton
+        class="workspace-announcements"
+        :label="unreadAnnouncements > 0 ? `系统公告（${unreadAnnouncements} 条未读）` : '系统公告'"
+        @click="$emit('announcements')"
+      >
+        <Bell :size="17" :stroke-width="1.7" />
+        <span v-if="unreadAnnouncements > 0" class="workspace-bell-dot" aria-hidden="true" />
+      </UiIconButton>
       <span class="workspace-header-divider" aria-hidden="true" />
       <CreditBalance :balance="balance" :preview="preview" @recharge="$emit('recharge')" />
       <span class="workspace-header-divider" aria-hidden="true" />
@@ -57,3 +65,20 @@ defineEmits<{
     </div>
   </header>
 </template>
+
+<style scoped>
+.workspace-announcements {
+  position: relative;
+}
+
+.workspace-bell-dot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--color-gold);
+  box-shadow: 0 0 0 2px var(--color-surface);
+}
+</style>

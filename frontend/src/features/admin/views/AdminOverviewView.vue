@@ -145,10 +145,13 @@ onMounted(loadOverview)
             <h3>AI 供应商连接状态</h3>
             <span>共 {{ overview.providers.length }} 个</span>
           </div>
-          <UiDataTable :columns="providerColumns" :rows="overview.providers" row-key="key" compact>
+          <UiDataTable :columns="providerColumns" :rows="overview.providers" row-key="key">
             <template #cell-provider="{ row }">
-              <div class="admin-cell-primary">{{ row.displayName }}</div>
-              <div class="admin-cell-sub admin-mono">{{ row.key }}</div>
+              <div class="admin-inline-meta">
+                <strong>{{ row.displayName }}</strong>
+                <span class="admin-inline-sep">·</span>
+                <span class="admin-inline-sub admin-mono">{{ row.key }}</span>
+              </div>
             </template>
             <template #cell-adapter="{ row }">
               <span class="admin-mono">{{ row.adapter }}</span>

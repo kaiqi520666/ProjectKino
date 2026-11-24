@@ -1649,6 +1649,7 @@ async def admin_purge_archived_project(
 @router.get("/redeem-codes", response_model=ApiResponse[AdminRedeemCodeListOut])
 async def admin_list_redeem_codes(
     status: Literal["active", "exhausted", "expired", "disabled"] | None = Query(default=None),
+    credits: Decimal | None = Query(default=None, gt=0),
     batch_name: str | None = Query(default=None, max_length=120),
     keyword: str | None = Query(default=None, max_length=100),
     limit: int = Query(default=20, ge=1, le=100),
@@ -1659,6 +1660,7 @@ async def admin_list_redeem_codes(
     data = await list_admin_redeem_codes(
         session,
         status_filter=status,
+        credits_filter=credits,
         batch_name=batch_name,
         keyword=keyword,
         limit=limit,
@@ -1677,7 +1679,6 @@ async def admin_create_redeem_codes(
         session,
         credits=body.credits,
         count=body.count,
-        prefix=body.prefix,
         batch_name=body.batch_name,
         max_uses=body.max_uses,
         expires_at=body.expires_at,

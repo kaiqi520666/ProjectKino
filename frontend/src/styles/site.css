@@ -9,7 +9,7 @@
 .site-desktop-nav a { color: #bfc0c7; font-size: 14px; transition: color .15s; }
 .site-desktop-nav a:hover, .site-footer a:hover { color: var(--color-gold-soft); }
 .site-header-actions { display: flex; align-items: center; gap: 12px; }
-.site-header-actions > .ui-button--primary { min-height: 36px; padding-inline: 15px; font-size: var(--font-size-action); }
+.site-header-actions > .ui-button--primary { min-height: var(--control-height-sm); padding-inline: 15px; font-size: var(--font-size-action); }
 .site-mobile-menu { display: none; }
 .site-mobile-nav { display: grid; gap: 4px; }
 .site-mobile-nav > a, .site-mobile-nav > button { display: flex; align-items: center; justify-content: space-between; min-height: 48px; padding: 10px 0; border: 0; border-bottom: 1px solid var(--border-subtle); background: transparent; text-align: left; font-size: 15px; color: var(--color-text); }

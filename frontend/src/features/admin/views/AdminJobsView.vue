@@ -546,10 +546,10 @@ onMounted(() => {
 
     <form class="admin-jobs-toolbar" @submit.prevent="submitSearch">
       <div class="admin-jobs-search-wrap">
-        <Search :size="15" class="admin-jobs-search-icon" aria-hidden="true" />
+        <Search :size="14" class="admin-jobs-search-icon" aria-hidden="true" />
         <input
           v-model="filters.q"
-          class="ui-input admin-jobs-search-input"
+          class="ui-input ui-input--sm admin-jobs-search-input"
           type="text"
           placeholder="搜索用户名或邮箱"
           aria-label="搜索用户名或邮箱"
@@ -568,6 +568,7 @@ onMounted(() => {
       <div class="admin-jobs-select">
         <UiSelect
           :model-value="filters.status"
+          size="sm"
           :options="statusOptions"
           placeholder="任务状态"
           @update:model-value="handleStatusChange"
@@ -577,6 +578,7 @@ onMounted(() => {
       <div class="admin-jobs-select admin-jobs-select--type">
         <UiSelect
           v-model="filters.jobType"
+          size="sm"
           :options="jobTypeOptions"
           placeholder="任务类型"
           @update:model-value="loadJobs(true)"
@@ -585,6 +587,7 @@ onMounted(() => {
 
       <UiDateRangePicker
         v-model="filters.dateRange"
+        size="sm"
         inline-presets
         @change="loadJobs(true)"
       />
@@ -697,34 +700,34 @@ onMounted(() => {
           <button
             v-if="getJobPreviewMedia(row)"
             type="button"
-            class="ui-button ui-button--outline ui-button--sm"
+            class="ui-button ui-button--outline ui-button--xs"
             :aria-label="getJobPreviewMedia(row)?.kind === 'video' ? '预览视频' : '预览图片'"
             @click="openMediaPreview(row)"
           >
-            <Play v-if="getJobPreviewMedia(row)?.kind === 'video'" :size="13" aria-hidden="true" />
-            <ImageIcon v-else :size="13" aria-hidden="true" />
+            <Play v-if="getJobPreviewMedia(row)?.kind === 'video'" :size="12" aria-hidden="true" />
+            <ImageIcon v-else :size="12" aria-hidden="true" />
             <span>预览</span>
           </button>
-          <button type="button" class="ui-button ui-button--ghost ui-button--sm" @click="openDetail(row)">
-            <Eye :size="13" />
+          <button type="button" class="ui-button ui-button--ghost ui-button--xs" @click="openDetail(row)">
+            <Eye :size="12" />
             <span>详情</span>
           </button>
           <button
             v-if="canRescue(row)"
             type="button"
-            class="ui-button ui-button--outline ui-button--sm"
+            class="ui-button ui-button--outline ui-button--xs"
             @click="openRescue(row)"
           >
-            <Wrench :size="13" />
+            <Wrench :size="12" />
             <span>补录成片</span>
           </button>
           <button
             v-if="canRefund(row)"
             type="button"
-            class="ui-button ui-button--danger ui-button--sm"
+            class="ui-button ui-button--danger ui-button--xs"
             @click="openRefund(row)"
           >
-            <RotateCcw :size="13" />
+            <RotateCcw :size="12" />
             <span>退还积分</span>
           </button>
         </div>
@@ -971,7 +974,7 @@ onMounted(() => {
 }
 
 .admin-jobs-reset {
-  height: 42px;
+  height: var(--control-height-sm);
 }
 
 .admin-jobs-time {
@@ -1069,13 +1072,14 @@ onMounted(() => {
 .admin-spec-chip {
   display: inline-flex;
   align-items: center;
-  padding: 1px 6px;
-  border-radius: 4px;
+  height: var(--badge-height);
+  padding: 0 7px;
+  border-radius: var(--radius-badge);
   border: 1px solid var(--border-subtle);
   background: rgb(255 255 255 / 4%);
   color: var(--color-muted);
   font-size: 11px;
-  line-height: 1.5;
+  line-height: 1;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }

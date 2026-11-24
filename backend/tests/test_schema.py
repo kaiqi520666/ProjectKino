@@ -10,6 +10,8 @@ from app.db.base import Base
 def test_all_v1_tables_registered_in_metadata():
     expected = {
         "users",
+        "announcements",
+        "art_styles",
         "system_settings",
         "ai_providers",
         "ai_models",
@@ -47,7 +49,7 @@ def test_alembic_has_single_head():
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
     assert len(heads) == 1
-    assert heads[0] == "0009_redeem_codes"
+    assert heads[0] == "0011_art_styles"
 
 
 def test_studio_media_history_and_variant_columns_registered():

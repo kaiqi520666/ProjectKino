@@ -1,5 +1,3 @@
-import { artStyles } from '../studio/components/art-styles.ts'
-
 export interface ProjectProgressInput {
   scriptConfirmed: boolean
   episodeCount: number
@@ -25,12 +23,8 @@ export interface ProjectProgressState {
 export interface ProjectCoverInput {
   coverUrl?: string | null
   autoCoverUrl?: string | null
+  styleCoverUrl?: string | null
   visualStyle?: string | null
-}
-
-export function styleCoverUrl(style?: string | null): string {
-  const matched = artStyles.find((item) => item.value === style)
-  return `/images/art-styles/${matched?.value ?? 'live-action'}.webp`
 }
 
 export function resolveProjectCoverUrl(project: ProjectCoverInput): {
@@ -46,7 +40,8 @@ export function resolveProjectCoverUrl(project: ProjectCoverInput): {
   if (auto) {
     return { url: auto, isCustom: false, isAuto: true }
   }
-  return { url: styleCoverUrl(project.visualStyle), isCustom: false, isAuto: false }
+  const styleCover = project.styleCoverUrl?.trim() || ''
+  return { url: styleCover, isCustom: false, isAuto: false }
 }
 
 export function resolveProjectProgress(input: ProjectProgressInput): ProjectProgressState {

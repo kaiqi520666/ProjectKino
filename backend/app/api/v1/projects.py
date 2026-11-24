@@ -10,6 +10,7 @@ from sqlalchemy.orm import undefer
 from app.core.errors import AppError
 from app.core.schemas import ApiResponse
 from app.db.session import get_session
+from app.modules.art_styles.service import resolve_art_style_prompt
 from app.modules.auth.deps import get_current_user
 from app.modules.auth.models import User
 from app.modules.canvas.generation import find_removed_prompt_refs
@@ -168,6 +169,12 @@ async def create_and_generate_project(
 ) -> ApiResponse[ProjectJobAcceptedOut]:
     await assert_llm_balance_positive(session, user.id)
     settings_dict = body.settings.model_dump(by_alias=True)
+    if not str(settings_dict.get("visualStyleLabel") or "").strip():
+        resolved_prompt = await resolve_art_style_prompt(
+            session, str(settings_dict.get("visualStyle") or "")
+        )
+        if resolved_prompt:
+            settings_dict["visualStyleLabel"] = resolved_prompt
     project = Project(
         user_id=user.id,
         name=body.settings.name.strip(),

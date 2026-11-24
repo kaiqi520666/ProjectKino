@@ -222,7 +222,7 @@ function moveStep(index: number, delta: -1 | 1) {
 
       <div class="ui-dt-pager">
         <div class="ui-dt-size">
-          <UiSelect v-model="pageSizeModel" :options="sizeSelectOptions" placeholder="每页条数" />
+          <UiSelect v-model="pageSizeModel" size="sm" :options="sizeSelectOptions" placeholder="每页条数" />
         </div>
 
         <div class="ui-dt-pages" role="navigation" aria-label="分页导航">
@@ -299,7 +299,8 @@ function moveStep(index: number, delta: -1 | 1) {
 }
 
 .ui-dt-table th {
-  padding: 11px 14px;
+  height: var(--table-head-height);
+  padding: 0 14px;
   font-weight: 500;
   font-size: 12px;
   color: var(--color-muted);
@@ -309,17 +310,10 @@ function moveStep(index: number, delta: -1 | 1) {
 }
 
 .ui-dt-table td {
-  padding: 12px 14px;
+  height: var(--table-row-height);
+  padding: 0 14px;
   border-bottom: 1px solid var(--border-subtle);
   vertical-align: middle;
-}
-
-.ui-dt--compact .ui-dt-table th {
-  padding: 9px 12px;
-}
-
-.ui-dt--compact .ui-dt-table td {
-  padding: 9px 12px;
 }
 
 .ui-dt-table tbody tr:last-child td {
@@ -427,13 +421,6 @@ tr.is-draggable:hover .ui-dt-grip {
   width: 112px;
 }
 
-.ui-dt-size :deep(.ui-select-trigger) {
-  min-height: 32px;
-  padding: 0 10px;
-  font-size: 12px;
-  border-radius: 8px;
-}
-
 .ui-dt-pages {
   display: flex;
   align-items: center;
@@ -444,10 +431,10 @@ tr.is-draggable:hover .ui-dt-grip {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 32px;
-  height: 32px;
+  min-width: var(--control-height-sm);
+  height: var(--control-height-sm);
   padding: 0 8px;
-  border-radius: 8px;
+  border-radius: var(--radius-control-sm);
   border: 1px solid var(--border-control);
   background: rgb(255 255 255 / 2.5%);
   color: var(--color-muted);
