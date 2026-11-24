@@ -120,6 +120,7 @@ export const useStudioStore = defineStore('studio', () => {
         prev.coverUrl = summary.coverUrl ?? null
         prev.coverKey = summary.coverKey ?? null
         prev.autoCoverUrl = summary.autoCoverUrl ?? prev.autoCoverUrl ?? null
+        prev.updatedAt = summary.updatedAt
         prev.progressStats = progressStats
         prev.persisted = true
         next.push(prev)
@@ -133,6 +134,7 @@ export const useStudioStore = defineStore('studio', () => {
           coverUrl: summary.coverUrl ?? null,
           coverKey: summary.coverKey ?? null,
           autoCoverUrl: summary.autoCoverUrl ?? null,
+          updatedAt: summary.updatedAt,
           progressStats,
           scriptConfirmed: summary.scriptConfirmed,
         })

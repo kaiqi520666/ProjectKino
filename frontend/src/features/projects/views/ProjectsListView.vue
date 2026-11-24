@@ -1,18 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, useTemplateRef } from 'vue'
+import { computed, onMounted, ref, useTemplateRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
-  CalendarDays,
   Clapperboard,
-  Film,
   FolderOpen,
-  Layers,
-  Pencil,
   Plus,
   RotateCcw,
   Save,
   Search,
-  Trash2,
   Upload,
   X,
 } from 'lucide-vue-next'
@@ -20,6 +15,7 @@ import EmptyState from '@/components/business/EmptyState.vue'
 import UiButton from '@/components/ui/UiButton.vue'
 import UiDialog from '@/components/ui/UiDialog.vue'
 import UiInput from '@/components/ui/UiInput.vue'
+import UiPagination from '@/components/ui/UiPagination.vue'
 import WorkspacePageHeader from '@/components/workspace/WorkspacePageHeader.vue'
 import AssetLibraryDialog from '@/features/assets/AssetLibraryDialog.vue'
 import type { AssetLibraryItem } from '@/features/assets/asset-library-types'
@@ -33,8 +29,8 @@ import {
 import type { ProjectSummaryOut } from '@/features/studio/api-types'
 import { artStyles } from '@/features/studio/components/art-styles'
 import { useStudioStore } from '@/features/studio/studio-store'
-import { formatDateTime } from '@/lib/format'
 import { useUiStore } from '@/stores/ui'
+import ProjectCard from '../components/ProjectCard.vue'
 import {
   resolveProjectCoverUrl,
   resolveProjectProgress,
@@ -48,7 +44,8 @@ const ui = useUiStore()
 const loading = ref(false)
 const projects = ref<ProjectSummaryOut[]>([])
 const keyword = ref('')
-const failedCoverIds = ref<Set<string>>(new Set())
+const page = ref(1)
+const pageSize = ref(12)
 
 const editOpen = ref(false)
 const editing = ref(false)
@@ -72,6 +69,15 @@ const filteredProjects = computed(() => {
   return projects.value.filter((item) => item.name.toLowerCase().includes(q))
 })
 
+const pagedProjects = computed(() => {
+  const start = (page.value - 1) * pageSize.value
+  return filteredProjects.value.slice(start, start + pageSize.value)
+})
+
+watch(keyword, () => {
+  page.value = 1
+})
+
 const editPreviewCoverUrl = computed(() => {
   const target = projectToEdit.value
   if (!target) return ''
@@ -87,21 +93,11 @@ function styleLabel(style?: string): string {
 }
 
 function projectCoverUrl(project: ProjectSummaryOut): string {
-  if (failedCoverIds.value.has(project.id)) {
-    return styleCoverUrl(project.settings.visualStyle)
-  }
   return resolveProjectCoverUrl({
     coverUrl: project.coverUrl,
     autoCoverUrl: project.autoCoverUrl,
     visualStyle: project.settings.visualStyle,
   }).url
-}
-
-function handleCoverError(projectId: string) {
-  if (failedCoverIds.value.has(projectId)) return
-  const next = new Set(failedCoverIds.value)
-  next.add(projectId)
-  failedCoverIds.value = next
 }
 
 function projectProgress(project: ProjectSummaryOut) {
@@ -123,7 +119,6 @@ async function fetchProjects() {
   try {
     const list = await listProjects()
     projects.value = list
-    failedCoverIds.value = new Set()
     studio.syncProjectSummaries(list)
   } catch (error) {
     ui.notify(apiErrorMessage(error), 'error')
@@ -187,9 +182,6 @@ async function submitEdit() {
       coverUrl: draftCoverUrl.value,
       coverKey: draftCoverKey.value,
     })
-    const nextFailed = new Set(failedCoverIds.value)
-    nextFailed.delete(target.id)
-    failedCoverIds.value = nextFailed
     projects.value = projects.value.map((item) =>
       item.id === target.id
         ? {
@@ -279,72 +271,35 @@ async function submitDelete() {
 
     <p v-else-if="!filteredProjects.length" class="projects-status">未找到匹配项目</p>
 
-    <ul v-else class="projects-grid" aria-label="短剧项目列表">
-      <li v-for="project in filteredProjects" :key="project.id" class="project-card-item">
-        <RouterLink
-          class="project-card"
-          :to="{ name: projectProgress(project).targetRoute, params: { projectId: project.id } }"
-        >
-          <div class="project-card-cover">
-            <img
-              :src="projectCoverUrl(project)"
-              alt=""
-              loading="lazy"
-              @error="handleCoverError(project.id)"
-            />
-            <span class="project-card-style">{{ styleLabel(project.settings.visualStyle) }}</span>
-            <span class="project-card-status" :class="`is-${projectProgress(project).tone}`">
-              {{ projectProgress(project).label }}
-            </span>
-            <span class="project-card-progress" aria-hidden="true">
-              <span
-                class="project-card-progress-fill"
-                :class="`is-${projectProgress(project).tone}`"
-                :style="{ width: `${projectProgress(project).percent}%` }"
-              ></span>
-            </span>
-          </div>
-          <div class="project-card-body">
-            <h3 :title="project.name">{{ project.name }}</h3>
-            <div class="project-card-stats">
-              <span>
-                <Film :size="13" aria-hidden="true" />
-                {{ project.plannedEpisodeCount ?? project.settings.episodeCount ?? project.episodeCount }} 集
-              </span>
-              <span>
-                <Layers :size="13" aria-hidden="true" />
-                {{ project.assetCount }} 资产
-              </span>
-              <span>{{ project.settings.ratio || '16:9' }}</span>
-            </div>
-            <div class="project-card-meta">
-              <span><CalendarDays :size="13" aria-hidden="true" />{{ formatDateTime(project.updatedAt) }}</span>
-            </div>
-          </div>
-        </RouterLink>
+    <template v-else>
+      <ul class="projects-grid" aria-label="短剧项目列表">
+        <ProjectCard
+          v-for="project in pagedProjects"
+          :key="project.id"
+          :id="project.id"
+          :name="project.name"
+          :cover-url="projectCoverUrl(project)"
+          :fallback-cover-url="styleCoverUrl(project.settings.visualStyle)"
+          :style-label="styleLabel(project.settings.visualStyle)"
+          :ratio="project.settings.ratio || '16:9'"
+          :episode-count="project.plannedEpisodeCount ?? project.settings.episodeCount ?? project.episodeCount"
+          :asset-count="project.assetCount"
+          :updated-at="project.updatedAt"
+          :progress="projectProgress(project)"
+          show-edit
+          @edit="openEdit(project)"
+          @delete="confirmDelete(project)"
+        />
+      </ul>
 
-        <div class="project-card-actions">
-          <button
-            type="button"
-            class="project-card-action"
-            :aria-label="`编辑项目 ${project.name}`"
-            title="编辑名称与封面"
-            @click.stop.prevent="openEdit(project)"
-          >
-            <Pencil :size="13" aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            class="project-card-action project-card-action--danger"
-            :aria-label="`删除 ${project.name}`"
-            title="删除"
-            @click.stop.prevent="confirmDelete(project)"
-          >
-            <Trash2 :size="13" aria-hidden="true" />
-          </button>
-        </div>
-      </li>
-    </ul>
+      <UiPagination
+        v-model:page="page"
+        v-model:page-size="pageSize"
+        :total="filteredProjects.length"
+        :page-size-options="[12, 24, 48]"
+        item-label="个项目"
+      />
+    </template>
 
     <UiDialog v-model:open="editOpen" title="编辑项目" description="修改项目名称或自定义项目封面">
       <form id="project-edit-form" class="project-form" @submit.prevent="submitEdit">
@@ -458,45 +413,19 @@ async function submitDelete() {
 .projects-search-clear { display: grid; place-items: center; width: 18px; height: 18px; border: 0; background: transparent; color: var(--color-muted); cursor: pointer; }
 .projects-search-clear:hover { color: var(--color-text); }
 .projects-status { padding: 48px 0; text-align: center; color: var(--color-muted); font-size: var(--font-size-body); }
-.projects-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr)); gap: 16px; margin: 20px 0 0; padding: 0; list-style: none; }
-.project-card-item { position: relative; min-width: 0; }
-.project-card { display: block; overflow: hidden; min-width: 0; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--color-surface); color: inherit; text-decoration: none; transition: border-color .15s; }
-.project-card:hover { border-color: var(--focus-ring); }
-.project-card-actions { position: absolute; top: 8px; right: 8px; z-index: 2; display: inline-flex; gap: 5px; opacity: 0; transition: opacity .15s; }
-.project-card-item:hover .project-card-actions,
-.project-card-item:focus-within .project-card-actions { opacity: 1; }
-.project-card-action { display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid rgb(255 255 255 / 14%); border-radius: 6px; background: rgb(9 10 13 / 80%); color: #e5e2dc; cursor: pointer; backdrop-filter: blur(6px); transition: color .15s, border-color .15s; }
-.project-card-action:hover { color: var(--color-gold-soft); border-color: rgb(240 184 75 / 45%); }
-.project-card-action--danger:hover { color: var(--color-error); border-color: rgb(239 146 146 / 45%); }
-.project-card-cover { position: relative; overflow: hidden; aspect-ratio: 16 / 8; background: var(--color-elevated); }
-.project-card-cover::after { position: absolute; inset: 0; background: linear-gradient(180deg, transparent 32%, rgb(5 6 8 / 72%)); content: ''; pointer-events: none; }
-.project-card-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.project-card-style { position: absolute; left: 10px; bottom: 10px; z-index: 1; padding: 2px 7px; border-radius: 5px; background: rgb(9 10 13 / 78%); color: #e5e2dc; font-size: 11px; }
-.project-card-status { position: absolute; right: 10px; bottom: 10px; z-index: 1; padding: 2px 7px; border: 1px solid rgb(255 255 255 / 14%); border-radius: 5px; background: rgb(9 10 13 / 82%); color: var(--color-muted); font-size: 11px; }
-.project-card-status.is-ready { border-color: rgb(240 184 75 / 32%); color: var(--color-gold-soft); }
-.project-card-status.is-progress { border-color: rgb(96 165 250 / 38%); color: #93c5fd; }
-.project-card-status.is-done { border-color: rgb(74 222 128 / 38%); color: var(--color-success); }
-.project-card-progress { position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; height: 2px; background: rgb(255 255 255 / 10%); }
-.project-card-progress-fill { display: block; height: 100%; background: var(--color-muted); transition: width .25s ease; }
-.project-card-progress-fill.is-ready { background: var(--color-gold); }
-.project-card-progress-fill.is-progress { background: #60a5fa; }
-.project-card-progress-fill.is-done { background: var(--color-success); }
-.project-card-body { padding: 14px; }
-.project-card-body h3 { margin: 0; overflow: hidden; color: var(--color-text); font-size: var(--font-size-body); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-.project-card-stats { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 8px 0 12px; color: var(--color-muted); font-size: 12px; }
-.project-card-stats span { display: inline-flex; align-items: center; gap: 4px; }
-.project-card-meta { display: flex; align-items: center; padding-top: 10px; border-top: 1px solid var(--border-subtle); color: var(--color-muted); font-size: 11px; }
-.project-card-meta span { display: inline-flex; align-items: center; gap: 5px; }
+.projects-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; margin: 20px 0 0; padding: 0; list-style: none; }
 .project-form { display: grid; gap: 14px; }
 .project-cover-field { display: grid; gap: 8px; }
 .project-cover-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .project-cover-hint { color: var(--color-muted); font-size: 12px; }
-.project-cover-preview { overflow: hidden; aspect-ratio: 16 / 8; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--color-elevated); }
+.project-cover-preview { overflow: hidden; aspect-ratio: 16 / 9; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--color-elevated); }
 .project-cover-preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .project-cover-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+@media (max-width: 1360px) { .projects-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 960px) { .projects-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; } }
 @media (max-width: 640px) {
   .projects-page { padding: 18px 16px 32px; }
   .projects-search { width: 100%; }
-  .project-card-actions { opacity: 1; }
+  .projects-grid { grid-template-columns: minmax(0, 1fr); }
 }
 </style>

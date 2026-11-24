@@ -35,6 +35,7 @@ export interface StudioProject {
   coverUrl?: string | null
   coverKey?: string | null
   autoCoverUrl?: string | null
+  updatedAt?: string
   progressStats?: StudioProjectProgressStats
   scriptConfirmed: boolean
   scriptResult?: ScriptResult
